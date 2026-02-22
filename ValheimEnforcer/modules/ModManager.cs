@@ -25,11 +25,12 @@ namespace ValheimEnforcer.modules {
             LoadConfig(File.ReadAllText(ValConfig.ModsConfigFilePath));
 
             foreach (KeyValuePair<string, BaseUnityPlugin> plugin in ActiveMods) {
+                Logger.LogInfo($"Found active mod: {plugin.Key} v{plugin.Value.Info.Metadata.Version}");
                 if (ModSettings.RequiredMods.ContainsKey(plugin.Key)) { continue; }
                 if (ModSettings.AdminOnlyMods.ContainsKey(plugin.Key)) { continue; }
                 if (ModSettings.OptionalMods.ContainsKey(plugin.Key)) { continue; }
 
-                if (ActiveMods.ContainsKey(plugin.Key) == false) {
+                if (ModSettings.ActiveMods.ContainsKey(plugin.Key) == false) {
                     Logger.LogDebug($"Adding Mod {plugin.Key} not found in modlist");
                     ModSettings.ActiveMods.Add(plugin.Key, new DataObjects.Mod() { EnforceVersion = false, Version = plugin.Value.Info.Metadata.Version.ToString(), PluginID = plugin.Value.Info.Metadata.GUID, Name = plugin.Value.Info.Metadata.Name });
                 }

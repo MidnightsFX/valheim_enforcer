@@ -30,7 +30,7 @@ namespace ValheimEnforcer
             Log = this.Logger;
             cfg = new ValConfig(Config);
             // Just needs to run AFTER all mods are loaded
-            ItemManager.OnItemsRegisteredFejd += ModManager.SetModsActive;
+            PrefabManager.OnPrefabsRegistered += ModManager.SetModsActive;
 
             Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
         }

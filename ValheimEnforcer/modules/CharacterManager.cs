@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using UnityEngine;
 using ValheimEnforcer.common;
 
 namespace ValheimEnforcer.modules {
@@ -22,8 +23,28 @@ namespace ValheimEnforcer.modules {
             PlayerCharacter = character;
         }
 
+        internal static string GetPlayerID(Player player) {
+            List<ZNet.PlayerInfo> zplayerInfo = ZNet.instance.GetPlayerList();
+            if (zplayerInfo.Count == 1) {
+                return zplayerInfo.First().m_userInfo.m_id.m_userID;
+            } else {
+                foreach (ZNet.PlayerInfo playerInfo in zplayerInfo) {
+                    Logger.LogDebug($"Checking player {playerInfo.m_userInfo.m_displayName} with ID {playerInfo.m_userInfo.m_id.m_userID} against local player {player.GetPlayerName()}");
+                    if (playerInfo.m_userInfo.m_displayName == player.GetPlayerName()) {
+                        return playerInfo.m_userInfo.m_id.m_userID;
+                    }
+                }
+            }
+            Logger.LogWarning($"Failed to find matching player ID for local player {player.GetPlayerName()}. Defaulting to ZDO UID as player ID.");
+            //return ZDOMan.instance.GetPeer(player.m_nview.GetZDO().m_uid.UserID).m_peer.m_socket.GetEndPointString();
+            // Uses ZDO UID as fallback if this is a singleplayer game
+            return player.m_nview.GetZDO().m_uid.ToString();
+        }
+
         private static void LoadAndValidatePlayer(Player player) {
-            string playerID = $"{player.GetPlayerID()}";
+            
+
+            string playerID = GetPlayerID(player);
             string PlayerName = player.GetPlayerName();
 
             Logger.LogInfo($"Player {PlayerName} with ID {playerID} validating character data.");
@@ -69,13 +90,17 @@ namespace ValheimEnforcer.modules {
             }
 
             if (ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value) {
+                List<ItemDrop.ItemData> removeItems = new List<ItemDrop.ItemData>();
                 player.m_inventory.GetAllItems().ForEach(item => {
                     if (!savableChar.PlayerItems.Any(savedItem => savedItem.prefabName == item.m_dropPrefab.name && savedItem.m_stack == item.m_stack)) {
                         Logger.LogInfo($"Removing non-tracked item {item.m_dropPrefab.name}x{item.m_stack} from player {savableChar.Name}");
                         savableChar.AddConfiscatedItem(item);
-                        player.GetInventory().RemoveItem(item);
+                        removeItems.Add(item);
                     }
                 });
+                foreach (ItemDrop.ItemData item in removeItems) {
+                    player.GetInventory().RemoveItem(item);
+                }
             }
             Logger.LogDebug($"Validated player items.");
 
@@ -114,7 +139,7 @@ namespace ValheimEnforcer.modules {
                     playerID = PlayerCharacter.HostID;
                     PlayerName = PlayerCharacter.Name;
                 } else {
-                    playerID = ZNet.instance.m_hostSocket.GetHostName();
+                    playerID = GetPlayerID(__instance);
                     PlayerName = __instance.GetPlayerName();
                 }
                 Logger.LogDebug($"Saving character for player {PlayerName} with id {playerID}");

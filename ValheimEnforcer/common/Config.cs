@@ -168,9 +168,10 @@ namespace ValheimEnforcer {
         }
 
         internal static ZPackage SendSavedCharacter(ZNetPeer peer) {
-            Logger.LogDebug($"Sending saved character data to player {peer.m_playerName} with ID: {peer.m_characterID.UserID}");
-            var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, $"{peer.m_characterID.UserID}");
-            string fullpath = Path.Combine(charFile, $"{peer.m_characterID.UserID}.yaml");
+            string id = peer.m_socket.GetEndPointString();
+            Logger.LogInfo($"Sending saved character data to player {peer.m_playerName} with ID: {id}");
+            var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, $"{id}");
+            string fullpath = Path.Combine(charFile, $"{id}.yaml");
             if (!File.Exists(fullpath)) {
                 return new ZPackage();
             }
