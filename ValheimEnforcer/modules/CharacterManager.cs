@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using ValheimEnforcer.common;
 
 namespace ValheimEnforcer.modules {
@@ -20,25 +21,34 @@ namespace ValheimEnforcer.modules {
 
         internal static void SetPlayerCharacter(DataObjects.Character character) {
             if (character == null) { return; }
+            Logger.LogDebug("Set character from Saved server data");
             PlayerCharacter = character;
         }
 
         internal static string GetPlayerID(Player player) {
             List<ZNet.PlayerInfo> zplayerInfo = ZNet.instance.GetPlayerList();
+            string selectedID = "";
             if (zplayerInfo.Count == 1) {
-                return zplayerInfo.First().m_userInfo.m_id.m_userID;
+                selectedID = zplayerInfo.First().m_userInfo.m_id.m_userID;
             } else {
                 foreach (ZNet.PlayerInfo playerInfo in zplayerInfo) {
-                    Logger.LogDebug($"Checking player {playerInfo.m_userInfo.m_displayName} with ID {playerInfo.m_userInfo.m_id.m_userID} against local player {player.GetPlayerName()}");
-                    if (playerInfo.m_userInfo.m_displayName == player.GetPlayerName()) {
-                        return playerInfo.m_userInfo.m_id.m_userID;
+                    Logger.LogDebug($"Checking player {playerInfo.m_characterID} with ID {playerInfo.m_userInfo.m_id.m_userID} against local player {player.m_nview.GetZDO().m_uid}");
+                    if (playerInfo.m_characterID == player.m_nview.GetZDO().m_uid) {
+                        selectedID = player.GetPlayerName();
+                        break;
                     }
                 }
             }
-            Logger.LogWarning($"Failed to find matching player ID for local player {player.GetPlayerName()}. Defaulting to ZDO UID as player ID.");
-            //return ZDOMan.instance.GetPeer(player.m_nview.GetZDO().m_uid.UserID).m_peer.m_socket.GetEndPointString();
-            // Uses ZDO UID as fallback if this is a singleplayer game
-            return player.m_nview.GetZDO().m_uid.ToString();
+
+            if (selectedID.Length < 1) {
+                Logger.LogWarning($"Failed to find matching player ID for local player {player.GetPlayerName()}. Defaulting to ZDO UID as player ID.");
+            }
+            selectedID = player.m_nview.GetZDO().m_uid.ToString();
+            if (selectedID.Contains(":")) {
+                Logger.LogDebug($"Player ID contained invalid character : removing.");
+                selectedID = selectedID.Split(':')[0];
+            }
+            return selectedID;
         }
 
         private static void LoadAndValidatePlayer(Player player) {
@@ -51,7 +61,8 @@ namespace ValheimEnforcer.modules {
             // If the character has already been connected to the server its data was already transferred during the connection process.
             DataObjects.Character savableChar = PlayerCharacter;
 
-            if (PlayerCharacter == null) {
+            if (savableChar == null) {
+
                 // Gate loading local character based on if there is no dedicated server?
                 Logger.LogInfo($"No existing character data found for player {PlayerName} with ID {playerID}. Attempting to load from file.");
                 savableChar = ValConfig.LoadCharacterFromFile(playerID, PlayerName);
@@ -92,6 +103,7 @@ namespace ValheimEnforcer.modules {
             if (ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value) {
                 List<ItemDrop.ItemData> removeItems = new List<ItemDrop.ItemData>();
                 player.m_inventory.GetAllItems().ForEach(item => {
+                    Logger.LogDebug($"Checking player item: {item.m_dropPrefab.name}");
                     if (!savableChar.PlayerItems.Any(savedItem => savedItem.prefabName == item.m_dropPrefab.name && savedItem.m_stack == item.m_stack)) {
                         Logger.LogInfo($"Removing non-tracked item {item.m_dropPrefab.name}x{item.m_stack} from player {savableChar.Name}");
                         savableChar.AddConfiscatedItem(item);
@@ -130,7 +142,7 @@ namespace ValheimEnforcer.modules {
             [HarmonyPrefix]
             [HarmonyPriority(Priority.High)]
             private static void PlayerSave(Player __instance) {
-                if (__instance == null) { return; }
+                if (__instance == null || SceneManager.GetActiveScene().name.Equals("main") == false) { return; }
                 string playerID = "";
                 string PlayerName = "";
                 DataObjects.Character savableChar = null;
@@ -173,7 +185,7 @@ namespace ValheimEnforcer.modules {
                 }
                 ValConfig.WriteCharacterToFile(playerID, savableChar);
 
-                if (ZNet.instance.GetServerPeer() != null) {
+                if (ZNet.instance != null && ZNet.instance.GetServerPeer() != null) {
                     ValConfig.CharacterSaveRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
                 }
             }

@@ -197,6 +197,7 @@ namespace ValheimEnforcer {
 
         public static IEnumerator OnClientReceiveCharacter(long sender, ZPackage package) {
             DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(package.ReadString());
+            Logger.LogDebug("Recieved Player character data from server.");
             CharacterManager.SetPlayerCharacter(chara);
             yield break;
         }
