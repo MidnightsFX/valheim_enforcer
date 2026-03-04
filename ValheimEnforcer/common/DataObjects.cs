@@ -15,12 +15,21 @@ namespace ValheimEnforcer.common {
         public static IDeserializer yamldeserializer = new DeserializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).Build();
         public static ISerializer yamlserializer = new SerializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitDefaults).Build();
 
+        public enum VersionStrictnessType {
+            None = 0,  /// <summary>No version checking</summary>
+            Patch = 1, /// <summary>Patch version must match (X.Y.Z)</summary>  
+            Minor = 2, /// <summary>Minor version must match, patch can differ (X.Y)</summary>     
+            Major = 3, /// <summary>Major version must match, minor and patch can differ (X)</summary>
+        }
+
         public class Mod {
             public string PluginID { get; set; }
             public string Version { get; set; }
             public string Name { get; set; }
             [DefaultValue(false)]
             public bool EnforceVersion { get; set; }
+            [DefaultValue("Minor")]
+            public string VersionStrictness { get; set; } = "Minor";
         }
 
         public class Mods {
@@ -28,6 +37,24 @@ namespace ValheimEnforcer.common {
             public Dictionary<string, Mod> RequiredMods { get; set; } = new Dictionary<string, Mod>();
             public Dictionary<string, Mod> OptionalMods { get; set; } = new Dictionary<string, Mod>();
             public Dictionary<string, Mod> AdminOnlyMods { get; set; } = new Dictionary<string, Mod>();
+            public Dictionary<string, Mod> ServerOnlyMods { get; set; } = new Dictionary<string, Mod>();
+
+            public ZPackage ToZPackage() {
+                string stringified = DataObjects.yamlserializer.Serialize(this);
+                ZPackage package = new ZPackage();
+                package.Write(stringified);
+                return package;
+            }
+
+            public Mods FromZPackage(ZPackage incoming) {
+                Mods mods = DataObjects.yamldeserializer.Deserialize<Mods>(incoming.ReadString());
+                ActiveMods = mods.ActiveMods;
+                RequiredMods = mods.RequiredMods;
+                OptionalMods = mods.OptionalMods;
+                AdminOnlyMods = mods.AdminOnlyMods;
+                ServerOnlyMods = mods.ServerOnlyMods;
+                return mods;
+            }
         }
 
         [Serializable]

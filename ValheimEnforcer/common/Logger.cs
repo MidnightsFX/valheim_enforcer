@@ -7,12 +7,15 @@ namespace ValheimEnforcer {
         public static LogLevel Level = LogLevel.Info;
 
         public static void EnableDebugLogging(object sender, EventArgs e) {
+            CheckEnableDebugLogging();
+        }
+
+        public static void CheckEnableDebugLogging() {
             if (ValConfig.EnableDebugMode.Value) {
                 Level = LogLevel.Debug;
             } else {
                 Level = LogLevel.Info;
             }
-            // set log level
         }
 
         public static void SetDebugLogging(bool state) {

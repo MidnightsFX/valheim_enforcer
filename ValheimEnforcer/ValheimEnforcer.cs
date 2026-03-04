@@ -30,9 +30,13 @@ namespace ValheimEnforcer
             Log = this.Logger;
             cfg = new ValConfig(Config);
             // Just needs to run AFTER all mods are loaded
+            // For client
             PrefabManager.OnPrefabsRegistered += ModManager.SetModsActive;
+            // For server
+            PrefabManager.OnVanillaPrefabsAvailable += ModManager.SetModsActive;
+            GUIManager.OnCustomGUIAvailable += ModManager.AddErrorMessageDetailsForMenu;
 
-            Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
+            Harmony harmony = Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
         }
 
     }

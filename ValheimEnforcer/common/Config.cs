@@ -15,10 +15,12 @@ namespace ValheimEnforcer {
         public static ConfigFile cfg;
         public static ConfigEntry<bool> EnableDebugMode;
         public static ConfigEntry<bool> UpdateLoadedModsOnStartup;
+        public static ConfigEntry<bool> AutoAddModsToRequired;
         public static ConfigEntry<bool> RemoveNontrackedItemsFromJoiningPlayers;
         public static ConfigEntry<bool> PreventExternalSkillRaises;
         public static ConfigEntry<bool> NewCharactersSkillsCleared;
         public static ConfigEntry<bool> NewCharactersRemoveExtraItems;
+        public static ConfigEntry<bool> NewCharacterSetSkillsToZero;
 
         internal const string ModsFileName = "Mods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
@@ -26,12 +28,7 @@ namespace ValheimEnforcer {
         internal static String ModsConfigFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, ModsFileName);
         internal static String CharacterFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder);
 
-        internal static CustomRPC ModEnforcmentRPC;
         internal static CustomRPC CharacterSaveRPC;
-
-        
-        //public static ConfigEntry<List<string>> PublicGreyListMods;
-        //public static ConfigEntry<List<string>> AdminOnlyMods;
 
         public ValConfig(ConfigFile cf) {
             // ensure all the config values are created
@@ -41,10 +38,8 @@ namespace ValheimEnforcer {
             Logger.SetDebugLogging(EnableDebugMode.Value);
             SetupMainFileWatcher();
 
-            ModEnforcmentRPC = NetworkManager.Instance.AddRPC("VENFORCE_MODS", OnServerRecieveModlist, OnClientReceiveModlist);
             CharacterSaveRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHAR", OnServerRecieveCharacter, OnClientReceiveCharacter);
 
-            SynchronizationManager.Instance.AddInitialSynchronization(ModEnforcmentRPC, SendModConfigs);
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
             LoadYamlConfigs(new Dictionary<string, Action<string>>() {{ ModsConfigFilePath, CreateModsFile }});
@@ -57,21 +52,23 @@ namespace ValheimEnforcer {
                 null,
                 new ConfigurationManagerAttributes { IsAdvanced = true }));
             EnableDebugMode.SettingChanged += Logger.EnableDebugLogging;
+            Logger.CheckEnableDebugLogging();
 
             UpdateLoadedModsOnStartup = BindServerConfig("Mods", "UpdateLoadedModsOnStartup", true, "Whether or not the mod configuration file will update its loaded mods once they are detected.");
+            AutoAddModsToRequired = BindServerConfig("Mods", "AutoAddModsToRequired", true, "If true, automatically adds mods not found in the optional, admin, or server-only mod lists.");
             RemoveNontrackedItemsFromJoiningPlayers = BindServerConfig("Player Sync", "RemoveNontrackedItemsFromJoiningPlayers", true, "If enabled, any items that are not tracked by the server will be removed from joining player's inventories.");
             PreventExternalSkillRaises = BindServerConfig("Player Sync", "PreventExternalSkillRaises", true, "If enabled, player skill gains outside of the server are removed when connecting.");
             NewCharactersSkillsCleared = BindServerConfig("Player Sync", "NewCharactersSkillsCleared", false, "If enabled, new characters that have no existing character file will have all skills set to 0.");
             NewCharactersRemoveExtraItems = BindServerConfig("Player Sync", "NewCharactersRemoveExtraItems", false, "If enabled, new characters that have no existing character file will have all items removed except for starting items.");
-            //PublicRequiredMods = BindServerConfig("Mods", "PublicRequiredMods", new List<string>(), "A list of required mod names. By default mods added to the server get added to this list. Move entries to the Greylist or Admin list if needed.");
-            //PublicGreyListMods = BindServerConfig("Mods", "PublicGreyListMods", new List<string>(), "A list of all optional client mods. The server does not need to be running these.");
-            //AdminOnlyMods = BindServerConfig("Mods", "AdminOnlyMods", new List<string>(), "A list of all mods which only Admins are allowed to have installed, admins are not required to have these installed.");
+            NewCharacterSetSkillsToZero = BindServerConfig("Player Sync", "NewCharacterSetSkillsToZero", true, "If enabled, new characters will have their skills set to zero. Prevents players from raising skills before connecting.");
         }
 
         internal static void WriteCharacterToFile(string id, DataObjects.Character character) {
             Directory.CreateDirectory(Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder));
             var saveDir = Directory.CreateDirectory(Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, id));
-            File.WriteAllText(Path.Combine(saveDir.FullName, $"{character.Name}.yaml"), DataObjects.yamlserializer.Serialize(character));
+            string path = Path.Combine(saveDir.FullName, $"{character.Name}.yaml");
+            Logger.LogInfo($"Writing to {path}");
+            File.WriteAllText(path, DataObjects.yamlserializer.Serialize(character));
         }
 
         internal static DataObjects.Character LoadCharacterFromFile(string id, string name) {
@@ -163,16 +160,13 @@ namespace ValheimEnforcer {
             }
         }
 
-        internal static ZPackage SendModConfigs() {
-            return SendFileAsZPackage(ModsConfigFilePath);
-        }
-
         internal static ZPackage SendSavedCharacter(ZNetPeer peer) {
             string id = peer.m_socket.GetEndPointString();
             Logger.LogInfo($"Sending saved character data to player {peer.m_playerName} with ID: {id}");
             var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, $"{id}");
-            string fullpath = Path.Combine(charFile, $"{id}.yaml");
+            string fullpath = Path.Combine(charFile, $"{peer.m_playerName}.yaml");
             if (!File.Exists(fullpath)) {
+                Logger.LogInfo($"path: {fullpath} does not exist, no character data will be sent.");
                 return new ZPackage();
             }
             return SendFileAsZPackage(fullpath);
@@ -180,18 +174,8 @@ namespace ValheimEnforcer {
 
         public static IEnumerator OnServerRecieveCharacter(long sender, ZPackage package) {
             DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(package.ReadString());
-            WriteCharacterToFile($"{sender}", chara);
-            yield break;
-        }
-
-        public static IEnumerator OnServerRecieveModlist(long sender, ZPackage package) {
-            Logger.LogInfo("Server validating client modlist.");
-            var yamlstring = package.ReadString();
-            ZNetPeer peer = ZNet.instance.GetPeer(sender);
-            bool client_mod_check = ModManager.ServerValidateClientModlist(yamlstring, ZNet.instance.IsAdmin(peer.m_socket.GetHostName()));
-            if (client_mod_check == false) {
-                ZNet.instance.Disconnect(peer);
-            }
+            Logger.LogInfo($"Recieved Player data update for {sender} - {chara.Name}|{chara.HostID}");
+            WriteCharacterToFile($"{chara.HostID}", chara);
             yield break;
         }
 
@@ -199,12 +183,6 @@ namespace ValheimEnforcer {
             DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(package.ReadString());
             Logger.LogDebug("Recieved Player character data from server.");
             CharacterManager.SetPlayerCharacter(chara);
-            yield break;
-        }
-
-        public static IEnumerator OnClientReceiveModlist(long sender, ZPackage package) {
-            //ModManager.UpdateModSettingConfigs(package.ReadString());
-            File.WriteAllText(ModsConfigFilePath, package.ReadString());
             yield break;
         }
 

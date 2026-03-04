@@ -42,8 +42,8 @@ namespace ValheimEnforcer.modules {
 
             if (selectedID.Length < 1) {
                 Logger.LogWarning($"Failed to find matching player ID for local player {player.GetPlayerName()}. Defaulting to ZDO UID as player ID.");
+                selectedID = player.m_nview.GetZDO().m_uid.ToString();
             }
-            selectedID = player.m_nview.GetZDO().m_uid.ToString();
             if (selectedID.Contains(":")) {
                 Logger.LogDebug($"Player ID contained invalid character : removing.");
                 selectedID = selectedID.Split(':')[0];
@@ -52,10 +52,17 @@ namespace ValheimEnforcer.modules {
         }
 
         private static void LoadAndValidatePlayer(Player player) {
-            
 
-            string playerID = GetPlayerID(player);
-            string PlayerName = player.GetPlayerName();
+            string playerID;
+            string PlayerName;
+            if (PlayerCharacter != null) {
+                playerID = PlayerCharacter.HostID;
+                PlayerName = PlayerCharacter.Name;
+            } else {
+                playerID = GetPlayerID(player);
+                PlayerName = player.GetPlayerName();
+            }
+            
 
             Logger.LogInfo($"Player {PlayerName} with ID {playerID} validating character data.");
             // If the character has already been connected to the server its data was already transferred during the connection process.
@@ -78,6 +85,13 @@ namespace ValheimEnforcer.modules {
                         HostID = playerID,
                         SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level),
                     };
+                    if (ValConfig.NewCharacterSetSkillsToZero.Value) {
+                        Logger.LogInfo("Setting new character skills to zero.");
+                        foreach (var skillEntry in savableChar.SkillLevels) {
+                            if (skillEntry.Value > 0) { savableChar.SkillLevels[skillEntry.Key] = 0; }
+                        }
+                    }
+
                     if (ValConfig.NewCharactersRemoveExtraItems.Value) {
                         Logger.LogInfo($"New character save for player {PlayerName} with ID {playerID}, checking to removing non-starter items.");
                         List<ItemDrop.ItemData> removeItems = new List<ItemDrop.ItemData>();
@@ -89,6 +103,7 @@ namespace ValheimEnforcer.modules {
                             }
                         });
                         foreach (ItemDrop.ItemData item in removeItems) {
+                            player.UnequipItem(item); // Ensure removed items are unequipped as they will ghost otherwise
                             player.GetInventory().RemoveItem(item);
                         }
                     }
@@ -111,6 +126,7 @@ namespace ValheimEnforcer.modules {
                     }
                 });
                 foreach (ItemDrop.ItemData item in removeItems) {
+                    player.UnequipItem(item); // Ensure removed items are unequipped as they will ghost otherwise
                     player.GetInventory().RemoveItem(item);
                 }
             }
@@ -186,6 +202,7 @@ namespace ValheimEnforcer.modules {
                 ValConfig.WriteCharacterToFile(playerID, savableChar);
 
                 if (ZNet.instance != null && ZNet.instance.GetServerPeer() != null) {
+                    Logger.LogDebug("Sending updated character data to server.");
                     ValConfig.CharacterSaveRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
                 }
             }
