@@ -17,6 +17,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> UpdateLoadedModsOnStartup;
         public static ConfigEntry<bool> AutoAddModsToRequired;
         public static ConfigEntry<bool> RemoveNontrackedItemsFromJoiningPlayers;
+        public static ConfigEntry<bool> AddMissingItemsFromPlayerServerSave;
         public static ConfigEntry<bool> PreventExternalSkillRaises;
         public static ConfigEntry<bool> NewCharactersSkillsCleared;
         public static ConfigEntry<bool> NewCharactersRemoveExtraItems;
@@ -57,6 +58,7 @@ namespace ValheimEnforcer {
             UpdateLoadedModsOnStartup = BindServerConfig("Mods", "UpdateLoadedModsOnStartup", true, "Whether or not the mod configuration file will update its loaded mods once they are detected.");
             AutoAddModsToRequired = BindServerConfig("Mods", "AutoAddModsToRequired", true, "If true, automatically adds mods not found in the optional, admin, or server-only mod lists.");
             RemoveNontrackedItemsFromJoiningPlayers = BindServerConfig("Player Sync", "RemoveNontrackedItemsFromJoiningPlayers", true, "If enabled, any items that are not tracked by the server will be removed from joining player's inventories.");
+            AddMissingItemsFromPlayerServerSave = BindServerConfig("Player Sync", "AddMissingItemsFromPlayerServerSave", true, "If enabled, any items the player does not have that are listed on the server will be given to the player when joining");
             PreventExternalSkillRaises = BindServerConfig("Player Sync", "PreventExternalSkillRaises", true, "If enabled, player skill gains outside of the server are removed when connecting.");
             NewCharactersSkillsCleared = BindServerConfig("Player Sync", "NewCharactersSkillsCleared", false, "If enabled, new characters that have no existing character file will have all skills set to 0.");
             NewCharactersRemoveExtraItems = BindServerConfig("Player Sync", "NewCharactersRemoveExtraItems", false, "If enabled, new characters that have no existing character file will have all items removed except for starting items.");
@@ -142,8 +144,6 @@ namespace ValheimEnforcer {
                 case ModsFileName:
                     Logger.LogDebug("Triggering Mod Settings update.");
                     ModManager.UpdateModSettingConfigs(filetext);
-                    // Not sure we want/need to update clients
-                    // ModEnforcmentRPC.SendPackage(ZNet.instance.m_peers, SendFileAsZPackage(e.FullPath));
                     break;
             }
         }

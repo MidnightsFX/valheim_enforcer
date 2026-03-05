@@ -130,6 +130,21 @@ namespace ValheimEnforcer.modules {
                     player.GetInventory().RemoveItem(item);
                 }
             }
+            if (ValConfig.AddMissingItemsFromPlayerServerSave.Value) {
+                Logger.LogDebug("Checking to restore player items.");
+                List<Tuple<string, int>> prefablist = new List<Tuple<string, int>>();
+                foreach(ItemDrop.ItemData item in player.m_inventory.GetAllItems()) {
+                    prefablist.Add(new Tuple<string, int>(item.m_dropPrefab.name, item.m_stack));
+                }
+                foreach (DataObjects.PackedItem item in savableChar.PlayerItems) {
+                    Tuple<string, int> searcher = new Tuple<string, int>(item.prefabName, item.m_stack);
+                    if (!prefablist.Contains(searcher)) {
+                        Logger.LogInfo($"Adding missing item to players inventory: {item.prefabName}x{item.m_stack}");
+                        item.AddToInventory(player.GetInventory(), false);
+                    }
+                }
+            }
+
             Logger.LogDebug($"Validated player items.");
 
             if (ValConfig.PreventExternalSkillRaises.Value) {
@@ -199,6 +214,12 @@ namespace ValheimEnforcer.modules {
                     }
                     Logger.LogDebug($"Updated player Items for {PlayerName} with ID {playerID}.");
                 }
+
+                if (savableChar == null) {
+                    Logger.LogWarning("Savable character was null, not sending network updates.");
+                    return;
+                }
+
                 ValConfig.WriteCharacterToFile(playerID, savableChar);
 
                 if (ZNet.instance != null && ZNet.instance.GetServerPeer() != null) {

@@ -85,11 +85,19 @@ namespace ValheimEnforcer.common {
                 ItemDrop itemdrop = instancedGo.GetComponent<ItemDrop>();
                 itemdrop.m_itemData.m_stack = m_stack;
                 itemdrop.m_itemData.m_durability = m_durability;
-                itemdrop.m_itemData.m_quality = m_quality;
+                if (m_quality == 0) {
+                    itemdrop.m_itemData.m_quality = 1;
+                } else {
+                    itemdrop.m_itemData.m_quality = m_quality;
+                }
                 itemdrop.m_itemData.m_variant = m_variant;
                 itemdrop.m_itemData.m_worldLevel = m_worldlevel;
                 itemdrop.m_itemData.m_crafterID = m_crafterID;
-                itemdrop.m_itemData.m_crafterName = m_crafterName;
+                if (m_crafterName == null) {
+                    itemdrop.m_itemData.m_crafterName = "";
+                } else {
+                    itemdrop.m_itemData.m_crafterName = m_crafterName;
+                }
                 itemdrop.m_itemData.m_customData = m_customdata;
                 itemdrop.m_itemData.m_pickedUp = true; // Its not the real object, but it gets picked up like a real object.
                 if (use_position) {
