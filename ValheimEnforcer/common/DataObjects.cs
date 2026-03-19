@@ -2,9 +2,6 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using UnityEngine;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -14,13 +11,6 @@ namespace ValheimEnforcer.common {
 
         public static IDeserializer yamldeserializer = new DeserializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).Build();
         public static ISerializer yamlserializer = new SerializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitDefaults).Build();
-
-        public enum VersionStrictnessType {
-            None = 0,  /// <summary>No version checking</summary>
-            Patch = 1, /// <summary>Patch version must match (X.Y.Z)</summary>  
-            Minor = 2, /// <summary>Minor version must match, patch can differ (X.Y)</summary>     
-            Major = 3, /// <summary>Major version must match, minor and patch can differ (X)</summary>
-        }
 
         public class Mod {
             public string PluginID { get; set; }
@@ -118,6 +108,7 @@ namespace ValheimEnforcer.common {
                 get; set;
             }
             public Dictionary<Skills.SkillType, float> SkillLevels { get; set; } = new Dictionary<Skills.SkillType, float>();
+            public Dictionary<string, string> PlayerCustomData { get; set; } = new Dictionary<string, string>();
             public List<PackedItem> PlayerItems { get; set; } = new List<PackedItem>();
             public List<PackedItem> ConfiscatedItems { get; set; } = new List<PackedItem>();
 

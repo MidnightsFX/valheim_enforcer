@@ -4,6 +4,7 @@ using Splatform;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -144,7 +145,6 @@ namespace ValheimEnforcer.modules {
                     }
                 }
             }
-
             Logger.LogDebug($"Validated player items.");
 
             if (ValConfig.PreventExternalSkillRaises.Value) {
@@ -203,10 +203,17 @@ namespace ValheimEnforcer.modules {
                     foreach (ItemDrop.ItemData item in __instance.GetInventory().GetAllItems().ToList()) {
                         savableChar.AddItemToPlayerItems(item);
                     }
+                    if (ValConfig.PreventExternalCustomDataChanges.Value) {
+                        savableChar.PlayerCustomData = __instance.m_customData;
+                    }
                 } else {
                     Logger.LogDebug($"Existing character data found for player {PlayerName} with ID {playerID}. Updating character data with current player information.");
                     savableChar.SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
                     Logger.LogDebug($"Updated player skills for {PlayerName} with ID {playerID}.");
+                    if (ValConfig.PreventExternalCustomDataChanges.Value) {
+                        savableChar.PlayerCustomData = __instance.m_customData;
+                        Logger.LogDebug("Updated player custom data.");
+                    }
                     savableChar.PlayerItems.Clear();
                     // Add all of the players current items
                     foreach (ItemDrop.ItemData item in __instance.GetInventory().GetAllItems().ToList()) {
@@ -232,9 +239,44 @@ namespace ValheimEnforcer.modules {
         [HarmonyPatch(typeof(Game), nameof(Game.SpawnPlayer))]
         public static class LoadAndValidatePlayerPatch {
             [HarmonyPostfix]
-            [HarmonyPriority(Priority.High)]
+            [HarmonyPriority(Priority.First)]
             private static void PlayerSpawn(Game __instance) {
                 LoadAndValidatePlayer(Player.m_localPlayer);
+            }
+        }
+
+        [HarmonyPatch(typeof(Player))]
+        public static class LoadPlayerCustomData {
+            [HarmonyPostfix]
+            [HarmonyPriority(Priority.First)]
+            [HarmonyPatch(nameof(Player.Load))]
+            static void Postfix(Player __instance) {
+                string playerID;
+                string PlayerName;
+                DataObjects.Character savableChar = null;
+                if (PlayerCharacter != null) {
+                    savableChar = PlayerCharacter;
+                    playerID = PlayerCharacter.HostID;
+                    PlayerName = PlayerCharacter.Name;
+                } else {
+                    playerID = GetPlayerID(__instance);
+                    PlayerName = __instance.GetPlayerName();
+                }
+                if (PlayerCharacter == null) {
+                    savableChar = ValConfig.LoadCharacterFromFile(playerID, PlayerName);
+                }
+
+                if (savableChar == null) {
+                    if (ValConfig.PreventExternalCustomDataChanges.Value) {
+                        if (ValConfig.newCharacterClearCustomData.Value) { __instance.m_customData.Clear(); }
+                        savableChar.PlayerCustomData = __instance.m_customData;
+                    }
+                } else {
+                    if (ValConfig.PreventExternalCustomDataChanges.Value) {
+                        __instance.m_customData = savableChar.PlayerCustomData;
+                        Logger.LogDebug("Set player custom data.");
+                    }
+                }
             }
         }
     }

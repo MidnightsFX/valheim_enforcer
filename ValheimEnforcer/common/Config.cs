@@ -22,6 +22,8 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> NewCharactersSkillsCleared;
         public static ConfigEntry<bool> NewCharactersRemoveExtraItems;
         public static ConfigEntry<bool> NewCharacterSetSkillsToZero;
+        public static ConfigEntry<bool> newCharacterClearCustomData;
+        public static ConfigEntry<bool> PreventExternalCustomDataChanges;
 
         internal const string ModsFileName = "Mods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
@@ -63,6 +65,8 @@ namespace ValheimEnforcer {
             NewCharactersSkillsCleared = BindServerConfig("Player Sync", "NewCharactersSkillsCleared", false, "If enabled, new characters that have no existing character file will have all skills set to 0.");
             NewCharactersRemoveExtraItems = BindServerConfig("Player Sync", "NewCharactersRemoveExtraItems", false, "If enabled, new characters that have no existing character file will have all items removed except for starting items.");
             NewCharacterSetSkillsToZero = BindServerConfig("Player Sync", "NewCharacterSetSkillsToZero", true, "If enabled, new characters will have their skills set to zero. Prevents players from raising skills before connecting.");
+            PreventExternalCustomDataChanges = BindServerConfig("Player Sync", "PreventExternalCustomDataChanges", true, "If enabled, tracks player custom data. Warning: custom data can be large and can impact how other mods function.");
+            newCharacterClearCustomData = BindServerConfig("Player Sync", "newCharacterClearCustomData", true, "If enabled, new characters will have their custom data cleared.");
         }
 
         internal static void WriteCharacterToFile(string id, DataObjects.Character character) {

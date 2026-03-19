@@ -19,6 +19,7 @@ namespace ValheimEnforcer.modules {
 
         internal class ListPlayers : ConsoleCommand {
             public override string Name => "List-Players";
+            public override bool IsCheat => true;
             public override string Help => "List-Players - Provides a full list of all accounts and Player names stored.";
 
             public override void Run(string[] args) {
@@ -35,6 +36,7 @@ namespace ValheimEnforcer.modules {
 
         internal class ListPlayerConfiscatedItems : ConsoleCommand {
             public override string Name => "List-Confiscated";
+            public override bool IsCheat => true;
             public override string Help => "Gets a list of confiscated items, specific to a player/character. Format: list-confiscated 99999999 TerryTheTerrible";
 
             public override void Run(string[] args) {
@@ -75,6 +77,7 @@ namespace ValheimEnforcer.modules {
 
         internal class RestorePlayerConfiscatedItems : ConsoleCommand {
             public override string Name => "Retrieve-Confiscated";
+            public override bool IsCheat => true;
             public override string Help => "Gives you player confiscated items, use either item prefab or 'all'. Format: retrieve-confiscated 99999999 TerryTheTerrible all";
 
             public override void Run(string[] args) {
