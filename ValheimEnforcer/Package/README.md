@@ -1,9 +1,12 @@
 ﻿# Valheim Enforcer
 Valheim Enforcer is a lightweight Mod Synchronization, and Server sided character progression enforce tool.
 
+This mod is designed to be a drop-in, no maintenance solution for those who are wary of configuration, or those that would rather spend time playing than configuring.
+
+By default this mod will enforce character server saves and require clients to only connect with mods that are installed on the server. All of this is configurable.
+
 ## Beta!
-This mod is still in active development. While the core features of mod version checking and server progress saving work and have been tested.
-There are still lots of unkowns which might contain bugs.
+This mod is still in active development. While the core features of mod (version checking and server progress saving) work and have been tested, there are still lots of unkowns which might contain bugs.
 
 ## Features
 
