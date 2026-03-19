@@ -8,6 +8,11 @@ By default this mod will enforce character server saves and require clients to o
 ## Beta!
 This mod is still in active development. While the core features of mod (version checking and server progress saving) work and have been tested, there are still lots of unkowns which might contain bugs.
 
+Got a bug to report or just want to chat about the mod? Drop by the discord or github.
+
+[![discord logo](https://i.imgur.com/uE6umQE.png)](https://discord.gg/Dmr9PQTy9m) [![github logo](https://i.imgur.com/lvbP5OF.png)](https://github.com/MidnightsFX/valheim_enforcer)
+
+
 ## Features
 
 Server saved character progression lock. All of the following features are configurable (server authoratative).
