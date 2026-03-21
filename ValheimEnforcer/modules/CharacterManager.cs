@@ -35,7 +35,18 @@ namespace ValheimEnforcer.modules {
                 foreach (ZNet.PlayerInfo playerInfo in zplayerInfo) {
                     Logger.LogDebug($"Checking player {playerInfo.m_characterID} with ID {playerInfo.m_userInfo.m_id.m_userID} against local player {player.m_nview.GetZDO().m_uid}");
                     if (playerInfo.m_characterID == player.m_nview.GetZDO().m_uid) {
-                        selectedID = player.GetPlayerName();
+                        selectedID = playerInfo.m_userInfo.m_id.m_userID;
+                        break;
+                    }
+                }
+            }
+
+            if (selectedID.Length < 1) {
+                string playerName = player.GetPlayerName();
+                foreach (ZNet.PlayerInfo playerInfo in zplayerInfo) {
+                    if (playerInfo.m_name == playerName) {
+                        selectedID = playerInfo.m_userInfo.m_id.m_userID;
+                        Logger.LogDebug($"Matched player {playerName} by name to ID {selectedID}");
                         break;
                     }
                 }
