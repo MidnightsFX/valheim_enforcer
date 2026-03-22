@@ -88,8 +88,9 @@ namespace ValheimEnforcer.modules {
                     };
                     if (ValConfig.NewCharacterSetSkillsToZero.Value) {
                         Logger.LogInfo("Setting new character skills to zero.");
-                        foreach (var skillEntry in savableChar.SkillLevels) {
-                            if (skillEntry.Value > 0) { savableChar.SkillLevels[skillEntry.Key] = 0; }
+                        
+                        foreach (Skills.SkillType skillKey in savableChar.SkillLevels.Keys.ToList()) {
+                            savableChar.SkillLevels[skillKey] = 0;
                         }
                     }
 
@@ -269,7 +270,6 @@ namespace ValheimEnforcer.modules {
                 if (savableChar == null) {
                     if (ValConfig.PreventExternalCustomDataChanges.Value) {
                         if (ValConfig.newCharacterClearCustomData.Value) { __instance.m_customData.Clear(); }
-                        savableChar.PlayerCustomData = __instance.m_customData;
                     }
                 } else {
                     if (ValConfig.PreventExternalCustomDataChanges.Value) {
