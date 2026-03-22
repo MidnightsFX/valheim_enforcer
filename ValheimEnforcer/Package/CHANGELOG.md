@@ -1,3 +1,9 @@
+**0.5.3**
+ ---
+ ```
+ - Fixes character fallback logic to more consistently select a non-mutating ID, prefers steamID and playfabID
+ ```
+
 **0.5.2**
  ---
  ```

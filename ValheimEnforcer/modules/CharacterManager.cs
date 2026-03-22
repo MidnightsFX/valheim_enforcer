@@ -29,15 +29,11 @@ namespace ValheimEnforcer.modules {
         internal static string GetPlayerID(Player player) {
             List<ZNet.PlayerInfo> zplayerInfo = ZNet.instance.GetPlayerList();
             string selectedID = "";
-            if (zplayerInfo.Count == 1) {
-                selectedID = zplayerInfo.First().m_userInfo.m_id.m_userID;
-            } else {
-                foreach (ZNet.PlayerInfo playerInfo in zplayerInfo) {
-                    Logger.LogDebug($"Checking player {playerInfo.m_characterID} with ID {playerInfo.m_userInfo.m_id.m_userID} against local player {player.m_nview.GetZDO().m_uid}");
-                    if (playerInfo.m_characterID == player.m_nview.GetZDO().m_uid) {
-                        selectedID = playerInfo.m_userInfo.m_id.m_userID;
-                        break;
-                    }
+            foreach (ZNet.PlayerInfo playerInfo in zplayerInfo) {
+                Logger.LogDebug($"Checking player {playerInfo.m_characterID} with ID {playerInfo.m_userInfo.m_id.m_userID} against local player {player.m_nview.GetZDO().m_uid}");
+                if (playerInfo.m_characterID == player.m_nview.GetZDO().m_uid) {
+                    selectedID = playerInfo.m_userInfo.m_id.m_userID;
+                    break;
                 }
             }
 
