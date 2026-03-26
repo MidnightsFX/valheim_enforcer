@@ -1,3 +1,11 @@
+**0.5.4**
+ ---
+ ```
+ - Defaults to enforcing mod versions for active mods
+ - Automatically updates mod versions in all lists when the mod is updated on the server
+ - Fixes inconsistent server save IDs when recieving data from the client
+ ```
+
 **0.5.3**
  ---
  ```

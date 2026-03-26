@@ -179,7 +179,7 @@ namespace ValheimEnforcer {
         public static IEnumerator OnServerRecieveCharacter(long sender, ZPackage package) {
             DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(package.ReadString());
             Logger.LogInfo($"Recieved Player data update for {sender} - {chara.Name}|{chara.HostID}");
-            WriteCharacterToFile($"{chara.HostID}", chara);
+            WriteCharacterToFile(chara.HostID, chara);
             yield break;
         }
 
