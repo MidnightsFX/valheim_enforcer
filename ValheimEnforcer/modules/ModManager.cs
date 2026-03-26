@@ -38,10 +38,24 @@ namespace ValheimEnforcer.modules {
                 }
 
                 Logger.LogDebug($"Found active mod: {plugin.Key} v{plugin.Value.Info.Metadata.Version}");
-                if (ModSettings.RequiredMods.ContainsKey(plugin.Key)) { continue; }
-                if (ModSettings.AdminOnlyMods.ContainsKey(plugin.Key)) { continue; }
-                if (ModSettings.OptionalMods.ContainsKey(plugin.Key)) { continue; }
-                if (ModSettings.ServerOnlyMods.ContainsKey(plugin.Key)) { continue; } // Server only mods are basically the skip button for a mod
+                string currentVersion = plugin.Value.Info.Metadata.Version.ToString();
+
+                if (ModSettings.RequiredMods.ContainsKey(plugin.Key)) {
+                    UpdateModVersionIfChanged(ModSettings.RequiredMods, plugin.Key, currentVersion);
+                    continue;
+                }
+                if (ModSettings.AdminOnlyMods.ContainsKey(plugin.Key)) {
+                    UpdateModVersionIfChanged(ModSettings.AdminOnlyMods, plugin.Key, currentVersion);
+                    continue;
+                }
+                if (ModSettings.OptionalMods.ContainsKey(plugin.Key)) {
+                    UpdateModVersionIfChanged(ModSettings.OptionalMods, plugin.Key, currentVersion);
+                    continue;
+                }
+                if (ModSettings.ServerOnlyMods.ContainsKey(plugin.Key)) {
+                    UpdateModVersionIfChanged(ModSettings.ServerOnlyMods, plugin.Key, currentVersion);
+                    continue;
+                } // Server only mods are basically the skip button for a mod
 
                 if (ValConfig.AutoAddModsToRequired.Value == true) {
                     Logger.LogDebug($"Automatically adding {plugin.Key} as a required mod.");
@@ -53,6 +67,13 @@ namespace ValheimEnforcer.modules {
             if (ValConfig.UpdateLoadedModsOnStartup.Value) {
                 Logger.LogDebug("Updated Mods.yaml.");
                 File.WriteAllText(ValConfig.ModsConfigFilePath, DataObjects.yamlserializer.Serialize(ModSettings));
+            }
+        }
+
+        private static void UpdateModVersionIfChanged(Dictionary<string, DataObjects.Mod> modList, string key, string currentVersion) {
+            if (modList[key].Version != currentVersion) {
+                Logger.LogInfo($"Updating version for {key}: {modList[key].Version} -> {currentVersion}");
+                modList[key].Version = currentVersion;
             }
         }
 
@@ -88,9 +109,10 @@ namespace ValheimEnforcer.modules {
                     }
                 }
 
-                // Compare admin mods
-                if (isAdmin && AuthoratativeMods.AdminOnlyMods.ContainsKey(mod.Key)) {
-                    if (AuthoratativeMods.AdminOnlyMods[mod.Key].EnforceVersion) {
+                // Compare admin mods - always recognize admin-only mods so non-admins
+                // aren't kicked for having them, but only enforce versions for admins
+                if (AuthoratativeMods.AdminOnlyMods.ContainsKey(mod.Key)) {
+                    if (isAdmin && AuthoratativeMods.AdminOnlyMods[mod.Key].EnforceVersion) {
                         if (AuthoratativeMods.AdminOnlyMods[mod.Key].Version == mod.Value.Version) {
                             continue;
                         } else {
