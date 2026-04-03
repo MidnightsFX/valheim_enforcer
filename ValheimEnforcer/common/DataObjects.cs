@@ -113,6 +113,8 @@ namespace ValheimEnforcer.common {
             public List<PackedItem> ConfiscatedItems { get; set; } = new List<PackedItem>();
 
             public void AddItemToPlayerItems(ItemDrop.ItemData item) {
+                if (PlayerItems == null) { PlayerItems = new List<PackedItem>(); }
+
                 PlayerItems.Add(new PackedItem() {
                     prefabName = item.m_dropPrefab.name,
                     m_stack = item.m_stack,
@@ -129,6 +131,8 @@ namespace ValheimEnforcer.common {
             }
 
             public void AddConfiscatedItem(ItemDrop.ItemData item) {
+                if (ConfiscatedItems == null) { ConfiscatedItems = new List<PackedItem>(); }
+
                 ConfiscatedItems.Add(new PackedItem() {
                     prefabName = item.m_dropPrefab.name,
                     m_stack = item.m_stack,

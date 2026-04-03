@@ -24,6 +24,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> NewCharacterSetSkillsToZero;
         public static ConfigEntry<bool> newCharacterClearCustomData;
         public static ConfigEntry<bool> PreventExternalCustomDataChanges;
+        public static ConfigEntry<bool> ValidateItemCustomData;
 
         internal const string ModsFileName = "Mods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
@@ -67,6 +68,7 @@ namespace ValheimEnforcer {
             NewCharacterSetSkillsToZero = BindServerConfig("Player Sync", "NewCharacterSetSkillsToZero", true, "If enabled, new characters will have their skills set to zero. Prevents players from raising skills before connecting.");
             PreventExternalCustomDataChanges = BindServerConfig("Player Sync", "PreventExternalCustomDataChanges", true, "If enabled, tracks player custom data. Warning: custom data can be large and can impact how other mods function.");
             newCharacterClearCustomData = BindServerConfig("Player Sync", "newCharacterClearCustomData", true, "If enabled, new characters will have their custom data cleared.");
+            ValidateItemCustomData = BindServerConfig("Player Sync", "ValidateItemCustomData", true, "If enabled, custom data on items will be validated.");
         }
 
         internal static void WriteCharacterToFile(string id, DataObjects.Character character) {

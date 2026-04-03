@@ -110,6 +110,11 @@ namespace ValheimEnforcer.modules {
                                 savableChar.AddConfiscatedItem(item);
                                 removeItems.Add(item);
                             }
+                            if (item.m_quality > 1) {
+                                Logger.LogInfo($"Removing high quality item {item.m_dropPrefab.name}x{item.m_stack} with quality {item.m_quality} from new player {savableChar.Name}");
+                                savableChar.AddConfiscatedItem(item);
+                                removeItems.Add(item);
+                            }
                         });
                         foreach (ItemDrop.ItemData item in removeItems) {
                             player.UnequipItem(item); // Ensure removed items are unequipped as they will ghost otherwise
@@ -120,6 +125,9 @@ namespace ValheimEnforcer.modules {
                     // Add all of the players current items
                     foreach (ItemDrop.ItemData item in player.GetInventory().GetAllItems().ToList()) {
                         savableChar.AddItemToPlayerItems(item);
+                        if (ValConfig.ValidateItemCustomData.Value) {
+                            item.m_customData.Clear(); // Clear custom data on new characters to prevent exploits of starting with custom data items
+                        }
                     }
                 }
             }
@@ -128,10 +136,29 @@ namespace ValheimEnforcer.modules {
                 List<ItemDrop.ItemData> removeItems = new List<ItemDrop.ItemData>();
                 player.m_inventory.GetAllItems().ForEach(item => {
                     Logger.LogDebug($"Checking player item: {item.m_dropPrefab.name}");
-                    if (!savableChar.PlayerItems.Any(savedItem => savedItem.prefabName == item.m_dropPrefab.name && savedItem.m_stack == item.m_stack)) {
-                        Logger.LogInfo($"Removing non-tracked item {item.m_dropPrefab.name}x{item.m_stack} from player {savableChar.Name}");
-                        savableChar.AddConfiscatedItem(item);
-                        removeItems.Add(item);
+                    // Validate Item, stacksize, custom data, and quality
+                    foreach (DataObjects.PackedItem savedItem in savableChar.PlayerItems) {
+                        if (savedItem.prefabName != item.m_dropPrefab.name && savedItem.m_stack == item.m_stack) { continue; }
+
+                        if (item.m_quality > 1 && savedItem.m_quality != item.m_quality) {
+                            Logger.LogInfo($"Confiscating item {item.m_dropPrefab.name} from player {savableChar.Name} due to quality mismatch. Expected {savedItem.m_quality} got {item.m_quality}");
+                            savableChar.AddConfiscatedItem(item);
+                            removeItems.Add(item);
+                            return;
+                        }
+
+                        // Validate custom itemdata
+                        if (ValConfig.ValidateItemCustomData.Value && item.m_customData.Count > 0) {
+                            Logger.LogDebug($"Validaing {savedItem.prefabName} custom data...");
+                            foreach (KeyValuePair<string, string> customData in savedItem.m_customdata) {
+                                if (!item.m_customData.TryGetValue(customData.Key, out string value) || value != customData.Value) {
+                                    Logger.LogInfo($"Confiscating item {item.m_dropPrefab.name} from player {savableChar.Name} due to custom data mismatch on key {customData.Key}");
+                                    savableChar.AddConfiscatedItem(item);
+                                    removeItems.Add(item);
+                                    return;
+                                }
+                            }
+                        }
                     }
                 });
                 foreach (ItemDrop.ItemData item in removeItems) {
@@ -144,7 +171,7 @@ namespace ValheimEnforcer.modules {
                 List<Tuple<string, int>> prefablist = new List<Tuple<string, int>>();
                 foreach(ItemDrop.ItemData item in player.m_inventory.GetAllItems()) {
                     prefablist.Add(new Tuple<string, int>(item.m_dropPrefab.name, item.m_stack));
-                }
+                    }
                 foreach (DataObjects.PackedItem item in savableChar.PlayerItems) {
                     Tuple<string, int> searcher = new Tuple<string, int>(item.prefabName, item.m_stack);
                     if (!prefablist.Contains(searcher)) {

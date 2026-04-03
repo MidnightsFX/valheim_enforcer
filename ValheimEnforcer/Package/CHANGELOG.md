@@ -1,3 +1,10 @@
+**0.5.5**
+ ---
+ ```
+ - Enforce quality and custom data consistency for all characters, including new characters on first load
+ - Added extra safety checks for player data settings
+ ```
+
 **0.5.4**
  ---
  ```

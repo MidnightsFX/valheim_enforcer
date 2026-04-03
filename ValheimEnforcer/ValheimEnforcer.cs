@@ -18,7 +18,7 @@ namespace ValheimEnforcer
     {
         public const string PluginGUID = "MidnightsFX.ValheimEnforcer";
         public const string PluginName = "ValheimEnforcer";
-        public const string PluginVersion = "0.5.4";
+        public const string PluginVersion = "0.5.5";
 
         internal static ManualLogSource Log;
         internal ValConfig cfg;
