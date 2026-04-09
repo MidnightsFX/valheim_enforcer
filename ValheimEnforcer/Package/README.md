@@ -40,7 +40,7 @@ Note: All commands require `devcommands` as such they require admin on the serve
 
 There are two ways to do so. 
 1. In-Game commands
-	- Run `list-confiscated AcountID999999 CharacterName` (Not sure about what the players account ID is? Run `list-players`)
-	- Run `retrieve-confiscated AcountID999999 CharacterName prefabName` (just want it all back? use 'all' as the prefab)
+	- Run `enforcer-list-confiscated AcountID999999 CharacterName` (Not sure about what the players account ID is? Run `list-players`)
+	- Run `enforcer-retrieve-confiscated AcountID999999 CharacterName prefabName` (just want it all back? use 'all' as the prefab)
 	- Give the items to said player
 1. Manual config file edits.

@@ -7,6 +7,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using UnityEngine;
 using ValheimEnforcer.common;
 using ValheimEnforcer.modules;
 
@@ -26,6 +27,8 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> PreventExternalCustomDataChanges;
         public static ConfigEntry<bool> ValidateItemCustomData;
 
+        public static ConfigEntry<bool> InternalStorageMode;
+
         internal const string ModsFileName = "Mods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
         internal const string CharacterFolder = "Characters";
@@ -33,6 +36,7 @@ namespace ValheimEnforcer {
         internal static String CharacterFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder);
 
         internal static CustomRPC CharacterSaveRPC;
+        internal static CustomRPC ReturnConfiscatedItemsRPC;
 
         public ValConfig(ConfigFile cf) {
             // ensure all the config values are created
@@ -43,6 +47,7 @@ namespace ValheimEnforcer {
             SetupMainFileWatcher();
 
             CharacterSaveRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHAR", OnServerRecieveCharacter, OnClientReceiveCharacter);
+            ReturnConfiscatedItemsRPC = NetworkManager.Instance.AddRPC("VENFORCE_RETURN_CONFISCATED", OnServerReturnConfiscatedReceive, OnClientReceiveConfiscatedItems);
 
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
@@ -69,9 +74,16 @@ namespace ValheimEnforcer {
             PreventExternalCustomDataChanges = BindServerConfig("Player Sync", "PreventExternalCustomDataChanges", true, "If enabled, tracks player custom data. Warning: custom data can be large and can impact how other mods function.");
             newCharacterClearCustomData = BindServerConfig("Player Sync", "newCharacterClearCustomData", true, "If enabled, new characters will have their custom data cleared.");
             ValidateItemCustomData = BindServerConfig("Player Sync", "ValidateItemCustomData", true, "If enabled, custom data on items will be validated.");
+
+            InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
         }
 
-        internal static void WriteCharacterToFile(string id, DataObjects.Character character) {
+        internal static void WritePlayerCharacterToSave(string id, DataObjects.Character character) {
+            if (ValConfig.InternalStorageMode.Value) {
+                Logger.LogInfo("Saving character with internal storage mode.");
+                InternalDataStore.SaveAccountCharacter(character);
+            }
+            // Double write the data so that if the storage mode is switched the data will still be present.
             Directory.CreateDirectory(Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder));
             var saveDir = Directory.CreateDirectory(Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, id));
             string path = Path.Combine(saveDir.FullName, $"{character.Name}.yaml");
@@ -79,7 +91,16 @@ namespace ValheimEnforcer {
             File.WriteAllText(path, DataObjects.yamlserializer.Serialize(character));
         }
 
-        internal static DataObjects.Character LoadCharacterFromFile(string id, string name) {
+        internal static DataObjects.Character LoadCharacterFromSave(string id, string name) {
+            if (ValConfig.InternalStorageMode.Value) {
+                Logger.LogInfo("Loading character from internal storage system.");
+                DataObjects.Character savedChar = InternalDataStore.GetAccountCharacter(id, name);
+                if (savedChar == null) {
+                    Logger.LogDebug($"No character file found for player with {id}-{name} is this character new?");
+                }
+                return savedChar;
+            }
+
             var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, id, $"{name}.yaml");
             if (!File.Exists(charFile)) {
                 Logger.LogDebug($"No character file found for player with {id}-{name} is this character new?");
@@ -169,19 +190,34 @@ namespace ValheimEnforcer {
         internal static ZPackage SendSavedCharacter(ZNetPeer peer) {
             string id = peer.m_socket.GetEndPointString();
             Logger.LogInfo($"Sending saved character data to player {peer.m_playerName} with ID: {id}");
+            ZPackage package = new ZPackage();
+            if (ValConfig.InternalStorageMode.Value) {
+                Logger.LogInfo("Using internal storage mode to send character data.");
+                DataObjects.Character chara = InternalDataStore.GetAccountCharacter(id, peer.m_playerName);
+                if (chara == null) {
+                    Logger.LogInfo($"No character data found for player {peer.m_playerName} with ID: {id}, no character data will be sent.");
+                    return new ZPackage();
+                }
+                string serialChara = DataObjects.yamlserializer.Serialize(chara);
+                package.Write(serialChara);
+                return package;
+            }
+
             var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, $"{id}");
             string fullpath = Path.Combine(charFile, $"{peer.m_playerName}.yaml");
             if (!File.Exists(fullpath)) {
                 Logger.LogInfo($"path: {fullpath} does not exist, no character data will be sent.");
                 return new ZPackage();
             }
-            return SendFileAsZPackage(fullpath);
+            string filecontents = File.ReadAllText(fullpath);
+            package.Write(filecontents);
+            return package;
         }
 
         public static IEnumerator OnServerRecieveCharacter(long sender, ZPackage package) {
             DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(package.ReadString());
             Logger.LogInfo($"Recieved Player data update for {sender} - {chara.Name}|{chara.HostID}");
-            WriteCharacterToFile(chara.HostID, chara);
+            WritePlayerCharacterToSave(chara.HostID, chara);
             yield break;
         }
 
@@ -192,17 +228,25 @@ namespace ValheimEnforcer {
             yield break;
         }
 
+        public static IEnumerator OnServerReturnConfiscatedReceive(long sender, ZPackage package) {
+            // Clients should not send this RPC to the server
+            yield break;
+        }
+
+        public static IEnumerator OnClientReceiveConfiscatedItems(long sender, ZPackage package) {
+            List<DataObjects.PackedItem> items = DataObjects.yamldeserializer.Deserialize<List<DataObjects.PackedItem>>(package.ReadString());
+            Logger.LogInfo($"Received {items.Count} confiscated item(s) returned from server.");
+            foreach (DataObjects.PackedItem item in items) {
+                Logger.LogInfo($"Adding returned confiscated item: {item.prefabName} x{item.m_stack}");
+                item.AddToInventory(Player.m_localPlayer.m_inventory, false);
+            }
+            yield break;
+        }
+
         internal static ZPackage SendCharacterAsZpackage(DataObjects.Character chara) {
             string serialChara = DataObjects.yamlserializer.Serialize(chara);
             ZPackage package = new ZPackage();
             package.Write(serialChara);
-            return package;
-        }
-
-        internal static ZPackage SendFileAsZPackage(string filepath) {
-            string filecontents = File.ReadAllText(filepath);
-            ZPackage package = new ZPackage();
-            package.Write(filecontents);
             return package;
         }
 
