@@ -1,3 +1,15 @@
+**0.6.0**
+ ---
+ ```
+ - Improves custom data validation
+ - Enables Enforcer- commands for admins to retrieve confiscated items
+	- List player saves
+	- List confiscated items for a player
+	- Retrieve confiscated items (give to admin) from a player save
+	- Retrieve confiscated items (give to player) from a player save
+- Optional (disabled by default) portable mode which stores all data inside the world
+ ```
+
 **0.5.5**
  ---
  ```

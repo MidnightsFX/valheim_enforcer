@@ -1,4 +1,5 @@
-﻿using Jotunn.Managers;
+﻿using Jotunn;
+using Jotunn.Managers;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -11,6 +12,8 @@ namespace ValheimEnforcer.common {
 
         public static IDeserializer yamldeserializer = new DeserializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).Build();
         public static ISerializer yamlserializer = new SerializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitDefaults).Build();
+
+        public static readonly string CustomDataKey = "VE_CUSTOM_DATA";
 
         public class Mod {
             public string PluginID { get; set; }
@@ -47,12 +50,33 @@ namespace ValheimEnforcer.common {
             }
         }
 
+        public class ItemValidatorResult {
+            public PackedItem SavedItemRef { get; set; }
+            public ItemDrop.ItemData CharacterItemRef { get; set; }
+            [DefaultValue(false)]
+            public bool Validated { get; set; }
+            public string ValidationMessage { get; set; }
+            public ValidationSummary ValidationResult { get; set; }
+        }
+
+        public class ValidationSummary {
+            [DefaultValue(false)]
+            public bool NameAndStackMatch { get; set; }
+            [DefaultValue(false)]
+            public bool QualityMatch { get; set; }
+            [DefaultValue(false)]
+            public bool CustomDataMatch { get; set; }
+
+            public bool IsValid() {
+                return NameAndStackMatch && QualityMatch && CustomDataMatch;
+            }
+        }
+
         [Serializable]
         public class PackedItem {
             public string prefabName { get; set; }
             public int m_stack { get; set; }
             public float m_durability { get; set; }
-            [DefaultValue(1)]
             public int m_quality { get; set; }
             [DefaultValue(0)]
             public int m_variant { get; set; }
@@ -100,6 +124,14 @@ namespace ValheimEnforcer.common {
             }
         }
 
+        public class CharacterSaveData {
+            public Dictionary<string, Character> SavedCharacters = new Dictionary<string, Character>();
+        }
+
+        public class AccountEntries {
+            public Dictionary<string, List<string>> AccountCharacterEntries = new Dictionary<string, List<string>>();
+        }
+
         public class Character {
             public string Name {
                 get; set;
@@ -114,6 +146,8 @@ namespace ValheimEnforcer.common {
 
             public void AddItemToPlayerItems(ItemDrop.ItemData item) {
                 if (PlayerItems == null) { PlayerItems = new List<PackedItem>(); }
+
+                Logger.LogDebug($"Adding saved item {item.m_dropPrefab.name} with quality - {item.m_quality}");
 
                 PlayerItems.Add(new PackedItem() {
                     prefabName = item.m_dropPrefab.name,

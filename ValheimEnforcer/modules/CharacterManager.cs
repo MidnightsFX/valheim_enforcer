@@ -1,5 +1,6 @@
 ﻿using HarmonyLib;
 using Jotunn;
+using Mono.Security.Interface;
 using Splatform;
 using System;
 using System.Collections.Generic;
@@ -10,6 +11,7 @@ using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using ValheimEnforcer.common;
+using static ValheimEnforcer.common.DataObjects;
 
 namespace ValheimEnforcer.modules {
     internal static class CharacterManager {
@@ -79,8 +81,8 @@ namespace ValheimEnforcer.modules {
             if (savableChar == null) {
 
                 // Gate loading local character based on if there is no dedicated server?
-                Logger.LogInfo($"No existing character data found for player {PlayerName} with ID {playerID}. Attempting to load from file.");
-                savableChar = ValConfig.LoadCharacterFromFile(playerID, PlayerName);
+                Logger.LogInfo($"No existing character data found for player {PlayerName} with ID {playerID}. Attempting to load from local save.");
+                savableChar = ValConfig.LoadCharacterFromSave(playerID, PlayerName);
 
                 // Nothing to load from file, create a new character and assign current player data
                 if (savableChar == null) {
@@ -134,38 +136,18 @@ namespace ValheimEnforcer.modules {
 
             if (ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value) {
                 List<ItemDrop.ItemData> removeItems = new List<ItemDrop.ItemData>();
-                player.m_inventory.GetAllItems().ForEach(item => {
-                    Logger.LogDebug($"Checking player item: {item.m_dropPrefab.name}");
-                    // Validate Item, stacksize, custom data, and quality
-                    foreach (DataObjects.PackedItem savedItem in savableChar.PlayerItems) {
-                        if (savedItem.prefabName != item.m_dropPrefab.name && savedItem.m_stack == item.m_stack) { continue; }
+                Dictionary<ItemDrop.ItemData, ItemValidatorResult> ValidatorResults = ValidateItems(player.m_inventory.GetAllItems(), savableChar);
 
-                        if (item.m_quality > 1 && savedItem.m_quality != item.m_quality) {
-                            Logger.LogInfo($"Confiscating item {item.m_dropPrefab.name} from player {savableChar.Name} due to quality mismatch. Expected {savedItem.m_quality} got {item.m_quality}");
-                            savableChar.AddConfiscatedItem(item);
-                            removeItems.Add(item);
-                            return;
-                        }
-
-                        // Validate custom itemdata
-                        if (ValConfig.ValidateItemCustomData.Value && item.m_customData.Count > 0) {
-                            Logger.LogDebug($"Validaing {savedItem.prefabName} custom data...");
-                            foreach (KeyValuePair<string, string> customData in savedItem.m_customdata) {
-                                if (!item.m_customData.TryGetValue(customData.Key, out string value) || value != customData.Value) {
-                                    Logger.LogInfo($"Confiscating item {item.m_dropPrefab.name} from player {savableChar.Name} due to custom data mismatch on key {customData.Key}");
-                                    savableChar.AddConfiscatedItem(item);
-                                    removeItems.Add(item);
-                                    return;
-                                }
-                            }
-                        }
+                foreach (KeyValuePair<ItemDrop.ItemData, ItemValidatorResult> eval in ValidatorResults) {
+                    if (eval.Value.Validated == false) {
+                        Logger.LogInfo($"Removing item {eval.Key.m_dropPrefab.name}x{eval.Key.m_stack} from player {savableChar.Name}. Validation message: {eval.Value.ValidationMessage}");
+                        savableChar.AddConfiscatedItem(eval.Key);
+                        player.UnequipItem(eval.Key);
+                        player.GetInventory().RemoveItem(eval.Key);
                     }
-                });
-                foreach (ItemDrop.ItemData item in removeItems) {
-                    player.UnequipItem(item); // Ensure removed items are unequipped as they will ghost otherwise
-                    player.GetInventory().RemoveItem(item);
                 }
             }
+
             if (ValConfig.AddMissingItemsFromPlayerServerSave.Value) {
                 Logger.LogDebug("Checking to restore player items.");
                 List<Tuple<string, int>> prefablist = new List<Tuple<string, int>>();
@@ -195,11 +177,69 @@ namespace ValheimEnforcer.modules {
             Logger.LogDebug($"Validated player skills.");
 
             PlayerCharacter = savableChar;
-            ValConfig.WriteCharacterToFile(playerID, savableChar);
+            ValConfig.WritePlayerCharacterToSave(playerID, savableChar);
 
             if (ZNet.instance.GetServerPeer() != null) {
                 ValConfig.CharacterSaveRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
             }
+        }
+
+        // Validate Item, stacksize, custom data, and quality
+        internal static Dictionary<ItemDrop.ItemData, ItemValidatorResult> ValidateItems(List<ItemDrop.ItemData> playerItems, DataObjects.Character savedChar) {
+            Dictionary<ItemDrop.ItemData, ItemValidatorResult> validationResults = new Dictionary<ItemDrop.ItemData, ItemValidatorResult>();
+            Logger.LogInfo($"Player Items: {playerItems.Count} | SavedCharacter Items: {savedChar.PlayerItems.Count}");
+            foreach (ItemDrop.ItemData item in playerItems) {
+                Logger.LogDebug($"Checking player item: {item.m_dropPrefab.name}");
+
+                ValidationSummary ItemValidationSummary = new DataObjects.ValidationSummary();
+                validationResults.Add(item, new ItemValidatorResult() {
+                    CharacterItemRef = item,
+                });
+
+                foreach (DataObjects.PackedItem savedItem in savedChar.PlayerItems) {
+                    //Logger.LogInfo($"Comparing {savedItem.prefabName} == {item.m_dropPrefab.name} && {savedItem.m_stack} == {item.m_stack}");
+                    if (savedItem.prefabName == item.m_dropPrefab.name && savedItem.m_stack == item.m_stack) {
+                        ItemValidationSummary.NameAndStackMatch = true;
+                        //Logger.LogDebug($"Matched {savedItem.prefabName} s:{savedItem.m_stack} q:{savedItem.m_quality} d:{savedItem.m_durability}");
+
+                        
+                        int quality = savedItem.m_quality;
+                        if (quality == 0) { quality = 1; }
+                        //Logger.LogDebug($"Checking Quality: {quality} == {item.m_quality}");
+                        if (quality == item.m_quality) {
+                            ItemValidationSummary.QualityMatch = true;
+                        }
+
+                        // Check all of the custom data
+                        ItemValidationSummary.CustomDataMatch = true;
+                        if (ValConfig.ValidateItemCustomData.Value) {
+                            foreach (KeyValuePair<string, string> playerItemKVP in item.m_customData) {
+                                if (savedItem.m_customdata.ContainsKey(playerItemKVP.Key) && savedItem.m_customdata[playerItemKVP.Key] != playerItemKVP.Value) {
+                                    ItemValidationSummary.CustomDataMatch = false;
+                                    Logger.LogDebug($"Item {item.m_dropPrefab.name} custom data mismatch on key {playerItemKVP.Key}. Expected {savedItem.m_customdata[playerItemKVP.Key]} got {playerItemKVP.Value}");
+                                }
+                            }
+                        }
+
+                        if (ItemValidationSummary.IsValid()) {
+                            Logger.LogDebug($"Item {item.m_dropPrefab.name} passed validation checks against saved character data.");
+                            validationResults[item].SavedItemRef = savedItem;
+                            validationResults[item].Validated = true;
+                            break; // if we found a match skip remaining iterations of saved items
+                        }
+                    }
+                }
+
+                validationResults[item].ValidationResult = ItemValidationSummary;
+                if (ItemValidationSummary.IsValid() == false) {
+                    validationResults[item].ValidationMessage = $"Item {item.m_dropPrefab.name} failed validation checks against saved character data. " +
+                        $"Stack Match: {ItemValidationSummary.NameAndStackMatch}, " +
+                        $"Quality Match: {ItemValidationSummary.QualityMatch}, " +
+                        $"Custom Data Match: {ItemValidationSummary.CustomDataMatch}";
+                }
+            }
+
+            return validationResults;
         }
 
         // Move this off to its own repeating process? Recieve a unique seed from the server to offset save timer to prevent congestion?
@@ -223,7 +263,7 @@ namespace ValheimEnforcer.modules {
                 Logger.LogDebug($"Saving character for player {PlayerName} with id {playerID}");
 
                 if (PlayerCharacter == null) {
-                    savableChar = ValConfig.LoadCharacterFromFile(playerID, PlayerName);
+                    savableChar = ValConfig.LoadCharacterFromSave(playerID, PlayerName);
                 }
                  
                 if (savableChar == null) {
@@ -262,7 +302,7 @@ namespace ValheimEnforcer.modules {
                     return;
                 }
 
-                ValConfig.WriteCharacterToFile(playerID, savableChar);
+                ValConfig.WritePlayerCharacterToSave(playerID, savableChar);
 
                 if (ZNet.instance != null && ZNet.instance.GetServerPeer() != null) {
                     Logger.LogDebug("Sending updated character data to server.");
@@ -298,7 +338,7 @@ namespace ValheimEnforcer.modules {
                     PlayerName = __instance.GetPlayerName();
                 }
                 if (PlayerCharacter == null) {
-                    savableChar = ValConfig.LoadCharacterFromFile(playerID, PlayerName);
+                    savableChar = ValConfig.LoadCharacterFromSave(playerID, PlayerName);
                 }
 
                 if (savableChar == null) {
