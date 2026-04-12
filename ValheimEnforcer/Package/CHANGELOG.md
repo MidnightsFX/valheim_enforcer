@@ -1,3 +1,9 @@
+**0.6.1**
+ ---
+ ```
+ - Adds item durability validation (configurable through ValidateItemDurability setting, default on)
+ ```
+
 **0.6.0**
  ---
  ```

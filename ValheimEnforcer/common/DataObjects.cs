@@ -66,9 +66,11 @@ namespace ValheimEnforcer.common {
             public bool QualityMatch { get; set; }
             [DefaultValue(false)]
             public bool CustomDataMatch { get; set; }
+            [DefaultValue(false)]
+            public bool DurabilityMatch { get; set; }
 
             public bool IsValid() {
-                return NameAndStackMatch && QualityMatch && CustomDataMatch;
+                return NameAndStackMatch && QualityMatch && CustomDataMatch && DurabilityMatch;
             }
         }
 
@@ -152,7 +154,7 @@ namespace ValheimEnforcer.common {
                 PlayerItems.Add(new PackedItem() {
                     prefabName = item.m_dropPrefab.name,
                     m_stack = item.m_stack,
-                    m_durability = item.m_durability,
+                    m_durability = Mathf.Clamp(item.m_durability, 0, item.m_shared.m_maxDurability),
                     m_quality = item.m_quality,
                     m_variant = item.m_variant,
                     m_worldlevel = item.m_worldLevel,

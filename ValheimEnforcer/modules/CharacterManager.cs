@@ -210,6 +210,14 @@ namespace ValheimEnforcer.modules {
                             ItemValidationSummary.QualityMatch = true;
                         }
 
+                        // Validate item durability
+                        if (ValConfig.ValidateItemDurability.Value && savedItem.m_durability != item.m_durability) {
+                            ItemValidationSummary.DurabilityMatch = false;
+                            Logger.LogDebug($"Item {item.m_dropPrefab.name} durability mismatch. Expected {savedItem.m_durability} got {item.m_durability}");
+                        } else {
+                            ItemValidationSummary.DurabilityMatch = true;
+                        }
+
                         // Check all of the custom data
                         ItemValidationSummary.CustomDataMatch = true;
                         if (ValConfig.ValidateItemCustomData.Value) {
@@ -235,7 +243,8 @@ namespace ValheimEnforcer.modules {
                     validationResults[item].ValidationMessage = $"Item {item.m_dropPrefab.name} failed validation checks against saved character data. " +
                         $"Stack Match: {ItemValidationSummary.NameAndStackMatch}, " +
                         $"Quality Match: {ItemValidationSummary.QualityMatch}, " +
-                        $"Custom Data Match: {ItemValidationSummary.CustomDataMatch}";
+                        $"Custom Data Match: {ItemValidationSummary.CustomDataMatch}, " +
+                        $"Durability Match: {ItemValidationSummary.DurabilityMatch}";
                 }
             }
 
