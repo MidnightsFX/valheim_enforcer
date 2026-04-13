@@ -154,7 +154,7 @@ namespace ValheimEnforcer.common {
                 PlayerItems.Add(new PackedItem() {
                     prefabName = item.m_dropPrefab.name,
                     m_stack = item.m_stack,
-                    m_durability = Mathf.Clamp(item.m_durability, 0, item.m_shared.m_maxDurability),
+                    m_durability = Mathf.Clamp(item.m_durability, 0, item.m_shared.m_maxDurability + (item.m_shared.m_durabilityPerLevel * Mathf.Max(item.m_quality, 1))),
                     m_quality = item.m_quality,
                     m_variant = item.m_variant,
                     m_worldlevel = item.m_worldLevel,

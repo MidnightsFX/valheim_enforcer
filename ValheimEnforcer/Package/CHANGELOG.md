@@ -1,3 +1,9 @@
+**0.6.2**
+ ---
+ ```
+ - Improves item durability save bounding
+ ```
+
 **0.6.1**
  ---
  ```
