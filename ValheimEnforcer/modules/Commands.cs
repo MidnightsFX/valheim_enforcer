@@ -103,7 +103,7 @@ namespace ValheimEnforcer.modules {
                 if (string.Compare(prefab, "all", true) == 0) {
                     Logger.LogInfo("Providing all confiscated items.");
                     foreach (var confiscatedItem in character.ConfiscatedItems) {
-                        confiscatedItem.AddToInventory(Player.m_localPlayer.m_inventory, false);
+                        confiscatedItem.AddToInventory(Player.m_localPlayer, false);
                     }
                     character.ConfiscatedItems.Clear();
                     return;
@@ -114,7 +114,7 @@ namespace ValheimEnforcer.modules {
                     foreach (var confiscatedItem in character.ConfiscatedItems) {
                         if (targetItems.Contains(confiscatedItem.prefabName) == false) { continue; }
                         Logger.LogInfo($"Providing {confiscatedItem.prefabName}");
-                        confiscatedItem.AddToInventory(Player.m_localPlayer.m_inventory, false);
+                        confiscatedItem.AddToInventory(Player.m_localPlayer, false);
                     }
                 }
             }
@@ -149,7 +149,7 @@ namespace ValheimEnforcer.modules {
                 if (string.Compare(prefab, "all", true) == 0) {
                     Logger.LogInfo("Providing all confiscated items.");
                     foreach (var confiscatedItem in character.ConfiscatedItems) {
-                        confiscatedItem.AddToInventory(Player.m_localPlayer.m_inventory, false);
+                        confiscatedItem.AddToInventory(Player.m_localPlayer, false);
                     }
                     character.ConfiscatedItems.Clear();
                     return;
@@ -160,7 +160,7 @@ namespace ValheimEnforcer.modules {
                     foreach (var confiscatedItem in character.ConfiscatedItems) {
                         if (targetItems.Contains(confiscatedItem.prefabName) == false) { continue; }
                         Logger.LogInfo($"Providing {confiscatedItem.prefabName}");
-                        confiscatedItem.AddToInventory(Player.m_localPlayer.m_inventory, false);
+                        confiscatedItem.AddToInventory(Player.m_localPlayer, false);
                     }
                 }
                 ValConfig.WritePlayerCharacterToSave(character.HostID, character);
@@ -210,7 +210,7 @@ namespace ValheimEnforcer.modules {
                     Logger.LogInfo("Local player is the target, returning player items.");
                     foreach (DataObjects.PackedItem confiscated in itemsToReturn) {
                         Logger.LogInfo($"Providing {confiscated.prefabName}");
-                        confiscated.AddToInventory(Player.m_localPlayer.m_inventory, false);
+                        confiscated.AddToInventory(Player.m_localPlayer, false);
                     }
                     ValConfig.WritePlayerCharacterToSave(account, character);
                     return;

@@ -4,6 +4,8 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using UnityEngine;
+using ValheimEnforcer.modules.compat;
+using ValheimEnforcer.modules.compat.ExtraSlots;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -93,7 +95,8 @@ namespace ValheimEnforcer.common {
             public bool m_equipped { get; set; }
             public Vector2i m_gridpos { get; set; }
 
-            public void AddToInventory(Inventory inv, bool use_position) {
+            public void AddToInventory(Player player, bool use_position) {
+                Inventory inv = player.GetInventory();
                 ZNetView.m_forceDisableInit = true;
                 GameObject refGo = PrefabManager.Instance.GetPrefab(prefabName);
                 if (refGo == null) {
@@ -124,8 +127,16 @@ namespace ValheimEnforcer.common {
                 if (use_position) {
                     itemdrop.m_itemData.m_gridPos = m_gridpos;
                     inv.AddItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, m_gridpos.x, m_gridpos.y);
+                } else if (ModCompatability.IsExtraSlotsEnabled && modules.compat.ExtraSlots.API.IsGridPositionASlot(m_gridpos)) {
+                    Logger.LogDebug($"Item {prefabName} saved grid position {m_gridpos} maps to an ExtraSlots slot. Placing into that slot.");
+                    itemdrop.m_itemData.m_gridPos = m_gridpos;
+                    inv.AddItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, m_gridpos.x, m_gridpos.y);
                 } else {
                     inv.AddItem(itemdrop.m_itemData);
+                }
+                // Restore the equipped status of the item if it was equipped
+                if (m_equipped) {
+                    player.EquipItem(itemdrop.m_itemData);
                 }
                 UnityEngine.Object.Destroy(instancedGo);
             }

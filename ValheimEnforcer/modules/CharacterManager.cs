@@ -158,7 +158,7 @@ namespace ValheimEnforcer.modules {
                     Tuple<string, int> searcher = new Tuple<string, int>(item.prefabName, item.m_stack);
                     if (!prefablist.Contains(searcher)) {
                         Logger.LogInfo($"Adding missing item to players inventory: {item.prefabName}x{item.m_stack}");
-                        item.AddToInventory(player.GetInventory(), false);
+                        item.AddToInventory(player, false);
                     }
                 }
             }

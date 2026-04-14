@@ -241,7 +241,7 @@ namespace ValheimEnforcer {
             Logger.LogInfo($"Received {items.Count} confiscated item(s) returned from server.");
             foreach (DataObjects.PackedItem item in items) {
                 Logger.LogInfo($"Adding returned confiscated item: {item.prefabName} x{item.m_stack}");
-                item.AddToInventory(Player.m_localPlayer.m_inventory, false);
+                item.AddToInventory(Player.m_localPlayer, false);
             }
             yield break;
         }

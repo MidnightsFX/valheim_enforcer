@@ -2,8 +2,9 @@
  ---
  ```
  - Cache busting between player sessions
- - Clear player character data between sessions to prevent character data sharing between characters on the same account
-
+ - Fixes character switching allowances for local only usage
+ - Add Extraslots compatability (restores items to the correct slots for characters with extraslots)
+ - Restores equipped status of items when they are returned to the player
  ```
 
 **0.6.3**
