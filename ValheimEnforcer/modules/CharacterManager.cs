@@ -329,6 +329,18 @@ namespace ValheimEnforcer.modules {
             }
         }
 
+        [HarmonyPatch(typeof(Game), nameof(Game.Logout))]
+        public static class ClearPlayerCharacterOnLogout {
+            [HarmonyPostfix]
+            [HarmonyPriority(Priority.Last)]
+            private static void Postfix() {
+                if (PlayerCharacter != null) {
+                    Logger.LogDebug($"Clearing selected save profile for {PlayerCharacter.Name} on logout.");
+                    PlayerCharacter = null;
+                }
+            }
+        }
+
         [HarmonyPatch(typeof(Player))]
         public static class LoadPlayerCustomData {
             [HarmonyPostfix]

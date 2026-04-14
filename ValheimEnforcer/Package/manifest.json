@@ -1,10 +1,11 @@
 ﻿{
   "name": "ValheimEnforcer",
   "description": "Make your friends use the agreed mods and stop bringing stuff into the server.",
-  "version_number": "0.6.2",
+  "version_number": "0.6.4",
   "website_url": "https://discord.gg/Dmr9PQTy9m",
   "dependencies": [
     "denikson-BepInExPack_Valheim-5.4.2333",
-    "ValheimModding-Jotunn-2.26.1"
+    "ValheimModding-Jotunn-2.26.1",
+    "ValheimModding-YamlDotNet-16.3.1"
   ]
 }

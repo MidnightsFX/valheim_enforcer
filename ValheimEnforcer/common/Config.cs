@@ -78,7 +78,7 @@ namespace ValheimEnforcer {
             ValidateItemDurability = BindServerConfig("Player Sync", "ValidateItemDurability", true, "If enabled, item durability will be validated");
 
 
-            InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
+            InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "WARNING: Limit 1 stored character per account. If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
         }
 
         internal static void WritePlayerCharacterToSave(string id, DataObjects.Character character) {

@@ -15,11 +15,12 @@ namespace ValheimEnforcer
     [BepInPlugin(PluginGUID, PluginName, PluginVersion)]
     [BepInDependency(Jotunn.Main.ModGuid)]
     [NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.Minor)]
+    [BepInDependency("shudnal.ExtraSlots", BepInDependency.DependencyFlags.SoftDependency)]
     internal class ValheimEnforcer : BaseUnityPlugin
     {
         public const string PluginGUID = "MidnightsFX.ValheimEnforcer";
         public const string PluginName = "ValheimEnforcer";
-        public const string PluginVersion = "0.6.2";
+        public const string PluginVersion = "0.6.4";
 
         internal static ManualLogSource Log;
         internal ValConfig cfg;

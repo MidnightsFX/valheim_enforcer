@@ -95,7 +95,12 @@ namespace ValheimEnforcer.common {
 
             public void AddToInventory(Inventory inv, bool use_position) {
                 ZNetView.m_forceDisableInit = true;
-                GameObject refGo = PrefabManager.Cache.GetPrefab<GameObject>(prefabName);
+                GameObject refGo = PrefabManager.Instance.GetPrefab(prefabName);
+                if (refGo == null) {
+                    Logger.LogError($"Could not find prefab with name {prefabName} for item with crafter name {m_crafterName} and crafter ID {m_crafterID}. This item will not be added to the inventory.");
+                    ZNetView.m_forceDisableInit = false;
+                    return;
+                }
                 GameObject instancedGo = UnityEngine.GameObject.Instantiate(refGo);
                 ZNetView.m_forceDisableInit = false;
                 ItemDrop itemdrop = instancedGo.GetComponent<ItemDrop>();

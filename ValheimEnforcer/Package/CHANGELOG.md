@@ -1,3 +1,17 @@
+**0.6.4**
+ ---
+ ```
+ - Cache busting between player sessions
+ - Clear player character data between sessions to prevent character data sharing between characters on the same account
+
+ ```
+
+**0.6.3**
+ ---
+ ```
+ - Explicitly requires yaml.net
+ ```
+
 **0.6.2**
  ---
  ```
