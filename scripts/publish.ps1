@@ -62,6 +62,9 @@ if($Target.Equals("Release")) {
     Write-Host "$PackagePath\$TargetAssembly"
     New-Item -Type Directory -Path "$PackagePath\plugins" -Force
     Copy-Item -Path "$TargetPath\$TargetAssembly" -Destination "$PackagePath\plugins\$TargetAssembly" -Force
+    # Bundle runtime dependencies (PackageReference DLLs) next to the plugin
+    # so BepInEx can resolve them at class-load time on user installs.
+    Copy-Item -Path "$TargetPath\YamlDotNet.dll" -Destination "$PackagePath\plugins\YamlDotNet.dll" -Force
     Compress-Archive -Path "$PackagePath\*" -DestinationPath "$TargetPath\$TargetAssembly.zip" -Force
 }
 
