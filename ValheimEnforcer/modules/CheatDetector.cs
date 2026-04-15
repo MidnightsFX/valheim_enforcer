@@ -182,6 +182,11 @@ namespace ValheimEnforcer.modules {
             }
 
             private static void RunScan() {
+                // Skip if the local character is not yet set
+                if (CharacterManager.PlayerCharacter == null) {
+                    return;
+                }
+
                 CheatSummaryReport report = new CheatSummaryReport {
                     PlayerName = CharacterManager.PlayerCharacter.Name,
                     PlatformID = CharacterManager.PlayerCharacter.HostID,

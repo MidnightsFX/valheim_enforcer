@@ -83,11 +83,11 @@ namespace ValheimEnforcer {
             newCharacterClearCustomData = BindServerConfig("Player Sync", "newCharacterClearCustomData", true, "If enabled, new characters will have their custom data cleared.");
             ValidateItemCustomData = BindServerConfig("Player Sync", "ValidateItemCustomData", true, "If enabled, custom data on items will be validated.");
             ValidateItemDurability = BindServerConfig("Player Sync", "ValidateItemDurability", true, "If enabled, item durability will be validated");
+            
+            // portable mode
+            InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
 
-
-            InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "WARNING: Limit 1 stored character per account. If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
-
-            EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Enable client-side scanning for known cheat tools (Cheat Engine, ValheimTooler). Detections are reported to the server.");
+            EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", false, "Enable client-side scanning for known cheat tools (Cheat Engine, ValheimTooler). Detections are reported to the server.");
             DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Scan loaded assemblies for ValheimTooler. High confidence, very low cost.");
             DetectCheatEngine = BindServerConfig("Anti-Cheat", "DetectCheatEngine", true, "Scan for Cheat Engine (processes, windows, injected speedhack/DBK modules, debugger). Note: Cheat Engine has legitimate uses — prefer Log action over Kick/Ban.");
             //DetectSpeedhack = BindServerConfig("Anti-Cheat", "DetectSpeedhack", true, "Detect speedhack via Unity time vs. wall-clock drift.");

@@ -328,9 +328,14 @@ namespace ValheimEnforcer.modules {
                 Transform footerTForm = ContentView.transform.Find("Error Messages Text");
                 if (footerTForm != null) { FooterText = footerTForm.GetComponent<Text>(); } else { Logger.LogDebug("Could not find FooterText"); }
 
-                HeaderText.text = $"<color=#FFA13C>Failed Connection:</color>\n{HeaderMessage}";
-
-                FooterText.text = $"<color=#FFA13C>Further Steps:</color>\n{FooterMessage}";
+                // Only override when VE has an actual message to add.
+                // Otherwise preserve whatever Jotunn (or another mod) already wrote to the compatibility window.
+                if (HeaderText != null && !string.IsNullOrEmpty(HeaderMessage)) {
+                    HeaderText.text = $"<color=#FFA13C>Failed Connection:</color>\n{HeaderMessage}";
+                }
+                if (FooterText != null && !string.IsNullOrEmpty(FooterMessage)) {
+                    FooterText.text = $"<color=#FFA13C>Further Steps:</color>\n{FooterMessage}";
+                }
                 Logger.LogDebug($"Set error results. H:{HeaderMessage} F:{FooterMessage}");
                 textset = true;
             }

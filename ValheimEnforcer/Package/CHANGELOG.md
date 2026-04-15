@@ -1,9 +1,10 @@
-**0.6.5**
+**0.7.0**
  ---
  ```
+ - Added a confiscation reason field on items confiscated, field is optional but will be set for all confiscated items
  - Removed redundant NewCharacterSkillsCleared setting (replaced by NewCharacterSetSkillsToZero)
 	- Set NewCharacterSetSkillsToZero default to false
- - Added CheatDetector module
+ - Added CheatDetector module (in testing, disabled by default)
 	- Client-side scanning for ValheimTooler (loaded assemblies) and Cheat Engine (process name, window class, injected speedhack/DBK modules, debugger, time-drift speedhack)
 	- New Anti-Cheat config section; default ActionOnDetection=Log
 	- Detections reported to server via new VENFORCE_CHEAT RPC

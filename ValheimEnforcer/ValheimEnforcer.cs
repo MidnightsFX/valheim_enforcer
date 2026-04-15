@@ -20,7 +20,7 @@ namespace ValheimEnforcer
     {
         public const string PluginGUID = "MidnightsFX.ValheimEnforcer";
         public const string PluginName = "ValheimEnforcer";
-        public const string PluginVersion = "0.6.5";
+        public const string PluginVersion = "0.7.0";
 
         internal static ManualLogSource Log;
         internal ValConfig cfg;
@@ -42,7 +42,7 @@ namespace ValheimEnforcer
             GUIManager.OnCustomGUIAvailable += ModManager.AddErrorMessageDetailsForMenu;
             InternalDataStore.RegisterMetadataHolder();
             TerminalCommands.AddCommands();
-            CheatDetector.Initialize();
+            MinimapManager.OnVanillaMapDataLoaded += CheatDetector.Initialize;
 
             Harmony harmony = Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
         }

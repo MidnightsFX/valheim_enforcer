@@ -52,12 +52,6 @@ namespace ValheimEnforcer.common {
             }
         }
 
-        public class CheatReport {
-            public string Signal { get; set; }
-            public string Detail { get; set; }
-            public string TimestampUtc { get; set; }
-        }
-
         public class CheatEngineDetector {
             public bool CheatEngineModuleLoaded { get; set; }
             public bool CheatEngineProcessDetected { get; set; }
@@ -119,6 +113,7 @@ namespace ValheimEnforcer.common {
             [DefaultValue(false)]
             public bool m_equipped { get; set; }
             public Vector2i m_gridpos { get; set; }
+            public string confiscatedReason { get; set; }
 
             public void AddToInventory(Player player, bool use_position) {
                 Inventory inv = player.GetInventory();
@@ -207,10 +202,10 @@ namespace ValheimEnforcer.common {
                 });
             }
 
-            public void AddConfiscatedItem(ItemDrop.ItemData item) {
+            public void AddConfiscatedItem(ItemDrop.ItemData item, string reason = "") {
                 if (ConfiscatedItems == null) { ConfiscatedItems = new List<PackedItem>(); }
 
-                ConfiscatedItems.Add(new PackedItem() {
+                PackedItem packedItem = new PackedItem() {
                     prefabName = item.m_dropPrefab.name,
                     m_stack = item.m_stack,
                     m_durability = item.m_durability,
@@ -222,7 +217,12 @@ namespace ValheimEnforcer.common {
                     m_customdata = item.m_customData,
                     m_equipped = item.m_equipped,
                     m_gridpos = item.m_gridPos
-                });
+                };
+
+                if (string.IsNullOrEmpty(reason) == false) {
+                    packedItem.confiscatedReason = reason;
+                }
+                ConfiscatedItems.Add(packedItem);
             }
         }
     }

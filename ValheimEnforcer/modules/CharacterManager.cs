@@ -105,12 +105,12 @@ namespace ValheimEnforcer.modules {
                         player.m_inventory.GetAllItems().ForEach(item => {
                             if (!staringAllowedPrefabs.Contains(item.m_dropPrefab.name)) {
                                 Logger.LogInfo($"Removing non-starter item {item.m_dropPrefab.name}x{item.m_stack} from new player {savableChar.Name}");
-                                savableChar.AddConfiscatedItem(item);
+                                savableChar.AddConfiscatedItem(item, "New character, non-starter item");
                                 removeItems.Add(item);
                             }
                             if (item.m_quality > 1) {
                                 Logger.LogInfo($"Removing high quality item {item.m_dropPrefab.name}x{item.m_stack} with quality {item.m_quality} from new player {savableChar.Name}");
-                                savableChar.AddConfiscatedItem(item);
+                                savableChar.AddConfiscatedItem(item, $"Item quality did not match saved item {item.m_quality}");
                                 removeItems.Add(item);
                             }
                         });
@@ -137,7 +137,7 @@ namespace ValheimEnforcer.modules {
                 foreach (KeyValuePair<ItemDrop.ItemData, ItemValidatorResult> eval in ValidatorResults) {
                     if (eval.Value.Validated == false) {
                         Logger.LogInfo($"Removing item {eval.Key.m_dropPrefab.name}x{eval.Key.m_stack} from player {savableChar.Name}. Validation message: {eval.Value.ValidationMessage}");
-                        savableChar.AddConfiscatedItem(eval.Key);
+                        savableChar.AddConfiscatedItem(eval.Key, eval.Value.ValidationMessage);
                         player.UnequipItem(eval.Key);
                         player.GetInventory().RemoveItem(eval.Key);
                     }
