@@ -52,6 +52,31 @@ namespace ValheimEnforcer.common {
             }
         }
 
+        public class CheatReport {
+            public string Signal { get; set; }
+            public string Detail { get; set; }
+            public string TimestampUtc { get; set; }
+        }
+
+        public class CheatEngineDetector {
+            public bool CheatEngineModuleLoaded { get; set; }
+            public bool CheatEngineProcessDetected { get; set; }
+            public bool IsCheatEngineDetected() {
+                return CheatEngineModuleLoaded || CheatEngineProcessDetected;
+            }
+        }
+
+        public class CheatSummaryReport {
+            public string PlayerName { get; set; }
+            public string PlatformID { get; set; }
+            public CheatEngineDetector CheatEngineStatus { get; set; }
+            public bool ValheimToolerStatus { get; set; }
+
+            public bool cheatsDetected() {
+                return (CheatEngineStatus != null && CheatEngineStatus.IsCheatEngineDetected()) || ValheimToolerStatus;
+            }
+        }
+
         public class ItemValidatorResult {
             public PackedItem SavedItemRef { get; set; }
             public ItemDrop.ItemData CharacterItemRef { get; set; }

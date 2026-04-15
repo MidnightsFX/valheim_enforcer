@@ -29,6 +29,13 @@ namespace ValheimEnforcer {
 
         public static ConfigEntry<bool> InternalStorageMode;
 
+        public static ConfigEntry<bool> EnableCheatDetection;
+        public static ConfigEntry<bool> DetectCheatEngine;
+        public static ConfigEntry<bool> DetectValheimTooler;
+        public static ConfigEntry<bool> DetectSpeedhack;
+        public static ConfigEntry<string> CheatDetectionAction;
+        public static ConfigEntry<int> CheatScanIntervalSeconds;
+
         internal const string ModsFileName = "Mods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
         internal const string CharacterFolder = "Characters";
@@ -37,6 +44,7 @@ namespace ValheimEnforcer {
 
         internal static CustomRPC CharacterSaveRPC;
         internal static CustomRPC ReturnConfiscatedItemsRPC;
+        internal static CustomRPC CheatDetectionRPC;
 
         public ValConfig(ConfigFile cf) {
             // ensure all the config values are created
@@ -48,6 +56,7 @@ namespace ValheimEnforcer {
 
             CharacterSaveRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHAR", OnServerRecieveCharacter, OnClientReceiveCharacter);
             ReturnConfiscatedItemsRPC = NetworkManager.Instance.AddRPC("VENFORCE_RETURN_CONFISCATED", OnServerReturnConfiscatedReceive, OnClientReceiveConfiscatedItems);
+            CheatDetectionRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHEAT", OnServerReceiveCheatReport, OnClientReceiveCheatReport);
 
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
@@ -77,6 +86,13 @@ namespace ValheimEnforcer {
 
 
             InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "WARNING: Limit 1 stored character per account. If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
+
+            EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Enable client-side scanning for known cheat tools (Cheat Engine, ValheimTooler). Detections are reported to the server.");
+            DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Scan loaded assemblies for ValheimTooler. High confidence, very low cost.");
+            DetectCheatEngine = BindServerConfig("Anti-Cheat", "DetectCheatEngine", true, "Scan for Cheat Engine (processes, windows, injected speedhack/DBK modules, debugger). Note: Cheat Engine has legitimate uses — prefer Log action over Kick/Ban.");
+            //DetectSpeedhack = BindServerConfig("Anti-Cheat", "DetectSpeedhack", true, "Detect speedhack via Unity time vs. wall-clock drift.");
+            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a client reports a cheat detection.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
+            CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 5, "Seconds between scans on the client.", false, 1, 60);
         }
 
         internal static void WritePlayerCharacterToSave(string id, DataObjects.Character character) {
@@ -231,6 +247,47 @@ namespace ValheimEnforcer {
 
         public static IEnumerator OnServerReturnConfiscatedReceive(long sender, ZPackage package) {
             // Clients should not send this RPC to the server
+            yield break;
+        }
+
+        public static IEnumerator OnServerReceiveCheatReport(long sender, ZPackage package) {
+            string yaml = package.ReadString();
+            DataObjects.CheatSummaryReport summary;
+            try {
+                summary = DataObjects.yamldeserializer.Deserialize<DataObjects.CheatSummaryReport>(yaml);
+            } catch (Exception e) {
+                Logger.LogWarning($"Failed to deserialize cheat report from {sender}: {e.Message}");
+                yield break;
+            }
+
+            ZNetPeer peer = ZNet.instance.GetPeer(sender);
+            string playerName = summary.PlayerName;
+            string endpoint = peer.m_socket.GetEndPointString();
+            Logger.LogWarning($"Cheat detection from {playerName} ({endpoint}): valheim-tooler: {summary.ValheimToolerStatus} cheatengine: {summary.CheatEngineStatus.IsCheatEngineDetected()}");
+
+            string action = CheatDetectionAction.Value ?? "Log";
+            if (peer == null) {
+                Logger.LogWarning($"Received cheat report for {playerName} but could not find corresponding peer. No action will be taken.");
+                yield break;
+            }
+            switch (action) {
+                case "Kick":
+                    Logger.LogWarning($"Kicking {playerName} for cheat usage.");
+                    ZNet.instance.Kick(playerName);
+                    break;
+                case "Ban":
+                    Logger.LogWarning($"Banning {playerName} for cheat usage.");
+                    ZNet.instance.Ban(playerName);
+                    break;
+                case "Log":
+                default:
+                    break;
+            }
+            yield break;
+        }
+
+        public static IEnumerator OnClientReceiveCheatReport(long sender, ZPackage package) {
+            // Client -> server only; clients do not act on this RPC.
             yield break;
         }
 

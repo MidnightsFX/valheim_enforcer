@@ -42,6 +42,7 @@ namespace ValheimEnforcer
             GUIManager.OnCustomGUIAvailable += ModManager.AddErrorMessageDetailsForMenu;
             InternalDataStore.RegisterMetadataHolder();
             TerminalCommands.AddCommands();
+            CheatDetector.Initialize();
 
             Harmony harmony = Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
         }

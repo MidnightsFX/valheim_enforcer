@@ -3,6 +3,10 @@
  ```
  - Removed redundant NewCharacterSkillsCleared setting (replaced by NewCharacterSetSkillsToZero)
 	- Set NewCharacterSetSkillsToZero default to false
+ - Added CheatDetector module
+	- Client-side scanning for ValheimTooler (loaded assemblies) and Cheat Engine (process name, window class, injected speedhack/DBK modules, debugger, time-drift speedhack)
+	- New Anti-Cheat config section; default ActionOnDetection=Log
+	- Detections reported to server via new VENFORCE_CHEAT RPC
  ```
 
 **0.6.4**

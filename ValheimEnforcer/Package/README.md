@@ -8,7 +8,6 @@ By default this mod will enforce character server saves and require clients to o
 ## Feature Roadmap
 The following features are not yet implemented but currently planned:
 
-- Automatic kick/ban for players detected with cheat engines
 - Automatic Mod suggestions for clients that are missing mods or have incorrect versions
 - Platform ID based 'Moderator' mod list that allows server owners to easily give mod permissions to specific players without making them admins
 
@@ -29,6 +28,11 @@ Mod Enforcement. All of the following features are configurable (server authorat
 - All mods are checked on connection, allows strict version enforcement
 - Prevents users connecting with mods not listed
 - Optional configuration for requiredMods, optionalMods and adminOnlyMods
+
+Cheat detection.
+- Automatic log, kick or ban for common cheating utilities
+
+*Disclaimer: Valheim is client authoratative and without extremely invasive measures, cheating cannot be fully prevented. This is a deterrent, not a solution.*
 
 ### Server Management
 
