@@ -20,7 +20,6 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> RemoveNontrackedItemsFromJoiningPlayers;
         public static ConfigEntry<bool> AddMissingItemsFromPlayerServerSave;
         public static ConfigEntry<bool> PreventExternalSkillRaises;
-        public static ConfigEntry<bool> NewCharactersSkillsCleared;
         public static ConfigEntry<bool> NewCharactersRemoveExtraItems;
         public static ConfigEntry<bool> NewCharacterSetSkillsToZero;
         public static ConfigEntry<bool> newCharacterClearCustomData;
@@ -69,9 +68,8 @@ namespace ValheimEnforcer {
             RemoveNontrackedItemsFromJoiningPlayers = BindServerConfig("Player Sync", "RemoveNontrackedItemsFromJoiningPlayers", true, "If enabled, any items that are not tracked by the server will be removed from joining player's inventories.");
             AddMissingItemsFromPlayerServerSave = BindServerConfig("Player Sync", "AddMissingItemsFromPlayerServerSave", true, "If enabled, any items the player does not have that are listed on the server will be given to the player when joining");
             PreventExternalSkillRaises = BindServerConfig("Player Sync", "PreventExternalSkillRaises", true, "If enabled, player skill gains outside of the server are removed when connecting.");
-            NewCharactersSkillsCleared = BindServerConfig("Player Sync", "NewCharactersSkillsCleared", false, "If enabled, new characters that have no existing character file will have all skills set to 0.");
             NewCharactersRemoveExtraItems = BindServerConfig("Player Sync", "NewCharactersRemoveExtraItems", false, "If enabled, new characters that have no existing character file will have all items removed except for starting items.");
-            NewCharacterSetSkillsToZero = BindServerConfig("Player Sync", "NewCharacterSetSkillsToZero", true, "If enabled, new characters will have their skills set to zero. Prevents players from raising skills before connecting.");
+            NewCharacterSetSkillsToZero = BindServerConfig("Player Sync", "NewCharacterSetSkillsToZero", false, "If enabled, new characters will have their skills set to zero. Prevents players from raising skills before connecting.");
             PreventExternalCustomDataChanges = BindServerConfig("Player Sync", "PreventExternalCustomDataChanges", true, "If enabled, tracks player custom data. Warning: custom data can be large and can impact how other mods function.");
             newCharacterClearCustomData = BindServerConfig("Player Sync", "newCharacterClearCustomData", true, "If enabled, new characters will have their custom data cleared.");
             ValidateItemCustomData = BindServerConfig("Player Sync", "ValidateItemCustomData", true, "If enabled, custom data on items will be validated.");

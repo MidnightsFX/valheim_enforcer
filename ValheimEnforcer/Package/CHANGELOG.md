@@ -1,3 +1,10 @@
+**0.6.5**
+ ---
+ ```
+ - Removed redundant NewCharacterSkillsCleared setting (replaced by NewCharacterSetSkillsToZero)
+	- Set NewCharacterSetSkillsToZero default to false
+ ```
+
 **0.6.4**
  ---
  ```

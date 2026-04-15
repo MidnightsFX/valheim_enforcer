@@ -86,18 +86,14 @@ namespace ValheimEnforcer.modules {
 
                 // Nothing to load from file, create a new character and assign current player data
                 if (savableChar == null) {
-                    if (ValConfig.NewCharactersSkillsCleared.Value) {
-                        Logger.LogInfo($"New character save for player {PlayerName} with ID {playerID}, skills set to zero.");
-                        player.GetSkills().CheatResetSkill("all");
-                    }
                     savableChar = new DataObjects.Character() {
                         Name = player.GetPlayerName(),
                         HostID = playerID,
                         SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level),
                     };
                     if (ValConfig.NewCharacterSetSkillsToZero.Value) {
-                        Logger.LogInfo("Setting new character skills to zero.");
-                        
+                        Logger.LogInfo($"New character save for player {PlayerName} with ID {playerID}, skills set to zero.");
+
                         foreach (Skills.SkillType skillKey in savableChar.SkillLevels.Keys.ToList()) {
                             savableChar.SkillLevels[skillKey] = 0;
                         }
