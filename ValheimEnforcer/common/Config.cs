@@ -26,6 +26,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> PreventExternalCustomDataChanges;
         public static ConfigEntry<bool> ValidateItemCustomData;
         public static ConfigEntry<bool> ValidateItemDurability;
+        public static ConfigEntry<float> ItemValidationDurabilityAllowedVariance;
 
         public static ConfigEntry<bool> InternalStorageMode;
 
@@ -83,7 +84,9 @@ namespace ValheimEnforcer {
             newCharacterClearCustomData = BindServerConfig("Player Sync", "newCharacterClearCustomData", true, "If enabled, new characters will have their custom data cleared.");
             ValidateItemCustomData = BindServerConfig("Player Sync", "ValidateItemCustomData", true, "If enabled, custom data on items will be validated.");
             ValidateItemDurability = BindServerConfig("Player Sync", "ValidateItemDurability", true, "If enabled, item durability will be validated");
-            
+            ItemValidationDurabilityAllowedVariance = BindServerConfig("Player Sync", "ItemValidationDurabilityAllowedVariance", 10f, "Allowed variance for item durability validation.", true, 0, 100f);
+
+
             // portable mode
             InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
 

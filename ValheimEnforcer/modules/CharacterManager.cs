@@ -191,6 +191,7 @@ namespace ValheimEnforcer.modules {
                 validationResults.Add(item, new ItemValidatorResult() {
                     CharacterItemRef = item,
                 });
+                string validationReason = "";
 
                 foreach (DataObjects.PackedItem savedItem in savedChar.PlayerItems) {
                     //Logger.LogInfo($"Comparing {savedItem.prefabName} == {item.m_dropPrefab.name} && {savedItem.m_stack} == {item.m_stack}");
@@ -204,11 +205,13 @@ namespace ValheimEnforcer.modules {
                         //Logger.LogDebug($"Checking Quality: {quality} == {item.m_quality}");
                         if (quality == item.m_quality) {
                             ItemValidationSummary.QualityMatch = true;
+                            validationReason += $"{quality} != {item.m_quality} ";
                         }
 
                         // Validate item durability
-                        if (ValConfig.ValidateItemDurability.Value && savedItem.m_durability != item.m_durability) {
+                        if (ValConfig.ValidateItemDurability.Value && savedItem.m_durability > (item.m_durability - ValConfig.ItemValidationDurabilityAllowedVariance.Value) && savedItem.m_durability < (item.m_durability + ValConfig.ItemValidationDurabilityAllowedVariance.Value)) {
                             ItemValidationSummary.DurabilityMatch = false;
+                            validationReason += $"Durability mismatch. Expected {savedItem.m_durability} got {item.m_durability} ";
                             Logger.LogDebug($"Item {item.m_dropPrefab.name} durability mismatch. Expected {savedItem.m_durability} got {item.m_durability}");
                         } else {
                             ItemValidationSummary.DurabilityMatch = true;
@@ -220,6 +223,7 @@ namespace ValheimEnforcer.modules {
                             foreach (KeyValuePair<string, string> playerItemKVP in item.m_customData) {
                                 if (savedItem.m_customdata.ContainsKey(playerItemKVP.Key) && savedItem.m_customdata[playerItemKVP.Key] != playerItemKVP.Value) {
                                     ItemValidationSummary.CustomDataMatch = false;
+                                    validationReason += $"Custom data mismatch on key {playerItemKVP.Key}. Expected {savedItem.m_customdata[playerItemKVP.Key]} got {playerItemKVP.Value} ";
                                     Logger.LogDebug($"Item {item.m_dropPrefab.name} custom data mismatch on key {playerItemKVP.Key}. Expected {savedItem.m_customdata[playerItemKVP.Key]} got {playerItemKVP.Value}");
                                 }
                             }
@@ -240,7 +244,8 @@ namespace ValheimEnforcer.modules {
                         $"Stack Match: {ItemValidationSummary.NameAndStackMatch}, " +
                         $"Quality Match: {ItemValidationSummary.QualityMatch}, " +
                         $"Custom Data Match: {ItemValidationSummary.CustomDataMatch}, " +
-                        $"Durability Match: {ItemValidationSummary.DurabilityMatch}";
+                        $"Durability Match: {ItemValidationSummary.DurabilityMatch} | " +
+                        $"{validationReason}";
                 }
             }
 

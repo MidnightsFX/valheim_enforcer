@@ -1,3 +1,10 @@
+**0.7.1**
+ ---
+ ```
+ - Adds a very small amount of variance allowed for float rounding when validating item durability
+ - Adds extra details to the confiscation reason
+ ```
+
 **0.7.0**
  ---
  ```
