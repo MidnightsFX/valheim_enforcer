@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using UnityEngine;
 using ValheimEnforcer.modules.compat;
-using ValheimEnforcer.modules.compat.ExtraSlots;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -16,6 +15,10 @@ namespace ValheimEnforcer.common {
         public static ISerializer yamlserializer = new SerializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitDefaults).Build();
 
         public static readonly string CustomDataKey = "VE_CUSTOM_DATA";
+
+        private static readonly int Poison = "Poison".GetStableHashCode();
+        private static readonly int Burning = "Burning".GetStableHashCode();
+        private static readonly int Spirit = "Spirit".GetStableHashCode();
 
         public class Mod {
             public string PluginID { get; set; }
@@ -96,6 +99,82 @@ namespace ValheimEnforcer.common {
         }
 
         [Serializable]
+        public class PackedStatusEffect {
+            // This is effectively the remaining TTL
+            public float TimeRemaining { get; set; }
+            public float Time { get; set; }
+            public int NameHash { get; set; }
+            [DefaultValue(0f)]
+            public float DamageLeft { get; set; } = 0f;
+            [DefaultValue(0f)]
+            public float DamagePerHit { get; set; } = 0f;
+            [DefaultValue(0f)]
+            public float FireDamageLeft { get; set; } = 0f;
+            [DefaultValue(0f)]
+            public float FireDamagePerHit { get; set; } = 0f;
+            [DefaultValue(0f)]
+            public float SpiritDamageLeft { get; set; } = 0f;
+            [DefaultValue(0f)]
+            public float SpiritDamagePerHit { get; set; } = 0f;
+
+            // Default constructor is used by unity
+            public PackedStatusEffect() {
+            }
+
+            public PackedStatusEffect(StatusEffect status) {
+                NameHash = status.NameHash();
+                TimeRemaining = status.m_ttl;
+                Time = status.m_time;
+
+                if (NameHash == Poison) {
+                    SE_Poison sePosion = (SE_Poison)status;
+                    DamageLeft = sePosion.m_damageLeft;
+                    DamagePerHit = sePosion.m_damagePerHit;
+                } else if (NameHash == Burning || NameHash == Spirit) {
+                    SE_Burning seBurining = (SE_Burning)status;
+                    FireDamageLeft = seBurining.m_fireDamageLeft;
+                    FireDamagePerHit = seBurining.m_fireDamagePerHit;
+                    SpiritDamageLeft = seBurining.m_spiritDamageLeft;
+                    SpiritDamagePerHit = seBurining.m_spiritDamagePerHit;
+                }
+            }
+
+            public StatusEffect ToStatusEffect() {
+                StatusEffect original = ObjectDB.instance.GetStatusEffect(NameHash);
+
+                if (original == null) {
+                    Logger.LogWarning($"Tried to get a status effect which does not exist ID:{NameHash}");
+                    return null;
+                }
+
+                StatusEffect se = original.Clone();
+
+                if (NameHash == Poison) {
+                    var sePoison = (SE_Poison)se;
+                    sePoison.m_ttl = TimeRemaining;
+                    sePoison.m_time = Time;
+                    sePoison.m_damageLeft = DamageLeft;
+                    sePoison.m_damagePerHit = DamagePerHit;
+                    return sePoison;
+                }
+
+                if (NameHash == Burning || NameHash == Spirit) {
+                    SE_Burning seBurning = (SE_Burning)se;
+                    seBurning.m_ttl = TimeRemaining;
+                    seBurning.m_time = Time;
+                    seBurning.m_fireDamageLeft = FireDamageLeft;
+                    seBurning.m_fireDamagePerHit = FireDamagePerHit;
+                    seBurning.m_spiritDamageLeft = SpiritDamageLeft;
+                    seBurning.m_spiritDamagePerHit = SpiritDamagePerHit;
+                    return seBurning;
+                }
+
+
+                return se;
+            }
+        }
+
+        [Serializable]
         public class PackedItem {
             public string prefabName { get; set; }
             public int m_stack { get; set; }
@@ -171,14 +250,11 @@ namespace ValheimEnforcer.common {
         }
 
         public class Character {
-            public string Name {
-                get; set;
-            }
-            public string HostID {
-                get; set;
-            }
+            public string Name { get; set; }
+            public string HostID { get; set; }
             public Dictionary<Skills.SkillType, float> SkillLevels { get; set; } = new Dictionary<Skills.SkillType, float>();
             public Dictionary<string, string> PlayerCustomData { get; set; } = new Dictionary<string, string>();
+            public Dictionary<string, PackedStatusEffect> ActiveCharacterEffects { get; set; } = new Dictionary<string, PackedStatusEffect>();
             public List<PackedItem> PlayerItems { get; set; } = new List<PackedItem>();
             public List<PackedItem> ConfiscatedItems { get; set; } = new List<PackedItem>();
 

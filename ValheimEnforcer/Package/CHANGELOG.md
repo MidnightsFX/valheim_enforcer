@@ -1,3 +1,12 @@
+**0.7.2**
+ ---
+ ```
+ - Adds support for status effect tracking between sessions (configurable)
+	- Status effects (such as poison) will now be applied when you log back in, with their previous durations etc
+	- No more save scumming for a 60s poison tick
+	- On the plus side, your rested buff now stays between play sessions!
+ ```
+
 **0.7.1**
  ---
  ```

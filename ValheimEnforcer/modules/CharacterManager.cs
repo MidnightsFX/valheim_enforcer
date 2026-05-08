@@ -12,6 +12,7 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using ValheimEnforcer.common;
 using static ValheimEnforcer.common.DataObjects;
+using static Version;
 
 namespace ValheimEnforcer.modules {
     internal static class CharacterManager {
@@ -172,6 +173,16 @@ namespace ValheimEnforcer.modules {
             }
             Logger.LogDebug($"Validated player skills.");
 
+            if (ValConfig.SavePlayerStatusEffectsOnLogout.Value && savableChar.ActiveCharacterEffects != null && savableChar.ActiveCharacterEffects.Count > 0) {
+                SEMan pseman = player.GetSEMan();
+                foreach (KeyValuePair<string, PackedStatusEffect> kvp in savableChar.ActiveCharacterEffects) {
+                    Logger.LogDebug($"Applying status effect: {kvp.Key}");
+                    pseman.AddStatusEffect(kvp.Value.ToStatusEffect());
+                }
+                savableChar.ActiveCharacterEffects.Clear();
+                Logger.LogDebug("Validated saved status effects.");
+            }
+
             PlayerCharacter = savableChar;
             ValConfig.WritePlayerCharacterToSave(playerID, savableChar);
 
@@ -209,10 +220,10 @@ namespace ValheimEnforcer.modules {
                         }
 
                         // Validate item durability
-                        if (ValConfig.ValidateItemDurability.Value && savedItem.m_durability > (item.m_durability - ValConfig.ItemValidationDurabilityAllowedVariance.Value) && savedItem.m_durability < (item.m_durability + ValConfig.ItemValidationDurabilityAllowedVariance.Value)) {
+                        if (ValConfig.ValidateItemDurability.Value && item.m_durability <= (savedItem.m_durability - ValConfig.ItemValidationDurabilityAllowedVariance.Value) && item.m_durability >= (savedItem.m_durability + ValConfig.ItemValidationDurabilityAllowedVariance.Value)) {
                             ItemValidationSummary.DurabilityMatch = false;
                             validationReason += $"Durability mismatch. Expected {savedItem.m_durability} got {item.m_durability} ";
-                            Logger.LogDebug($"Item {item.m_dropPrefab.name} durability mismatch. Expected {savedItem.m_durability} got {item.m_durability}");
+                            Logger.LogDebug($"Item {item.m_dropPrefab.name} durability mismatch. Expected {savedItem.m_durability} got {item.m_durability} | {item.m_durability} >= {(savedItem.m_durability - ValConfig.ItemValidationDurabilityAllowedVariance.Value)} && {item.m_durability} <= {(savedItem.m_durability + ValConfig.ItemValidationDurabilityAllowedVariance.Value)}");
                         } else {
                             ItemValidationSummary.DurabilityMatch = true;
                         }
@@ -291,6 +302,17 @@ namespace ValheimEnforcer.modules {
                     if (ValConfig.PreventExternalCustomDataChanges.Value) {
                         savableChar.PlayerCustomData = __instance.m_customData;
                     }
+                    if (ValConfig.SavePlayerStatusEffectsOnLogout.Value) {
+                        savableChar.ActiveCharacterEffects.Clear();
+                        foreach (StatusEffect se in __instance.GetSEMan().GetStatusEffects()) {
+                            Logger.LogDebug($"Saving active status effect: {se.name}");
+                            if (savableChar.ActiveCharacterEffects.ContainsKey(se.name)) {
+                                savableChar.ActiveCharacterEffects[se.name] = new PackedStatusEffect(se);
+                            } else {
+                                savableChar.ActiveCharacterEffects.Add(se.name, new PackedStatusEffect(se));
+                            }
+                        }
+                    } 
                 } else {
                     Logger.LogDebug($"Existing character data found for player {PlayerName} with ID {playerID}. Updating character data with current player information.");
                     savableChar.SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
@@ -305,6 +327,19 @@ namespace ValheimEnforcer.modules {
                         savableChar.AddItemToPlayerItems(item);
                     }
                     Logger.LogDebug($"Updated player Items for {PlayerName} with ID {playerID}.");
+
+                    if (ValConfig.SavePlayerStatusEffectsOnLogout.Value) {
+                        savableChar.ActiveCharacterEffects.Clear();
+                        foreach (StatusEffect se in __instance.GetSEMan().GetStatusEffects()) {
+                            Logger.LogDebug($"Saving active status effect: {se.name}");
+                            if (savableChar.ActiveCharacterEffects.ContainsKey(se.name)) {
+                                savableChar.ActiveCharacterEffects[se.name] = new PackedStatusEffect(se);
+                            } else {
+                                savableChar.ActiveCharacterEffects.Add(se.name, new PackedStatusEffect(se));
+                            }
+                        }
+                        Logger.LogDebug("Updated player active status effects.");
+                    }
                 }
 
                 if (savableChar == null) {

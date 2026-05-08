@@ -27,6 +27,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> ValidateItemCustomData;
         public static ConfigEntry<bool> ValidateItemDurability;
         public static ConfigEntry<float> ItemValidationDurabilityAllowedVariance;
+        public static ConfigEntry<bool> SavePlayerStatusEffectsOnLogout;
 
         public static ConfigEntry<bool> InternalStorageMode;
 
@@ -85,7 +86,7 @@ namespace ValheimEnforcer {
             ValidateItemCustomData = BindServerConfig("Player Sync", "ValidateItemCustomData", true, "If enabled, custom data on items will be validated.");
             ValidateItemDurability = BindServerConfig("Player Sync", "ValidateItemDurability", true, "If enabled, item durability will be validated");
             ItemValidationDurabilityAllowedVariance = BindServerConfig("Player Sync", "ItemValidationDurabilityAllowedVariance", 10f, "Allowed variance for item durability validation.", true, 0, 100f);
-
+            SavePlayerStatusEffectsOnLogout = BindServerConfig("Player Sync", "SavePlayerStatusEffectsOnLogout", true, "Whether or not to save active character effects on logout and reapply on login");
 
             // portable mode
             InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
@@ -131,10 +132,12 @@ namespace ValheimEnforcer {
         }
 
         public static string GetSecondaryConfigDirectoryPath() {
-            var patchesFolderPath = Path.Combine(Paths.ConfigPath, ValheimEnforcer);
-            var dirInfo = Directory.CreateDirectory(patchesFolderPath);
-
-            return dirInfo.FullName;
+            string patchesFolderPath = Path.Combine(Paths.ConfigPath, ValheimEnforcer);
+            if (!Directory.Exists(patchesFolderPath)) {
+                Directory.CreateDirectory(patchesFolderPath);
+            }
+            
+            return patchesFolderPath;
         }
 
         internal void LoadYamlConfigs(Dictionary<string, Action<string>> configFilesToFind) {
