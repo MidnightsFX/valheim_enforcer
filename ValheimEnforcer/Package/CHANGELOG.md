@@ -1,3 +1,9 @@
+**0.7.3**
+ ---
+ ```
+ - Polling filewatcher for better server side support with unix/hybrid storage (default check interval is 30s, configurable)
+ ```
+
 **0.7.2**
  ---
  ```

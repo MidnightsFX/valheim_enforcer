@@ -30,6 +30,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> SavePlayerStatusEffectsOnLogout;
 
         public static ConfigEntry<bool> InternalStorageMode;
+        public static ConfigEntry<int> ConfigPollIntervalSeconds;
 
         public static ConfigEntry<bool> EnableCheatDetection;
         public static ConfigEntry<bool> DetectCheatEngine;
@@ -54,6 +55,7 @@ namespace ValheimEnforcer {
             cfg.SaveOnConfigSet = true;
             CreateConfigValues(cf);
             Logger.SetDebugLogging(EnableDebugMode.Value);
+            ConfigFileWatcher.Initialize();
             SetupMainFileWatcher();
 
             CharacterSaveRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHAR", OnServerRecieveCharacter, OnClientReceiveCharacter);
@@ -90,6 +92,7 @@ namespace ValheimEnforcer {
 
             // portable mode
             InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
+            ConfigPollIntervalSeconds = BindServerConfig("Advanced", "ConfigPollIntervalSeconds", 30, "How frequently (in seconds) the mod polls config files on disk for changes.", advanced: true, valmin: 1, valmax: 300);
 
             EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", false, "Enable client-side scanning for known cheat tools (Cheat Engine, ValheimTooler). Detections are reported to the server.");
             DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Scan loaded assemblies for ValheimTooler. High confidence, very low cost.");
@@ -164,31 +167,23 @@ namespace ValheimEnforcer {
             foreach (string configFile in foundConfigs) {
                 string file = Path.GetFileName(configFile);
                 Logger.LogDebug($"Setting filewatcher for {file}");
-                SetupFileWatcher(file);
+                SetupFileWatcher(configFile);
             }
         }
 
-        private void SetupFileWatcher(string filtername) {
-            FileSystemWatcher fw = new FileSystemWatcher();
-            fw.Path = ValConfig.GetSecondaryConfigDirectoryPath();
-            fw.NotifyFilter = NotifyFilters.LastWrite;
-            fw.Filter = filtername;
-            fw.Changed += new FileSystemEventHandler(UpdateConfigFileOnChange);
-            fw.Created += new FileSystemEventHandler(UpdateConfigFileOnChange);
-            fw.Renamed += new RenamedEventHandler(UpdateConfigFileOnChange);
-            fw.SynchronizingObject = ThreadingHelper.SynchronizingObject;
-            fw.EnableRaisingEvents = true;
+        private void SetupFileWatcher(string fullPath) {
+            ConfigFileWatcher.Register(fullPath, UpdateConfigFileOnChange);
         }
 
-        private static void UpdateConfigFileOnChange(object sender, FileSystemEventArgs e) {
+        private static void UpdateConfigFileOnChange(string filepath) {
             if (SynchronizationManager.Instance.PlayerIsAdmin == false) {
                 Logger.LogInfo("Player is not an admin, and not allowed to change local configuration. Ignoring.");
                 return;
             }
-            if (!File.Exists(e.FullPath)) { return; }
+            if (File.Exists(filepath) == false) { return; }
 
-            string filetext = File.ReadAllText(e.FullPath);
-            var fileInfo = new FileInfo(e.FullPath);
+            string filetext = File.ReadAllText(filepath);
+            var fileInfo = new FileInfo(filepath);
             Logger.LogDebug($"Filewatch changes from: ({fileInfo.Name}) {fileInfo.FullName}");
             switch (fileInfo.Name) {
                 case ModsFileName:
@@ -315,23 +310,13 @@ namespace ValheimEnforcer {
         }
 
         internal static void SetupMainFileWatcher() {
-            // Setup a file watcher to detect changes to the config file
-            FileSystemWatcher watcher = new FileSystemWatcher();
-            watcher.NotifyFilter = NotifyFilters.LastWrite;
-            watcher.Path = Path.GetDirectoryName(cfg.ConfigFilePath);
-            // Ignore changes to other files
-            watcher.Filter = "MidnightsFX.ImpactfulSkills.cfg";
-            watcher.Changed += OnConfigFileChanged;
-            watcher.SynchronizingObject = ThreadingHelper.SynchronizingObject;
-            watcher.EnableRaisingEvents = true;
+            ConfigFileWatcher.Register(cfg.ConfigFilePath, OnMainConfigFileChanged);
         }
 
-        private static void OnConfigFileChanged(object sender, FileSystemEventArgs e) {
-            // We only want the config changes being allowed if this is a server (ie in game in a hosted world or dedicated ideally)
-            if (ZNet.instance.IsServer() == false) {
+        private static void OnMainConfigFileChanged(string _) {
+            if (ZNet.instance == null || ZNet.instance.IsServer() == false) {
                 return;
             }
-            // Handle the config file change event
             Logger.LogInfo("Configuration file has been changed, reloading settings.");
             cfg.Reload();
         }
