@@ -14,9 +14,12 @@ using ValheimEnforcer.common;
 using static ValheimEnforcer.common.DataObjects;
 using static Version;
 
-namespace ValheimEnforcer.modules {
+namespace ValheimEnforcer.modules.character {
     internal static class CharacterManager {
         internal static DataObjects.Character PlayerCharacter = null;
+        internal static bool SuppressDeltaTracking = false;
+        internal static readonly List<DataObjects.ItemDelta> PendingItemDeltas = new List<DataObjects.ItemDelta>();
+        internal static Dictionary<string, string> _lastSentCustomData = new Dictionary<string, string>();
         internal static List<string> staringAllowedPrefabs = new List<string>() {
             "ArmorRagsChest",
             "ArmorRagsLegs",
@@ -62,7 +65,9 @@ namespace ValheimEnforcer.modules {
             return selectedID;
         }
 
-        private static void LoadAndValidatePlayer(Player player) {
+        internal static void LoadAndValidatePlayer(Player player) {
+            SuppressDeltaTracking = true;
+            try {
 
             string playerID;
             string PlayerName;
@@ -189,6 +194,10 @@ namespace ValheimEnforcer.modules {
             if (ZNet.instance.GetServerPeer() != null) {
                 ValConfig.CharacterSaveRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
             }
+
+            } finally {
+                SuppressDeltaTracking = false;
+            }
         }
 
         // Validate Item, stacksize, custom data, and quality
@@ -261,154 +270,6 @@ namespace ValheimEnforcer.modules {
             }
 
             return validationResults;
-        }
-
-        // Move this off to its own repeating process? Recieve a unique seed from the server to offset save timer to prevent congestion?
-        [HarmonyPatch(typeof(Player), nameof(Player.Save))]
-        public static class SaveSync {
-            [HarmonyPrefix]
-            [HarmonyPriority(Priority.High)]
-            private static void PlayerSave(Player __instance) {
-                if (__instance == null || SceneManager.GetActiveScene().name.Equals("main") == false) { return; }
-                string playerID = "";
-                string PlayerName = "";
-                DataObjects.Character savableChar = null;
-                if (PlayerCharacter != null) {
-                    savableChar = PlayerCharacter;
-                    playerID = PlayerCharacter.HostID;
-                    PlayerName = PlayerCharacter.Name;
-                } else {
-                    playerID = GetPlayerID(__instance);
-                    PlayerName = __instance.GetPlayerName();
-                }
-                Logger.LogDebug($"Saving character for player {PlayerName} with id {playerID}");
-
-                if (PlayerCharacter == null) {
-                    savableChar = ValConfig.LoadCharacterFromSave(playerID, PlayerName);
-                }
-                 
-                if (savableChar == null) {
-                    Logger.LogWarning($"Attempted to save character for player {PlayerName} with ID {playerID} but no existing character data was found. Creating new character data.");
-                    savableChar = new DataObjects.Character() {
-                        Name = PlayerName,
-                        HostID = playerID,
-                        SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level),
-                        ConfiscatedItems = null,
-                    };
-                    // Add all of the players current items
-                    foreach (ItemDrop.ItemData item in __instance.GetInventory().GetAllItems().ToList()) {
-                        savableChar.AddItemToPlayerItems(item);
-                    }
-                    if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                        savableChar.PlayerCustomData = __instance.m_customData;
-                    }
-                    if (ValConfig.SavePlayerStatusEffectsOnLogout.Value) {
-                        savableChar.ActiveCharacterEffects.Clear();
-                        foreach (StatusEffect se in __instance.GetSEMan().GetStatusEffects()) {
-                            Logger.LogDebug($"Saving active status effect: {se.name}");
-                            if (savableChar.ActiveCharacterEffects.ContainsKey(se.name)) {
-                                savableChar.ActiveCharacterEffects[se.name] = new PackedStatusEffect(se);
-                            } else {
-                                savableChar.ActiveCharacterEffects.Add(se.name, new PackedStatusEffect(se));
-                            }
-                        }
-                    } 
-                } else {
-                    Logger.LogDebug($"Existing character data found for player {PlayerName} with ID {playerID}. Updating character data with current player information.");
-                    savableChar.SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
-                    Logger.LogDebug($"Updated player skills for {PlayerName} with ID {playerID}.");
-                    if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                        savableChar.PlayerCustomData = __instance.m_customData;
-                        Logger.LogDebug("Updated player custom data.");
-                    }
-                    savableChar.PlayerItems.Clear();
-                    // Add all of the players current items
-                    foreach (ItemDrop.ItemData item in __instance.GetInventory().GetAllItems().ToList()) {
-                        savableChar.AddItemToPlayerItems(item);
-                    }
-                    Logger.LogDebug($"Updated player Items for {PlayerName} with ID {playerID}.");
-
-                    if (ValConfig.SavePlayerStatusEffectsOnLogout.Value) {
-                        savableChar.ActiveCharacterEffects.Clear();
-                        foreach (StatusEffect se in __instance.GetSEMan().GetStatusEffects()) {
-                            Logger.LogDebug($"Saving active status effect: {se.name}");
-                            if (savableChar.ActiveCharacterEffects.ContainsKey(se.name)) {
-                                savableChar.ActiveCharacterEffects[se.name] = new PackedStatusEffect(se);
-                            } else {
-                                savableChar.ActiveCharacterEffects.Add(se.name, new PackedStatusEffect(se));
-                            }
-                        }
-                        Logger.LogDebug("Updated player active status effects.");
-                    }
-                }
-
-                if (savableChar == null) {
-                    Logger.LogWarning("Savable character was null, not sending network updates.");
-                    return;
-                }
-
-                ValConfig.WritePlayerCharacterToSave(playerID, savableChar);
-
-                if (ZNet.instance != null && ZNet.instance.GetServerPeer() != null) {
-                    Logger.LogDebug("Sending updated character data to server.");
-                    ValConfig.CharacterSaveRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(Game), nameof(Game.SpawnPlayer))]
-        public static class LoadAndValidatePlayerPatch {
-            [HarmonyPostfix]
-            [HarmonyPriority(Priority.First)]
-            private static void PlayerSpawn(Game __instance) {
-                LoadAndValidatePlayer(Player.m_localPlayer);
-            }
-        }
-
-        [HarmonyPatch(typeof(Game), nameof(Game.Logout))]
-        public static class ClearPlayerCharacterOnLogout {
-            [HarmonyPostfix]
-            [HarmonyPriority(Priority.Last)]
-            private static void Postfix() {
-                if (PlayerCharacter != null) {
-                    Logger.LogDebug($"Clearing selected save profile for {PlayerCharacter.Name} on logout.");
-                    PlayerCharacter = null;
-                }
-            }
-        }
-
-        [HarmonyPatch(typeof(Player))]
-        public static class LoadPlayerCustomData {
-            [HarmonyPostfix]
-            [HarmonyPriority(Priority.First)]
-            [HarmonyPatch(nameof(Player.Load))]
-            static void Postfix(Player __instance) {
-                string playerID;
-                string PlayerName;
-                DataObjects.Character savableChar = null;
-                if (PlayerCharacter != null) {
-                    savableChar = PlayerCharacter;
-                    playerID = PlayerCharacter.HostID;
-                    PlayerName = PlayerCharacter.Name;
-                } else {
-                    playerID = GetPlayerID(__instance);
-                    PlayerName = __instance.GetPlayerName();
-                }
-                if (PlayerCharacter == null) {
-                    savableChar = ValConfig.LoadCharacterFromSave(playerID, PlayerName);
-                }
-
-                if (savableChar == null) {
-                    if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                        if (ValConfig.newCharacterClearCustomData.Value) { __instance.m_customData.Clear(); }
-                    }
-                } else {
-                    if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                        __instance.m_customData = savableChar.PlayerCustomData;
-                        Logger.LogDebug("Set player custom data.");
-                    }
-                }
-            }
         }
     }
 }

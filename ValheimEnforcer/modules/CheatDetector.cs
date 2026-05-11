@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using UnityEngine;
 using ValheimEnforcer.common;
+using ValheimEnforcer.modules.character;
 using static ValheimEnforcer.common.DataObjects;
 
 namespace ValheimEnforcer.modules {

@@ -241,6 +241,27 @@ namespace ValheimEnforcer.common {
             }
         }
 
+        public enum ItemDeltaChangeType {
+            Added,
+            Removed,
+            Modified
+        }
+
+        public class ItemDelta {
+
+            public PackedItem Item { get; set; }
+            public ItemDeltaChangeType Op { get; set; }
+        }
+
+        public class DeltaSummaryUpdate {
+            public string CharacterName { get; set; }
+            public string HostName { get; set; }
+            public List<ItemDelta> ItemModifications { get; set; } = new List<ItemDelta>();
+            public Dictionary<string, string> PlayerCustomDataModifications { get; set; } = new Dictionary<string, string>();
+            public List<string> RemovedCustomDataKeys { get; set; } = new List<string>();
+            public Dictionary<Skills.SkillType, float> SkillLevels { get; set; } = new Dictionary<Skills.SkillType, float>();
+        }
+
         public class CharacterSaveData {
             public Dictionary<string, Character> SavedCharacters = new Dictionary<string, Character>();
         }
@@ -257,6 +278,37 @@ namespace ValheimEnforcer.common {
             public Dictionary<string, PackedStatusEffect> ActiveCharacterEffects { get; set; } = new Dictionary<string, PackedStatusEffect>();
             public List<PackedItem> PlayerItems { get; set; } = new List<PackedItem>();
             public List<PackedItem> ConfiscatedItems { get; set; } = new List<PackedItem>();
+
+            public bool RemoveFromPlayerItems(PackedItem packedItem) {
+                bool removed = false;
+
+                // exact match
+                if (PlayerItems != null && PlayerItems.Contains(packedItem)) {
+                    removed = PlayerItems.Remove(packedItem);
+                }
+                if (removed == true ) { return true; }
+
+                // Fuzzy match, ignore durability and quality as those can be changed by the player and still be the same item for the most part.
+                // TODO: Add custom data as a comparison factor for the future
+                if (PlayerItems != null) {
+                    foreach (var item in PlayerItems) {
+                        if (packedItem.prefabName == item.prefabName &&
+                            packedItem.m_stack == item.m_stack &&
+                            packedItem.m_variant == item.m_variant &&
+                            packedItem.m_worldlevel == item.m_worldlevel &&
+                            packedItem.m_crafterID == item.m_crafterID &&
+                            packedItem.m_crafterName == item.m_crafterName) {
+                            removed = PlayerItems.Remove(item);
+                            if (removed) {
+                                Logger.LogDebug($"Removed item {item.prefabName} from player items based on a fuzzy match.");
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                return removed;
+            }
 
             public void AddItemToPlayerItems(ItemDrop.ItemData item) {
                 if (PlayerItems == null) { PlayerItems = new List<PackedItem>(); }

@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using ValheimEnforcer.modules;
+using ValheimEnforcer.modules.character;
 
 namespace ValheimEnforcer
 {
@@ -43,6 +44,7 @@ namespace ValheimEnforcer
             InternalDataStore.RegisterMetadataHolder();
             TerminalCommands.AddCommands();
             MinimapManager.OnVanillaMapDataLoaded += CheatDetector.Initialize;
+            MinimapManager.OnVanillaMapDataLoaded += ItemDeltaTracker.Initialize;
 
             Harmony harmony = Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
         }
