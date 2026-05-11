@@ -33,12 +33,12 @@ namespace ValheimEnforcer {
 
         public static ConfigEntry<bool> InternalStorageMode;
         public static ConfigEntry<int> ConfigPollIntervalSeconds;
-        public static ConfigEntry<int> DeltaFlushIntervalSeconds;
+        public static ConfigEntry<int> DeltaSynchronizationFrequencyInSeconds;
 
         public static ConfigEntry<bool> EnableCheatDetection;
         public static ConfigEntry<bool> DetectCheatEngine;
         public static ConfigEntry<bool> DetectValheimTooler;
-        public static ConfigEntry<bool> DetectSpeedhack;
+        //public static ConfigEntry<bool> DetectSpeedhack;
         public static ConfigEntry<string> CheatDetectionAction;
         public static ConfigEntry<int> CheatScanIntervalSeconds;
 
@@ -98,7 +98,7 @@ namespace ValheimEnforcer {
             // portable mode
             InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
             ConfigPollIntervalSeconds = BindServerConfig("Advanced", "ConfigPollIntervalSeconds", 30, "How frequently (in seconds) the mod polls config files on disk for changes.", advanced: true, valmin: 1, valmax: 300);
-            DeltaFlushIntervalSeconds = BindServerConfig("Advanced", "DeltaFlushIntervalSeconds", 60, "How frequently (in seconds) the client sends incremental inventory/skill/custom-data updates to the server.", advanced: true, valmin: 30, valmax: 300);
+            DeltaSynchronizationFrequencyInSeconds = BindServerConfig("Advanced", "CharacterDeltaTracker", 60, "How frequently (in seconds) the client sends incremental inventory/skill/custom-data updates to the server.", advanced: true, valmin: 30, valmax: 300);
 
             EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", false, "Enable client-side scanning for known cheat tools (Cheat Engine, ValheimTooler). Detections are reported to the server.");
             DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Scan loaded assemblies for ValheimTooler. High confidence, very low cost.");
@@ -118,7 +118,11 @@ namespace ValheimEnforcer {
             var saveDir = Directory.CreateDirectory(Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, id));
             string path = Path.Combine(saveDir.FullName, $"{character.Name}.yaml");
             Logger.LogInfo($"Writing to {path}");
-            File.WriteAllText(path, DataObjects.yamlserializer.Serialize(character));
+            try {
+                File.WriteAllText(path, DataObjects.yamlserializer.Serialize(character));
+            } catch (Exception e) {
+                Logger.LogWarning($"Failed to write character data to disk at {path}: {e.Message}");
+            }
         }
 
         internal static DataObjects.Character LoadCharacterFromSave(string id, string name) {
@@ -239,9 +243,14 @@ namespace ValheimEnforcer {
         }
 
         public static IEnumerator OnServerRecieveCharacter(long sender, ZPackage package) {
-            DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(package.ReadString());
-            Logger.LogInfo($"Recieved Player data update for {sender} - {chara.Name}|{chara.HostID}");
-            WritePlayerCharacterToSave(chara.HostID, chara);
+            try {
+                DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(package.ReadString());
+                Logger.LogInfo($"Recieved Player data update for {sender} - {chara.Name}|{chara.HostID}");
+                WritePlayerCharacterToSave(chara.HostID, chara);
+            } catch (Exception e) {
+                Logger.LogWarning($"Failed to deserialize character data from {sender}: {e.Message}");
+            }
+
             yield break;
         }
 
@@ -301,14 +310,9 @@ namespace ValheimEnforcer {
         public static IEnumerator OnClientReceiveConfiscatedItems(long sender, ZPackage package) {
             List<DataObjects.PackedItem> items = DataObjects.yamldeserializer.Deserialize<List<DataObjects.PackedItem>>(package.ReadString());
             Logger.LogInfo($"Received {items.Count} confiscated item(s) returned from server.");
-            CharacterManager.SuppressDeltaTracking = true;
-            try {
-                foreach (DataObjects.PackedItem item in items) {
-                    Logger.LogInfo($"Adding returned confiscated item: {item.prefabName} x{item.m_stack}");
-                    item.AddToInventory(Player.m_localPlayer, false);
-                }
-            } finally {
-                CharacterManager.SuppressDeltaTracking = false;
+            foreach (DataObjects.PackedItem item in items) {
+                Logger.LogInfo($"Adding returned confiscated item: {item.prefabName} x{item.m_stack}");
+                item.AddToInventory(Player.m_localPlayer, false);
             }
             yield break;
         }
@@ -322,12 +326,39 @@ namespace ValheimEnforcer {
                 Logger.LogWarning($"Failed to deserialize delta update from {sender}: {e.Message}");
                 yield break;
             }
-            if (string.IsNullOrEmpty(deltaUpdate.CharacterName) || string.IsNullOrEmpty(deltaUpdate.HostName)) {
+            if (string.IsNullOrEmpty(deltaUpdate.Name) || string.IsNullOrEmpty(deltaUpdate.HostID)) {
                 Logger.LogWarning($"Malformed delta update from {sender}: missing CharacterName or HostName.");
                 yield break;
             }
-            Logger.LogInfo($"Received delta update from {deltaUpdate.CharacterName} ({deltaUpdate.HostName}): {deltaUpdate.ItemModifications?.Count ?? 0} item delta(s).");
-            UpdatePlayerSaveWithDeltaData(deltaUpdate);
+
+            var charDir = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, deltaUpdate.HostID);
+            string fullpath = Path.Combine(charDir, $"{deltaUpdate.Name}.yaml");
+
+            DataObjects.Character character;
+            try {
+                if (ValConfig.InternalStorageMode.Value) {
+                    Logger.LogInfo("Loading character for delta update with internal storage mode.");
+                    character = InternalDataStore.GetAccountCharacter(deltaUpdate.HostID, deltaUpdate.Name);
+                    if (character == null) {
+                        Logger.LogWarning($"No character found in internal storage for {deltaUpdate.Name} ({deltaUpdate.HostID}). Delta dropped.");
+                        yield break;
+                    }
+                } else {
+                    character = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(File.ReadAllText(fullpath));
+                }
+            } catch (Exception e) {
+                Logger.LogWarning($"Failed to parse character save for delta update ({deltaUpdate.Name}): {e.Message}");
+                yield break;
+            }
+
+            if (character == null) {
+                Logger.LogWarning($"Server Character does not exist for {deltaUpdate.Name} ({deltaUpdate.HostID}). Delta dropped.");
+                yield break;
+            }
+
+
+            Logger.LogInfo($"Received delta update from {deltaUpdate.Name} ({deltaUpdate.HostID}): {deltaUpdate.ItemModifications?.Count ?? 0} item delta(s).");
+            UpdatePlayerSaveWithDeltaData(deltaUpdate, character);
             yield break;
         }
 
@@ -335,28 +366,7 @@ namespace ValheimEnforcer {
             yield break;
         }
 
-        internal static void UpdatePlayerSaveWithDeltaData(DeltaSummaryUpdate deltaSummary) {
-            var charDir = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, deltaSummary.HostName);
-            string fullpath = Path.Combine(charDir, $"{deltaSummary.CharacterName}.yaml");
-
-            if (!File.Exists(fullpath)) {
-                Logger.LogWarning($"Delta update for {deltaSummary.CharacterName} ({deltaSummary.HostName}) has no save file at {fullpath}. Delta dropped.");
-                return;
-            }
-
-            DataObjects.Character character;
-            try {
-                character = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(File.ReadAllText(fullpath));
-            } catch (Exception e) {
-                Logger.LogWarning($"Failed to parse character save for delta update ({deltaSummary.CharacterName}): {e.Message}");
-                return;
-            }
-
-            if (character == null) {
-                Logger.LogWarning($"Server Character does not exist for {deltaSummary.CharacterName} ({deltaSummary.HostName}). Delta dropped.");
-                return;
-            }
-
+        internal static void UpdatePlayerSaveWithDeltaData(DeltaSummaryUpdate deltaSummary, DataObjects.Character character) {
             // Apply item deltas
             foreach (ItemDelta delta in deltaSummary.ItemModifications) {
                 int targetQuality = delta.Item.m_quality == 0 ? 1 : delta.Item.m_quality;
@@ -367,24 +377,6 @@ namespace ValheimEnforcer {
                         break;
                     case ItemDeltaChangeType.Removed:
                         character.RemoveFromPlayerItems(delta.Item);
-                        break;
-                    case ItemDeltaChangeType.Modified:
-                        // Find potential item matches
-
-                        // If just one, update it
-
-                        // If multiple, find the one with the closest match
-
-
-                        int idx = character.PlayerItems.FindIndex(pi =>
-                            pi.prefabName == delta.Item.prefabName &&
-                            (pi.m_quality == targetQuality || (pi.m_quality == 0 && targetQuality == 1)));
-                        if (idx >= 0) {
-                            character.PlayerItems[idx] = delta.Item;
-                        } else {
-                            character.PlayerItems.Add(delta.Item);
-                        }
-                        Logger.LogDebug($"Delta: modified {delta.Item.prefabName} q{targetQuality}.");
                         break;
                 }
             }
@@ -407,6 +399,16 @@ namespace ValheimEnforcer {
             character.SkillLevels = deltaSummary.SkillLevels;
             Logger.LogDebug($"Updated skills for {character.Name}.");
 
+            // Update active status effects
+            character.ActiveCharacterEffects = deltaSummary.ActiveCharacterEffects;
+
+            if (ValConfig.InternalStorageMode.Value) {
+                Logger.LogInfo("Saving character with internal storage mode.");
+                InternalDataStore.SaveAccountCharacter(character);
+            }
+
+            var charDir = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, deltaSummary.HostID);
+            string fullpath = Path.Combine(charDir, $"{deltaSummary.Name}.yaml");
             File.WriteAllText(fullpath, DataObjects.yamlserializer.Serialize(character));
             Logger.LogInfo($"Saved delta update for {character.Name}.");
         }

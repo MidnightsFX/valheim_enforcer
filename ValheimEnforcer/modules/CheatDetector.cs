@@ -145,6 +145,7 @@ namespace ValheimEnforcer.modules {
                     ValConfig.CheatDetectionRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, package);
                 }
             } catch (Exception e) {
+                Logger.LogDebug($"CheatDetector.ReportCheatScanSummary failed: {e.Message}");
             }
         }
 

@@ -243,8 +243,7 @@ namespace ValheimEnforcer.common {
 
         public enum ItemDeltaChangeType {
             Added,
-            Removed,
-            Modified
+            Removed
         }
 
         public class ItemDelta {
@@ -254,12 +253,13 @@ namespace ValheimEnforcer.common {
         }
 
         public class DeltaSummaryUpdate {
-            public string CharacterName { get; set; }
-            public string HostName { get; set; }
+            public string Name { get; set; }
+            public string HostID { get; set; }
             public List<ItemDelta> ItemModifications { get; set; } = new List<ItemDelta>();
             public Dictionary<string, string> PlayerCustomDataModifications { get; set; } = new Dictionary<string, string>();
             public List<string> RemovedCustomDataKeys { get; set; } = new List<string>();
             public Dictionary<Skills.SkillType, float> SkillLevels { get; set; } = new Dictionary<Skills.SkillType, float>();
+            public Dictionary<string, PackedStatusEffect> ActiveCharacterEffects { get; set; } = new Dictionary<string, PackedStatusEffect>();
         }
 
         public class CharacterSaveData {

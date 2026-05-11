@@ -17,9 +17,6 @@ using static Version;
 namespace ValheimEnforcer.modules.character {
     internal static class CharacterManager {
         internal static DataObjects.Character PlayerCharacter = null;
-        internal static bool SuppressDeltaTracking = false;
-        internal static readonly List<DataObjects.ItemDelta> PendingItemDeltas = new List<DataObjects.ItemDelta>();
-        internal static Dictionary<string, string> _lastSentCustomData = new Dictionary<string, string>();
         internal static List<string> staringAllowedPrefabs = new List<string>() {
             "ArmorRagsChest",
             "ArmorRagsLegs",
@@ -65,10 +62,96 @@ namespace ValheimEnforcer.modules.character {
             return selectedID;
         }
 
-        internal static void LoadAndValidatePlayer(Player player) {
-            SuppressDeltaTracking = true;
-            try {
+        internal static void SavePlayerCharacter(Player __instance) {
+            if (__instance == null || SceneManager.GetActiveScene().name.Equals("main") == false) { return; }
+            string playerID = "";
+            string PlayerName = "";
+            DataObjects.Character savableChar = null;
+            if (CharacterManager.PlayerCharacter != null) {
+                savableChar = CharacterManager.PlayerCharacter;
+                playerID = CharacterManager.PlayerCharacter.HostID;
+                PlayerName = CharacterManager.PlayerCharacter.Name;
+            } else {
+                playerID = CharacterManager.GetPlayerID(__instance);
+                PlayerName = __instance.GetPlayerName();
+            }
+            Logger.LogDebug($"Saving character for player {PlayerName} with id {playerID}");
 
+            if (CharacterManager.PlayerCharacter == null) {
+                savableChar = ValConfig.LoadCharacterFromSave(playerID, PlayerName);
+            }
+
+            if (savableChar == null) {
+                Logger.LogWarning($"Attempted to save character for player {PlayerName} with ID {playerID} but no existing character data was found. Creating new character data.");
+                savableChar = new DataObjects.Character() {
+                    Name = PlayerName,
+                    HostID = playerID,
+                    SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level),
+                    ConfiscatedItems = null,
+                };
+                // Add all of the players current items
+                foreach (ItemDrop.ItemData item in __instance.GetInventory().GetAllItems().ToList()) {
+                    savableChar.AddItemToPlayerItems(item);
+                }
+                if (ValConfig.PreventExternalCustomDataChanges.Value) {
+                    savableChar.PlayerCustomData = __instance.m_customData;
+                }
+                if (ValConfig.SavePlayerStatusEffectsOnLogout.Value) {
+                    savableChar.ActiveCharacterEffects.Clear();
+                    foreach (StatusEffect se in __instance.GetSEMan().GetStatusEffects()) {
+                        Logger.LogDebug($"Saving active status effect: {se.name}");
+                        if (savableChar.ActiveCharacterEffects.ContainsKey(se.name)) {
+                            savableChar.ActiveCharacterEffects[se.name] = new PackedStatusEffect(se);
+                        } else {
+                            savableChar.ActiveCharacterEffects.Add(se.name, new PackedStatusEffect(se));
+                        }
+                    }
+                }
+            } else {
+                Logger.LogDebug($"Existing character data found for player {PlayerName} with ID {playerID}. Updating character data with current player information.");
+                savableChar.SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
+                Logger.LogDebug($"Updated player skills for {PlayerName} with ID {playerID}.");
+                if (ValConfig.PreventExternalCustomDataChanges.Value) {
+                    savableChar.PlayerCustomData = __instance.m_customData;
+                    Logger.LogDebug("Updated player custom data.");
+                }
+                savableChar.PlayerItems.Clear();
+                // Add all of the players current items
+                foreach (ItemDrop.ItemData item in __instance.GetInventory().GetAllItems().ToList()) {
+                    savableChar.AddItemToPlayerItems(item);
+                }
+                Logger.LogDebug($"Updated player Items for {PlayerName} with ID {playerID}.");
+
+                if (ValConfig.SavePlayerStatusEffectsOnLogout.Value) {
+                    savableChar.ActiveCharacterEffects.Clear();
+                    foreach (StatusEffect se in __instance.GetSEMan().GetStatusEffects()) {
+                        Logger.LogDebug($"Saving active status effect: {se.name}");
+                        if (savableChar.ActiveCharacterEffects.ContainsKey(se.name)) {
+                            savableChar.ActiveCharacterEffects[se.name] = new PackedStatusEffect(se);
+                        } else {
+                            savableChar.ActiveCharacterEffects.Add(se.name, new PackedStatusEffect(se));
+                        }
+                    }
+                    Logger.LogDebug("Updated player active status effects.");
+                }
+            }
+
+            if (savableChar == null) {
+                Logger.LogWarning("Savable character was null, not sending network updates.");
+                return;
+            }
+
+            ValConfig.WritePlayerCharacterToSave(playerID, savableChar);
+
+            if (ZNet.instance != null && ZNet.instance.GetServerPeer() != null) {
+                Logger.LogDebug("Sending updated character data to server.");
+                ValConfig.CharacterSaveRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
+            } else {
+                Logger.LogWarning("Server Disconnected, can't sync player data. This may result in desync issues.");
+            }
+        }
+
+        internal static void LoadAndValidatePlayer(Player player) {
             string playerID;
             string PlayerName;
             if (PlayerCharacter != null) {
@@ -195,9 +278,6 @@ namespace ValheimEnforcer.modules.character {
                 ValConfig.CharacterSaveRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
             }
 
-            } finally {
-                SuppressDeltaTracking = false;
-            }
         }
 
         // Validate Item, stacksize, custom data, and quality

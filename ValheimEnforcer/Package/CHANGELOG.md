@@ -1,3 +1,10 @@
+**0.8.0**
+ ---
+ ```
+ - Improved Item, skill, status effect, and custom data consistency
+ - Added a catchall to persist character data when exiting without saving
+ ```
+
 **0.7.3**
  ---
  ```
