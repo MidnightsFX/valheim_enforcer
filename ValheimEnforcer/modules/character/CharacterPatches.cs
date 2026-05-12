@@ -69,7 +69,7 @@ namespace ValheimEnforcer.modules.character {
         [HarmonyPatch(typeof(Player), nameof(Player.Save))]
         public static class SaveSync {
             [HarmonyPrefix]
-            [HarmonyPriority(Priority.High)]
+            [HarmonyPriority(Priority.Last)]
             private static void PlayerSave(Player __instance) {
                 CharacterManager.SavePlayerCharacter(__instance);
             }
@@ -78,7 +78,7 @@ namespace ValheimEnforcer.modules.character {
         [HarmonyPatch(typeof(ZNet), nameof(ZNet.ShutdownWithoutSave))]
         public static class SaveSyncForShutdown {
             [HarmonyPrefix]
-            [HarmonyPriority(Priority.High)]
+            [HarmonyPriority(Priority.Last)]
             private static void PlayerSave() {
                 CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
             }

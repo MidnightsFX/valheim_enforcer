@@ -10,6 +10,8 @@ using System.Reflection;
 using UnityEngine;
 using ValheimEnforcer.modules;
 using ValheimEnforcer.modules.character;
+using ValheimEnforcer.modules.commands;
+using ValheimEnforcer.modules.compat;
 
 namespace ValheimEnforcer
 {
@@ -21,7 +23,7 @@ namespace ValheimEnforcer
     {
         public const string PluginGUID = "MidnightsFX.ValheimEnforcer";
         public const string PluginName = "ValheimEnforcer";
-        public const string PluginVersion = "0.8.0";
+        public const string PluginVersion = "0.8.1";
 
         internal static ManualLogSource Log;
         internal ValConfig cfg;
@@ -46,6 +48,7 @@ namespace ValheimEnforcer
             MinimapManager.OnVanillaMapDataLoaded += CheatDetector.Initialize;
             MinimapManager.OnVanillaMapDataLoaded += CharacterDeltaTracker.Initialize;
 
+            ModCompatability.CheckModCompat();
             Harmony harmony = Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
         }
 

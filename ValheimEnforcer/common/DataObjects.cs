@@ -20,6 +20,12 @@ namespace ValheimEnforcer.common {
         private static readonly int Burning = "Burning".GetStableHashCode();
         private static readonly int Spirit = "Spirit".GetStableHashCode();
 
+        public class RPCServerUpdateData {
+            public string PlatformID { get; set; }
+            public string PlayerName { get; set; }
+            public string ItemPrefabFilter { get; set; } = "All";
+        }
+
         public class Mod {
             public string PluginID { get; set; }
             public string Version { get; set; }
@@ -137,6 +143,7 @@ namespace ValheimEnforcer.common {
                     SpiritDamageLeft = seBurining.m_spiritDamageLeft;
                     SpiritDamagePerHit = seBurining.m_spiritDamagePerHit;
                 }
+
             }
 
             public StatusEffect ToStatusEffect() {
@@ -168,7 +175,6 @@ namespace ValheimEnforcer.common {
                     seBurning.m_spiritDamagePerHit = SpiritDamagePerHit;
                     return seBurning;
                 }
-
 
                 return se;
             }

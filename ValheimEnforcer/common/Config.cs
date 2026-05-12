@@ -7,10 +7,12 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using UnityEngine;
+using System.Security.Principal;
 using ValheimEnforcer.common;
 using ValheimEnforcer.modules;
 using ValheimEnforcer.modules.character;
+using ValheimEnforcer.modules.commands;
+using static Mono.Security.X509.X520;
 using static ValheimEnforcer.common.DataObjects;
 
 namespace ValheimEnforcer {
@@ -52,6 +54,8 @@ namespace ValheimEnforcer {
         internal static CustomRPC ReturnConfiscatedItemsRPC;
         internal static CustomRPC CheatDetectionRPC;
         internal static CustomRPC ItemDeltaUpdateRPC;
+        internal static CustomRPC ListPlayerRPC;
+        internal static CustomRPC ClearConfiscatedRPC;
 
         public ValConfig(ConfigFile cf) {
             // ensure all the config values are created
@@ -66,6 +70,8 @@ namespace ValheimEnforcer {
             ReturnConfiscatedItemsRPC = NetworkManager.Instance.AddRPC("VENFORCE_RETURN_CONFISCATED", OnServerReturnConfiscatedReceive, OnClientReceiveConfiscatedItems);
             CheatDetectionRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHEAT", OnServerReceiveCheatReport, OnClientReceiveCheatReport);
             ItemDeltaUpdateRPC = NetworkManager.Instance.AddRPC("VENFORCE_ITEMDELTA", OnServerRecieveDeltaItemUpdate, OnClientReceiveDeltaItemUpdate);
+            ListPlayerRPC = NetworkManager.Instance.AddRPC("VENFORCE_LIST_PLAYER", OnServerReceiveListPlayer, OnClientReceiveListPlayer);
+            ClearConfiscatedRPC = NetworkManager.Instance.AddRPC("VENFORCE_CLEAR_CONFISCATED", OnServerRecieveClearConfiscated, OnClientReceiveClearConfiscated);
 
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
@@ -254,6 +260,27 @@ namespace ValheimEnforcer {
             yield break;
         }
 
+        public static IEnumerator OnServerRecieveClearConfiscated(long sender, ZPackage package) {
+            RPCServerUpdateData data = DataObjects.yamldeserializer.Deserialize<DataObjects.RPCServerUpdateData>(package.ReadString());
+
+            ZNetPeer zpeer = GetPeerByPlatformID(data.PlatformID);
+            if (zpeer == null) {
+                Logger.LogWarning($"Could not find peer with PlatformID {data.PlatformID} to clear confiscated items.");
+                yield break;
+            }
+            CommandHelpers.ClearSpecifiedPlayerConfiscatedItems(data.PlatformID, data.PlayerName, data.ItemPrefabFilter);
+            ValConfig.ClearConfiscatedRPC.SendPackage(zpeer.m_uid, package);
+
+            yield break;
+        }
+
+        public static IEnumerator OnClientReceiveClearConfiscated(long sender, ZPackage package) {
+            RPCServerUpdateData data = DataObjects.yamldeserializer.Deserialize<DataObjects.RPCServerUpdateData>(package.ReadString());
+
+            CommandHelpers.ClearSpecifiedPlayerConfiscatedItems(data.PlatformID, data.PlayerName, data.ItemPrefabFilter);
+            yield break;
+        }
+
         public static IEnumerator OnClientReceiveCharacter(long sender, ZPackage package) {
             DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(package.ReadString());
             Logger.LogDebug("Recieved Player character data from server.");
@@ -262,7 +289,39 @@ namespace ValheimEnforcer {
         }
 
         public static IEnumerator OnServerReturnConfiscatedReceive(long sender, ZPackage package) {
-            // Clients should not send this RPC to the server
+            // Parse the target and the prefab filter
+            DataObjects.RPCServerUpdateData returnAct = DataObjects.yamldeserializer.Deserialize<DataObjects.RPCServerUpdateData>(package.ReadString());
+
+            List<PackedItem> itemsToReturn = CommandHelpers.LoadCharacterAndFindItemsToReturn(returnAct.PlatformID, returnAct.PlayerName, returnAct.ItemPrefabFilter);
+            DataObjects.Character character = ValConfig.LoadCharacterFromSave(returnAct.PlatformID, returnAct.PlayerName);
+
+            // Find the target peer by account ID and character name
+            ZNetPeer targetPeer = ValConfig.GetPeerByPlatformID(returnAct.PlatformID);
+
+            if (targetPeer == null) {
+                Logger.LogInfo($"Player {returnAct.PlayerName} is not currently connected. Moving items to player inventory save so they are restored on next login.");
+                foreach (DataObjects.PackedItem item in itemsToReturn) {
+                    character.PlayerItems.Add(item);
+                }
+                ValConfig.WritePlayerCharacterToSave(returnAct.PlatformID, character);
+                if (ValConfig.InternalStorageMode.Value) {
+                    Logger.LogInfo("Also updating character data in internal storage.");
+                    InternalDataStore.SaveAccountCharacter(character);
+                }
+                yield break;
+            }
+            Logger.LogInfo($"Sending {itemsToReturn.Count} confiscated item(s) to player {returnAct.PlayerName}.");
+            // Update the character data on the server
+            ValConfig.WritePlayerCharacterToSave(returnAct.PlatformID, character);
+            if (ValConfig.InternalStorageMode.Value) {
+                Logger.LogInfo("Also updating character data in internal storage.");
+                InternalDataStore.SaveAccountCharacter(character);
+            }
+            ZPackage returnableItems = new ZPackage();
+            returnableItems.Write(DataObjects.yamlserializer.Serialize(itemsToReturn));
+            ValConfig.ReturnConfiscatedItemsRPC.SendPackage(targetPeer.m_uid, returnableItems);
+            // Send the updated player character to the client so that their client-side data is also updated with the returned items
+            ValConfig.CharacterSaveRPC.SendPackage(targetPeer.m_uid, ValConfig.SendCharacterAsZpackage(character));
             yield break;
         }
 
@@ -304,6 +363,44 @@ namespace ValheimEnforcer {
 
         public static IEnumerator OnClientReceiveCheatReport(long sender, ZPackage package) {
             // Client -> server only; clients do not act on this RPC.
+            yield break;
+        }
+
+        public static IEnumerator OnClientReceiveListPlayer(long sender, ZPackage package) {
+            Dictionary<string, List<string>> accountNameMap = DataObjects.yamldeserializer.Deserialize<Dictionary<string, List<string>>>(package.ReadString());
+            foreach(var kvp in accountNameMap) {
+                Logger.LogInfo($"AccountID: {kvp.Key}");
+                foreach (string chara in kvp.Value) {
+                    Logger.LogInfo($"    Character: {chara}");
+                }
+            }
+            yield break;
+        }
+
+        public static IEnumerator OnServerReceiveListPlayer(long sender, ZPackage package) {
+            // AccountNameMap
+            Dictionary<string, List<string>> accountNameMap = new Dictionary<string, List<string>>();
+
+            if (ValConfig.InternalStorageMode.Value) {
+                accountNameMap = InternalDataStore.GetAccountRegistry();
+                ValConfig.ListPlayerRPC.SendPackage(sender, new ZPackage(DataObjects.yamlserializer.Serialize(accountNameMap)));
+                // Send the RPC
+                yield break;
+            }
+
+            List<string> storedAccounts = Directory.GetFiles(Path.Combine(Paths.ConfigPath, ValConfig.ValheimEnforcer, ValConfig.CharacterFolder)).ToList();
+            foreach (string account in storedAccounts) {
+                List<string> characters = Directory.GetFiles(account).ToList();
+                string accountID = account.Split('/').Last();
+                List<string> accountCharacters = new List<string>();
+                foreach (string characterFile in characters) {
+                    accountCharacters.Add(characterFile.Split('/').Last());
+                }
+                accountNameMap.Add(accountID, accountCharacters);
+            }
+            ValConfig.ListPlayerRPC.SendPackage(sender, new ZPackage(DataObjects.yamlserializer.Serialize(accountNameMap)));
+
+            // Returns an RPC to the client that will send all of the account ID player maps
             yield break;
         }
 
@@ -418,6 +515,16 @@ namespace ValheimEnforcer {
             ZPackage package = new ZPackage();
             package.Write(serialChara);
             return package;
+        }
+
+        public static ZNetPeer GetPeerByPlatformID(string platformID) {
+            foreach (ZNetPeer peer in ZNet.instance.GetPeers()) {
+                if (peer.IsReady() && peer.m_socket.GetHostName() == platformID) {
+                    return peer;
+                }
+            }
+
+            return null;
         }
 
         internal static void SetupMainFileWatcher() {

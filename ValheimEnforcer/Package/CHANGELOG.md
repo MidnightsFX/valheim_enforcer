@@ -1,3 +1,11 @@
+**0.8.1**
+ ---
+ ```
+ - Null check for status effects which no longer exist when adding to character
+ - Improves Item return RPC logic to deal with partially valid clients
+ - Improves compatibility with some custom status effects and saved custom data
+ ```
+
 **0.8.0**
  ---
  ```

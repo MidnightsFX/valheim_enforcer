@@ -5,17 +5,20 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Principal;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 using ValheimEnforcer.common;
+using static Mono.Security.X509.X520;
+using static ValheimEnforcer.common.DataObjects;
 
-namespace ValheimEnforcer.modules {
+namespace ValheimEnforcer.modules.commands {
     internal static class TerminalCommands {
         internal static void AddCommands() {
             CommandManager.Instance.AddConsoleCommand(new ListPlayers());
-            CommandManager.Instance.AddConsoleCommand(new ListPlayerConfiscatedItems());
-            CommandManager.Instance.AddConsoleCommand(new RestorePlayerConfiscatedItems());
+            //CommandManager.Instance.AddConsoleCommand(new ListPlayerConfiscatedItems());
+            CommandManager.Instance.AddConsoleCommand(new ClearPlayerConfiscatedItems());
             CommandManager.Instance.AddConsoleCommand(new ReturnPlayerConfiscatedItems());
         }
 
@@ -25,6 +28,13 @@ namespace ValheimEnforcer.modules {
             public override string Help => "Enforcer-List-Players - Provides a full list of all accounts and Player names stored.";
 
             public override void Run(string[] args) {
+
+                if (ZNet.instance.IsCurrentServerDedicated()) {
+                    ValConfig.ListPlayerRPC.SendPackage(ZRoutedRpc.instance.GetServerPeerID(), new ZPackage());
+                    Logger.LogInfo("Requesting player list from server...");
+                    return;
+                }
+                // This is the non-dedicated path
                 if (ValConfig.InternalStorageMode.Value) {
                     Dictionary<string, List<string>> accountCharacters = InternalDataStore.GetAccountRegistry();
                     foreach(KeyValuePair<string, List<string>> account in accountCharacters) {
@@ -86,40 +96,26 @@ namespace ValheimEnforcer.modules {
                 string username = args[1];
                 string prefab = args[2];
 
-                DataObjects.Character character = ValConfig.LoadCharacterFromSave(account, username);
-                // Help find the user/character
-                if (character == null) {
-                    Logger.LogInfo("Character was not found for the specified account.");
-                    return;
-                }
-                if (character.ConfiscatedItems.Count == 0) {
-                    Logger.LogInfo("Player does not have any confiscated items.");
-                    return;
-                }
-                character.ConfiscatedItems.Clear();
-                ValConfig.WritePlayerCharacterToSave(account, character);
-
-                Logger.LogInfo($"Found {character.ConfiscatedItems.Count} confiscated items.");
-                if (string.Compare(prefab, "all", true) == 0) {
-                    Logger.LogInfo("Providing all confiscated items.");
-                    foreach (var confiscatedItem in character.ConfiscatedItems) {
-                        confiscatedItem.AddToInventory(Player.m_localPlayer, false);
-                    }
-                    character.ConfiscatedItems.Clear();
+                if (ZNet.instance.IsCurrentServerDedicated()) {
+                    ZPackage package = new ZPackage();
+                    RPCServerUpdateData clearData = new RPCServerUpdateData();
+                    clearData.ItemPrefabFilter = prefab;
+                    clearData.PlatformID = account;
+                    clearData.PlayerName = username;
+                    package.Write(DataObjects.yamlserializer.Serialize(clearData));
+                    ValConfig.ClearConfiscatedRPC.SendPackage(ZRoutedRpc.instance.GetServerPeerID(), package);
+                    Logger.LogInfo("Sending command to clear confiscated items on server...");
                     return;
                 }
 
-                foreach (DataObjects.PackedItem confiscated in character.ConfiscatedItems) {
-                    List<string> targetItems = prefab.Split(',').ToList();
-                    foreach (var confiscatedItem in character.ConfiscatedItems) {
-                        if (targetItems.Contains(confiscatedItem.prefabName) == false) { continue; }
-                        Logger.LogInfo($"Providing {confiscatedItem.prefabName}");
-                        confiscatedItem.AddToInventory(Player.m_localPlayer, false);
-                    }
-                }
+
+                // This is the local path
+                CommandHelpers.ClearSpecifiedPlayerConfiscatedItems(account, username, prefab);
             }
         }
 
+
+        // TODO finish rewriting
         internal class RestorePlayerConfiscatedItems : ConsoleCommand {
             public override string Name => "Enforcer-Admin-Take-Confiscated";
             public override bool IsCheat => true;
@@ -181,33 +177,10 @@ namespace ValheimEnforcer.modules {
                 string username = args[1];
                 string prefabFilter = args[2];
 
-                DataObjects.Character character = ValConfig.LoadCharacterFromSave(account, username);
-                if (character == null) {
-                    Logger.LogInfo("Character was not found for the specified account.");
-                    return;
-                }
-                if (character.ConfiscatedItems.Count == 0) {
-                    Logger.LogInfo("Player does not have any confiscated items.");
-                    return;
-                }
-
-                List<DataObjects.PackedItem> itemsToReturn;
-                if (string.Compare(prefabFilter, "all", true) == 0) {
-                    itemsToReturn = new List<DataObjects.PackedItem>(character.ConfiscatedItems);
-                    character.ConfiscatedItems.Clear();
-                } else {
-                    List<string> targetPrefabs = prefabFilter.Split(',').Select(s => s.Trim()).ToList();
-                    itemsToReturn = character.ConfiscatedItems.Where(i => targetPrefabs.Contains(i.prefabName)).ToList();
-                    character.ConfiscatedItems.RemoveAll(i => targetPrefabs.Contains(i.prefabName));
-                }
-
-                if (itemsToReturn.Count == 0) {
-                    Logger.LogInfo("No matching confiscated items found for the specified filter.");
-                    return;
-                }
-
-                if (Player.m_localPlayer != null && Player.m_localPlayer.GetPlayerName() == username) {
+                if (Player.m_localPlayer != null && Player.m_localPlayer.GetPlayerName() == username && ZNet.instance.IsCurrentServerDedicated() == false) {
                     Logger.LogInfo("Local player is the target, returning player items.");
+                    List<DataObjects.PackedItem> itemsToReturn = CommandHelpers.LoadCharacterAndFindItemsToReturn(account, username, prefabFilter);
+                    DataObjects.Character character = ValConfig.LoadCharacterFromSave(account, username);
                     foreach (DataObjects.PackedItem confiscated in itemsToReturn) {
                         Logger.LogInfo($"Providing {confiscated.prefabName}");
                         confiscated.AddToInventory(Player.m_localPlayer, false);
@@ -216,43 +189,13 @@ namespace ValheimEnforcer.modules {
                     return;
                 }
 
-                // Find the target peer by account ID and character name
-                ZNetPeer targetPeer = null;
-                if (ZNet.instance != null) {
-                    foreach (ZNetPeer peer in ZNet.instance.GetPeers()) {
-                        if (peer.m_playerName != username) { continue; }
-                        string peerAccount = peer.m_socket.GetEndPointString();
-                        if (peerAccount.Contains(":")) { peerAccount = peerAccount.Split(':')[0]; }
-                        if (peerAccount == account) {
-                            targetPeer = peer;
-                            break;
-                        }
-                    }
-                    // Fallback: match by character name alone
-                    if (targetPeer == null) {
-                        foreach (ZNetPeer peer in ZNet.instance.GetPeers()) {
-                            if (peer.m_playerName == username) {
-                                targetPeer = peer;
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (targetPeer == null) {
-                    Logger.LogInfo($"Player {username} is not currently connected. Moving items to player inventory save so they are restored on next login.");
-                    foreach (DataObjects.PackedItem item in itemsToReturn) {
-                        character.PlayerItems.Add(item);
-                    }
-                    ValConfig.WritePlayerCharacterToSave(account, character);
-                    return;
-                }
-
-                ValConfig.WritePlayerCharacterToSave(account, character);
-                Logger.LogInfo($"Sending {itemsToReturn.Count} confiscated item(s) to player {username}.");
                 ZPackage package = new ZPackage();
-                package.Write(DataObjects.yamlserializer.Serialize(itemsToReturn));
-                ValConfig.ReturnConfiscatedItemsRPC.SendPackage(targetPeer.m_uid, package);
+                RPCServerUpdateData returnCommand = new RPCServerUpdateData();
+                returnCommand.PlatformID = account;
+                returnCommand.ItemPrefabFilter = prefabFilter;
+                returnCommand.PlayerName = username;
+                package.Write(DataObjects.yamlserializer.Serialize(returnCommand));
+                ValConfig.ReturnConfiscatedItemsRPC.SendPackage(ZRoutedRpc.instance.GetServerPeerID(), package);
             }
         }
     }

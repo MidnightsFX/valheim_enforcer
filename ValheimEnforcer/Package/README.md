@@ -47,9 +47,7 @@ Note: All commands require `devcommands` as such they require admin on the serve
 There are two ways to do so. 
 1. In-Game commands
 	- Run `enforcer-list-players` to get the player's account ID and character name	
-	- Run `enforcer-list-confiscated AcountID999999 CharacterName` (Not sure about what the players account ID is? Run `list-players`)
-	- Run `enforcer-retrieve-confiscated AcountID999999 CharacterName prefabName` (just want it all back? use 'all' as the prefab)
-	- Give the items to said player
+	- Run `enforcer-return-confiscated AcountID999999 CharacterName prefabName` (just want it all back? use 'all' as the prefab). This command will automatically give the player the items, along with update their remote save (incase they are not online).
 1. Manual config file edits.
 	- Ensure the player is offline (server can be running) 
 	- If you are unsure about the player's account ID, run `enforcer-list-players` in-game to get the player's account ID and character name

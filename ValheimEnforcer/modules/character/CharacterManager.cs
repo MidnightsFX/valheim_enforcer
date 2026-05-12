@@ -265,7 +265,9 @@ namespace ValheimEnforcer.modules.character {
                 SEMan pseman = player.GetSEMan();
                 foreach (KeyValuePair<string, PackedStatusEffect> kvp in savableChar.ActiveCharacterEffects) {
                     Logger.LogDebug($"Applying status effect: {kvp.Key}");
-                    pseman.AddStatusEffect(kvp.Value.ToStatusEffect());
+                    StatusEffect se = kvp.Value.ToStatusEffect();
+                    if (se == null) { continue; }
+                    pseman.AddStatusEffect(se);
                 }
                 savableChar.ActiveCharacterEffects.Clear();
                 Logger.LogDebug("Validated saved status effects.");
