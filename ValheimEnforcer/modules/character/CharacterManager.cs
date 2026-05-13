@@ -62,7 +62,7 @@ namespace ValheimEnforcer.modules.character {
             return selectedID;
         }
 
-        internal static void SavePlayerCharacter(Player __instance) {
+        internal static void SavePlayerCharacter(Player __instance, DataObjects.DisconnectionState lastDisconnect = DisconnectionState.Clean) {
             if (__instance == null || SceneManager.GetActiveScene().name.Equals("main") == false) { return; }
             string playerID = "";
             string PlayerName = "";
@@ -88,6 +88,7 @@ namespace ValheimEnforcer.modules.character {
                     HostID = playerID,
                     SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level),
                     ConfiscatedItems = null,
+                    LastDisconnect = lastDisconnect
                 };
                 // Add all of the players current items
                 foreach (ItemDrop.ItemData item in __instance.GetInventory().GetAllItems().ToList()) {
@@ -219,7 +220,7 @@ namespace ValheimEnforcer.modules.character {
                 }
             }
 
-            if (ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value) {
+            if (ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value && (ValConfig.ItemRemovalForDirtyReconnection.Value == true && savableChar.LastDisconnect == DisconnectionState.DirtyDisconnect)) {
                 List<ItemDrop.ItemData> removeItems = new List<ItemDrop.ItemData>();
                 Dictionary<ItemDrop.ItemData, ItemValidatorResult> ValidatorResults = ValidateItems(player.m_inventory.GetAllItems(), savableChar);
 
@@ -233,7 +234,7 @@ namespace ValheimEnforcer.modules.character {
                 }
             }
 
-            if (ValConfig.AddMissingItemsFromPlayerServerSave.Value) {
+            if (ValConfig.AddMissingItemsFromPlayerServerSave.Value && (ValConfig.ItemReturnForDirtyReconnection.Value == true && savableChar.LastDisconnect == DisconnectionState.DirtyDisconnect)) {
                 Logger.LogDebug("Checking to restore player items.");
                 List<Tuple<string, int>> prefablist = new List<Tuple<string, int>>();
                 foreach(ItemDrop.ItemData item in player.m_inventory.GetAllItems()) {

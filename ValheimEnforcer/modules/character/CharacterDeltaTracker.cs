@@ -10,6 +10,7 @@ using Logger = ValheimEnforcer.Logger;
 namespace ValheimEnforcer.modules.character {
     internal static class CharacterDeltaTracker {
         internal static float LastDeltaSyncTime = 0;
+        internal static float LastFullSaveDataSyncTime = 0;
         internal static DeltaChangeTracker DeltaTracker;
 
         internal static void Initialize() {
@@ -76,10 +77,20 @@ namespace ValheimEnforcer.modules.character {
 internal class DeltaChangeTracker : MonoBehaviour {
 
     public void Update() {
-        if (Time.unscaledTime < CharacterDeltaTracker.LastDeltaSyncTime) { return; }
 
-        CharacterDeltaTracker.LastDeltaSyncTime = Time.unscaledTime + ValheimEnforcer.ValConfig.DeltaSynchronizationFrequencyInSeconds.Value;
-        SyncChangesToServer();
+        // Only run Delta sync based on its timeframe
+        if (Time.unscaledTime > CharacterDeltaTracker.LastDeltaSyncTime) {
+            CharacterDeltaTracker.LastDeltaSyncTime = Time.unscaledTime + ValConfig.DeltaSynchronizationFrequencyInSeconds.Value;
+            SyncChangesToServer();
+        }
+
+        // Full save data sync based on timeframe
+        if (Time.unscaledTime > CharacterDeltaTracker.LastFullSaveDataSyncTime) {
+            CharacterDeltaTracker.LastFullSaveDataSyncTime = Time.unscaledTime + ValConfig.FullSaveDataSynchronizationFrequencyInSeconds.Value;
+            Logger.LogDebug("Forcing full save data sync to server.");
+            CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
+        }
+
     }
 
     private static void SyncChangesToServer() {

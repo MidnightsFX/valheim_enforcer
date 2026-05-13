@@ -20,6 +20,16 @@ namespace ValheimEnforcer.common {
         private static readonly int Burning = "Burning".GetStableHashCode();
         private static readonly int Spirit = "Spirit".GetStableHashCode();
 
+        public enum ItemDeltaChangeType {
+            Added,
+            Removed
+        }
+
+        public enum DisconnectionState {
+            Clean,
+            DirtyDisconnect
+        }
+
         public class RPCServerUpdateData {
             public string PlatformID { get; set; }
             public string PlayerName { get; set; }
@@ -199,6 +209,7 @@ namespace ValheimEnforcer.common {
             public bool m_equipped { get; set; }
             public Vector2i m_gridpos { get; set; }
             public string confiscatedReason { get; set; }
+            public DateTime confiscatedTime { get; set; }
 
             public void AddToInventory(Player player, bool use_position) {
                 Inventory inv = player.GetInventory();
@@ -229,27 +240,30 @@ namespace ValheimEnforcer.common {
                 }
                 itemdrop.m_itemData.m_customData = m_customdata;
                 itemdrop.m_itemData.m_pickedUp = true; // Its not the real object, but it gets picked up like a real object.
-                if (use_position) {
-                    itemdrop.m_itemData.m_gridPos = m_gridpos;
-                    inv.AddItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, m_gridpos.x, m_gridpos.y);
-                } else if (ModCompatability.IsExtraSlotsEnabled && modules.compat.ExtraSlots.API.IsGridPositionASlot(m_gridpos)) {
-                    Logger.LogDebug($"Item {prefabName} saved grid position {m_gridpos} maps to an ExtraSlots slot. Placing into that slot.");
-                    itemdrop.m_itemData.m_gridPos = m_gridpos;
-                    inv.AddItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, m_gridpos.x, m_gridpos.y);
+
+                if (inv.CanAddItem(itemdrop.m_itemData) == false) {
+                    if (use_position) {
+                        itemdrop.m_itemData.m_gridPos = m_gridpos;
+                        inv.AddItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, m_gridpos.x, m_gridpos.y);
+                    } else if (ModCompatability.IsExtraSlotsEnabled && modules.compat.ExtraSlots.API.IsGridPositionASlot(m_gridpos)) {
+                        Logger.LogDebug($"Item {prefabName} saved grid position {m_gridpos} maps to an ExtraSlots slot. Placing into that slot.");
+                        itemdrop.m_itemData.m_gridPos = m_gridpos;
+                        inv.AddItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, m_gridpos.x, m_gridpos.y);
+                    } else {
+                        inv.AddItem(itemdrop.m_itemData);
+                    }
                 } else {
-                    inv.AddItem(itemdrop.m_itemData);
+                    Logger.LogDebug($"Dropping item {prefabName} at player position because it cannot be added to the inventory.");
+                    ItemDrop.DropItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, player.gameObject.transform.position, player.gameObject.transform.rotation);
                 }
+
+
                 // Restore the equipped status of the item if it was equipped
                 if (m_equipped) {
                     player.EquipItem(itemdrop.m_itemData);
                 }
                 UnityEngine.Object.Destroy(instancedGo);
             }
-        }
-
-        public enum ItemDeltaChangeType {
-            Added,
-            Removed
         }
 
         public class ItemDelta {
@@ -261,6 +275,7 @@ namespace ValheimEnforcer.common {
         public class DeltaSummaryUpdate {
             public string Name { get; set; }
             public string HostID { get; set; }
+            public DisconnectionState DisconnectionState { get; set; } = DisconnectionState.DirtyDisconnect;
             public List<ItemDelta> ItemModifications { get; set; } = new List<ItemDelta>();
             public Dictionary<string, string> PlayerCustomDataModifications { get; set; } = new Dictionary<string, string>();
             public List<string> RemovedCustomDataKeys { get; set; } = new List<string>();
@@ -279,6 +294,7 @@ namespace ValheimEnforcer.common {
         public class Character {
             public string Name { get; set; }
             public string HostID { get; set; }
+            public DisconnectionState LastDisconnect { get; set; } = DisconnectionState.Clean;
             public Dictionary<Skills.SkillType, float> SkillLevels { get; set; } = new Dictionary<Skills.SkillType, float>();
             public Dictionary<string, string> PlayerCustomData { get; set; } = new Dictionary<string, string>();
             public Dictionary<string, PackedStatusEffect> ActiveCharacterEffects { get; set; } = new Dictionary<string, PackedStatusEffect>();
@@ -356,6 +372,7 @@ namespace ValheimEnforcer.common {
                 if (string.IsNullOrEmpty(reason) == false) {
                     packedItem.confiscatedReason = reason;
                 }
+                packedItem.confiscatedTime = DateTime.UtcNow;
                 ConfiscatedItems.Add(packedItem);
             }
         }

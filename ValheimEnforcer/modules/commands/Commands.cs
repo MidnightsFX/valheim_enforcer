@@ -158,6 +158,9 @@ namespace ValheimEnforcer.modules.commands {
                         Logger.LogInfo($"Providing {confiscatedItem.prefabName}");
                         confiscatedItem.AddToInventory(Player.m_localPlayer, false);
                     }
+                    foreach (string target in targetItems) {
+                        character.ConfiscatedItems.RemoveAll(i => i.prefabName == target);
+                    }
                 }
                 ValConfig.WritePlayerCharacterToSave(character.HostID, character);
             }

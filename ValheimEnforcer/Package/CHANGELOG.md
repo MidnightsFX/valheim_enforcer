@@ -1,3 +1,13 @@
+**0.8.2**
+ ---
+ ```
+ - Configurable save sync intervals for full saves and delta saves
+ - Last disconnect status tracked
+	- Allows reduction in strictness of item confiscation
+ - Added a confiscated timestamp
+ - Improved item return logic to drop items on the ground if the player does not have room for it
+ ```
+
 **0.8.1**
  ---
  ```

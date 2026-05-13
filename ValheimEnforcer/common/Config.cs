@@ -32,10 +32,13 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> ValidateItemDurability;
         public static ConfigEntry<float> ItemValidationDurabilityAllowedVariance;
         public static ConfigEntry<bool> SavePlayerStatusEffectsOnLogout;
+        public static ConfigEntry<bool> ItemRemovalForDirtyReconnection;
+        public static ConfigEntry<bool> ItemReturnForDirtyReconnection;
 
         public static ConfigEntry<bool> InternalStorageMode;
         public static ConfigEntry<int> ConfigPollIntervalSeconds;
         public static ConfigEntry<int> DeltaSynchronizationFrequencyInSeconds;
+        public static ConfigEntry<int> FullSaveDataSynchronizationFrequencyInSeconds;
 
         public static ConfigEntry<bool> EnableCheatDetection;
         public static ConfigEntry<bool> DetectCheatEngine;
@@ -100,11 +103,14 @@ namespace ValheimEnforcer {
             ValidateItemDurability = BindServerConfig("Player Sync", "ValidateItemDurability", true, "If enabled, item durability will be validated");
             ItemValidationDurabilityAllowedVariance = BindServerConfig("Player Sync", "ItemValidationDurabilityAllowedVariance", 10f, "Allowed variance for item durability validation.", true, 0, 100f);
             SavePlayerStatusEffectsOnLogout = BindServerConfig("Player Sync", "SavePlayerStatusEffectsOnLogout", true, "Whether or not to save active character effects on logout and reapply on login");
+            ItemRemovalForDirtyReconnection = BindServerConfig("Player Sync", "ItemRemovalForDirtyReconnection", false, "If enabled, items will not be removed from the player on a dirty reconnection.");
+            ItemReturnForDirtyReconnection = BindServerConfig("Player Sync", "ItemReturnForDirtyReconnection", false, "If enabled, items will not be returned to the player on a dirty reconnection.");
 
             // portable mode
             InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
             ConfigPollIntervalSeconds = BindServerConfig("Advanced", "ConfigPollIntervalSeconds", 30, "How frequently (in seconds) the mod polls config files on disk for changes.", advanced: true, valmin: 1, valmax: 300);
             DeltaSynchronizationFrequencyInSeconds = BindServerConfig("Advanced", "CharacterDeltaTracker", 60, "How frequently (in seconds) the client sends incremental inventory/skill/custom-data updates to the server.", advanced: true, valmin: 30, valmax: 300);
+            FullSaveDataSynchronizationFrequencyInSeconds = BindServerConfig("Advanced", "FullSaveDataSynchronizationFrequencyInSeconds", 300, "How frequently (in seconds) the client sends a full character save to the server.", advanced: true, valmin: 60, valmax: 3600);
 
             EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", false, "Enable client-side scanning for known cheat tools (Cheat Engine, ValheimTooler). Detections are reported to the server.");
             DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Scan loaded assemblies for ValheimTooler. High confidence, very low cost.");
@@ -503,6 +509,9 @@ namespace ValheimEnforcer {
                 Logger.LogInfo("Saving character with internal storage mode.");
                 InternalDataStore.SaveAccountCharacter(character);
             }
+
+            // Set the connection state
+            character.LastDisconnect = deltaSummary.DisconnectionState;
 
             var charDir = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, deltaSummary.HostID);
             string fullpath = Path.Combine(charDir, $"{deltaSummary.Name}.yaml");

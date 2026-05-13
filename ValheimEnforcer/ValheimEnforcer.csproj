@@ -28,6 +28,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Vendor\**" />
+    <EmbeddedResource Remove="Vendor\**" />
+    <None Remove="Vendor\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Remove="assets\vebundle" />
   </ItemGroup>
 
@@ -53,10 +59,6 @@
   <ItemGroup>
     <PackageReference Include="JotunnLib" Version="2.26.1" />
     <PackageReference Include="YamlDotNet" Version="16.3.0" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Folder Include="Vendor\" />
   </ItemGroup>
 
   <PropertyGroup>

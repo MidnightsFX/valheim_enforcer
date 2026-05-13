@@ -75,12 +75,26 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
-        [HarmonyPatch(typeof(ZNet), nameof(ZNet.ShutdownWithoutSave))]
-        public static class SaveSyncForShutdown {
+        //[HarmonyPatch(typeof(ZNet), nameof(ZNet.ShutdownWithoutSave))]
+        //public static class SaveSyncForShutdown {
+        //    [HarmonyPrefix]
+        //    [HarmonyPriority(Priority.Last)]
+        //    private static void PlayerSave() {
+        //        CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
+        //    }
+        //}
+
+        [HarmonyPatch(typeof(Game), nameof(Game.Logout))]
+        public static class SaveSyncForLogout {
             [HarmonyPrefix]
-            [HarmonyPriority(Priority.Last)]
+            [HarmonyPriority(Priority.First)]
             private static void PlayerSave() {
-                CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
+                if (Player.m_localPlayer != null) {
+                    CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
+                } else {
+                    Logger.LogWarning("Player.m_localPlayer was null during logout. Skipping character sync.");
+                }
+                
             }
         }
 
