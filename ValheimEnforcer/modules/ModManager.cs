@@ -109,18 +109,20 @@ namespace ValheimEnforcer.modules {
                     }
                 }
 
-                // Compare admin mods - always recognize admin-only mods so non-admins
-                // aren't kicked for having them, but only enforce versions for admins
+                // Admin-only mods are allowed only for admins.
                 if (AuthoratativeMods.AdminOnlyMods.ContainsKey(mod.Key)) {
-                    if (isAdmin && AuthoratativeMods.AdminOnlyMods[mod.Key].EnforceVersion) {
-                        if (AuthoratativeMods.AdminOnlyMods[mod.Key].Version == mod.Value.Version) {
-                            continue;
-                        } else {
-                            versionMismatch.Add(mod.Key);
-                        }
-                    } else {
+                    if (!isAdmin) {
+                        extraMods.Add(mod.Key);
                         continue;
                     }
+
+                    if (AuthoratativeMods.AdminOnlyMods[mod.Key].EnforceVersion) {
+                        if (AuthoratativeMods.AdminOnlyMods[mod.Key].Version != mod.Value.Version) {
+                            versionMismatch.Add(mod.Key);
+                        }
+                    }
+
+                    continue;
                 }
 
                 // Compare optional mods
