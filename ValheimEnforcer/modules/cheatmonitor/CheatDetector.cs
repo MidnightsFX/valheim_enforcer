@@ -10,10 +10,8 @@ using ValheimEnforcer.common;
 using ValheimEnforcer.modules.character;
 using static ValheimEnforcer.common.DataObjects;
 
-namespace ValheimEnforcer.modules {
+namespace ValheimEnforcer.modules.cheatmonitor {
     internal static class CheatDetector {
-
-        private static readonly HashSet<string> ReportedSignals = new HashSet<string>();
 
         private static readonly string[] ToolerAssemblyNames = {
             "ValheimTooler", "ValheimToolerMod", "RapidGUI"

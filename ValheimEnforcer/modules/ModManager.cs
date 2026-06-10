@@ -12,10 +12,17 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using ValheimEnforcer.common;
+using ValheimEnforcer.modules.notifications;
 using static ValheimEnforcer.common.DataObjects;
 
 namespace ValheimEnforcer.modules {
     internal static class ModManager {
+
+        /// <summary>Best-effort lookup of a connecting peer's player name by its handshake RPC. May be empty early in the handshake.</summary>
+        private static string ResolvePeerName(ZRpc rpc) {
+            ZNetPeer peer = ZNet.instance?.GetPeer(rpc);
+            return string.IsNullOrEmpty(peer?.m_playerName) ? null : peer.m_playerName;
+        }
 
         internal static DataObjects.Mods ModSettings { get; set; }
         internal static Dictionary<string, BaseUnityPlugin> ActiveMods = new Dictionary<string, BaseUnityPlugin>();
@@ -270,6 +277,11 @@ namespace ValheimEnforcer.modules {
                 bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, out string summary, out string details);
                 if (modsvalid == false) {
                     Logger.LogWarning($"Mod compatibility check failed for client at {peerAddress}\n{summary}");
+                    if (ValConfig.DiscordNotifyWrongMods.Value) {
+                        string playerName = ResolvePeerName(sender) ?? peerAddress;
+                        DiscordEmbed embed = new DiscordEmbed("Connection Rejected: Mod Mismatch", summary.Trim(), Red).AddField("Player", playerName, true);
+                        DiscordNotifier.SendAsync(embed.ToMessage());
+                    }
                     // Kick the player
                     sender.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorVersion);
                 }

@@ -1,3 +1,15 @@
+**0.9.0**
+ ---
+ ```
+ - Added Automatic ban list, built in known-banned
+ - Added discord notifications (server side) [Configurable!]
+	- Notify on player join
+	- Notify on player leave
+	- Notify on server start
+	- Notify on server shutdown
+	- Notify on mod mismatch
+ ```
+
 **0.8.2**
  ---
  ```

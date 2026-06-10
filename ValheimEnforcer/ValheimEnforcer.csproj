@@ -39,6 +39,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="assets\vebundle" />
+    <EmbeddedResource Include="assets\KnownCheaters.yaml" />
   </ItemGroup>
 
   <ItemGroup>
@@ -49,6 +50,7 @@
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="System.Data" />
     <Reference Include="System.Xml" />
+    <Reference Include="System.Net.Http" />
   </ItemGroup>
 
   <ItemGroup>

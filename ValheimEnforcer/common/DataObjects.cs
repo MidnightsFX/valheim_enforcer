@@ -3,6 +3,7 @@ using Jotunn.Managers;
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Text;
 using UnityEngine;
 using ValheimEnforcer.modules.compat;
 using YamlDotNet.Serialization;
@@ -19,6 +20,12 @@ namespace ValheimEnforcer.common {
         private static readonly int Poison = "Poison".GetStableHashCode();
         private static readonly int Burning = "Burning".GetStableHashCode();
         private static readonly int Spirit = "Spirit".GetStableHashCode();
+
+        // Color status markers
+        internal const int Green = 0x57F287;
+        internal const int Grey = 0x95A5A6;
+        internal const int Amber = 0xFEE75C;
+        internal const int Red = 0xED4245;
 
         public enum ItemDeltaChangeType {
             Added,
@@ -69,6 +76,11 @@ namespace ValheimEnforcer.common {
                 ServerOnlyMods = mods.ServerOnlyMods;
                 return mods;
             }
+        }
+
+        public class KnownCheaterEntry {
+            public string Id { get; set; }
+            public string Reason { get; set; }
         }
 
         public class CheatEngineDetector {
@@ -374,6 +386,134 @@ namespace ValheimEnforcer.common {
                 }
                 packedItem.confiscatedTime = DateTime.UtcNow;
                 ConfiscatedItems.Add(packedItem);
+            }
+        }
+
+        internal class DiscordMessage {
+            public List<DiscordEmbed> Embeds { get; } = new List<DiscordEmbed>();
+
+            public DiscordMessage AddEmbed(DiscordEmbed embed) {
+                Embeds.Add(embed);
+                return this;
+            }
+
+            public string ToJson() {
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"embeds\":[");
+                for (int i = 0; i < Embeds.Count; i++) {
+                    if (i > 0) { sb.Append(','); }
+                    Embeds[i].AppendJson(sb);
+                }
+                sb.Append("]}");
+                return sb.ToString();
+            }
+
+            // Try to avoid embedding anything problematic in the messages
+            internal static string EscapeJson(string value) {
+                if (string.IsNullOrEmpty(value)) { return ""; }
+                StringBuilder sb = new StringBuilder(value.Length + 8);
+                foreach (char c in value) {
+                    switch (c) {
+                        case '"': sb.Append("\\\""); break;
+                        case '\\': sb.Append("\\\\"); break;
+                        case '\b': sb.Append("\\b"); break;
+                        case '\f': sb.Append("\\f"); break;
+                        case '\n': sb.Append("\\n"); break;
+                        case '\r': sb.Append("\\r"); break;
+                        case '\t': sb.Append("\\t"); break;
+                        default:
+                            if (c < 0x20) { sb.Append("\\u").Append(((int)c).ToString("x4")); } else { sb.Append(c); }
+                            break;
+                    }
+                }
+                return sb.ToString();
+            }
+        }
+
+        internal class DiscordEmbed {
+            // Discord embed limits we defensively clamp to: title 256, description 4096, field value 1024.
+            private const int TitleLimit = 256;
+            private const int DescriptionLimit = 4096;
+            private const int FieldValueLimit = 1024;
+
+            public string Title {
+                get; set;
+            }
+            public string Description {
+                get; set;
+            }
+            public int Color {
+                get; set;
+            }
+            public string Timestamp {
+                get; set;
+            }
+            public List<DiscordEmbedField> Fields { get; } = new List<DiscordEmbedField>();
+
+            public DiscordEmbed(string title, string description, int color, string timestamp = null) {
+                this.Title = title;
+                this.Description = description;
+                this.Color = color;
+                if (timestamp != null) {
+                    this.Timestamp = timestamp;
+                } else {
+                    this.Timestamp = DateTime.UtcNow.ToString("o");
+                }
+            }
+
+            public DiscordMessage ToMessage() {
+                return new DiscordMessage().AddEmbed(this);
+            }
+
+            public DiscordEmbed AddField(string name, string value, bool inline = false) {
+                string addvalue = string.IsNullOrEmpty(value) ? "unknown" : value;
+                Fields.Add(new DiscordEmbedField { Name = name, Value = Clamp(addvalue, FieldValueLimit), Inline = inline });
+                return this;
+            }
+
+            public void AppendJson(StringBuilder sb) {
+                sb.Append('{');
+                bool first = true;
+                AppendStringProp(sb, "title", Clamp(Title, TitleLimit), ref first);
+                AppendStringProp(sb, "description", Clamp(Description, DescriptionLimit), ref first);
+                if (!first) { sb.Append(','); }
+                sb.Append("\"color\":").Append(Color);
+                first = false;
+                AppendStringProp(sb, "timestamp", Timestamp, ref first);
+                if (Fields.Count > 0) {
+                    sb.Append(",\"fields\":[");
+                    for (int i = 0; i < Fields.Count; i++) {
+                        if (i > 0) { sb.Append(','); }
+                        Fields[i].AppendJson(sb);
+                    }
+                    sb.Append(']');
+                }
+                sb.Append('}');
+            }
+
+            private static void AppendStringProp(StringBuilder sb, string name, string value, ref bool first) {
+                if (string.IsNullOrEmpty(value)) { return; }
+                if (!first) { sb.Append(','); }
+                sb.Append('"').Append(name).Append("\":\"").Append(DiscordMessage.EscapeJson(value)).Append('"');
+                first = false;
+            }
+
+            private static string Clamp(string value, int max) {
+                if (string.IsNullOrEmpty(value) || value.Length <= max) { return value; }
+                return value.Substring(0, max);
+            }
+        }
+
+        internal class DiscordEmbedField {
+            public string Name { get; set; }
+            public string Value { get; set; }
+            public bool Inline { get; set; }
+
+            public void AppendJson(StringBuilder sb) {
+                sb.Append("{\"name\":\"").Append(DiscordMessage.EscapeJson(Name))
+                  .Append("\",\"value\":\"").Append(DiscordMessage.EscapeJson(Value))
+                  .Append("\",\"inline\":").Append(Inline ? "true" : "false")
+                  .Append('}');
             }
         }
     }

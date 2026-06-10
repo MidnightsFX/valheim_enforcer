@@ -16,7 +16,6 @@ namespace ValheimEnforcer.modules {
 
         // This is for runtime registration
         internal static void SaveAccountCharacter(DataObjects.Character character) {
-            InstanciateOrLinkMetadataRegistry();
             UpdateAccountRegistry(character.HostID, character.Name);
             string rawAccountData = MetadataRegistry.GetString(character.HostID, null);
             if (rawAccountData != null) {

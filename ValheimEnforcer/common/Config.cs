@@ -11,6 +11,7 @@ using System.Security.Principal;
 using ValheimEnforcer.common;
 using ValheimEnforcer.modules;
 using ValheimEnforcer.modules.character;
+using ValheimEnforcer.modules.cheatmonitor;
 using ValheimEnforcer.modules.commands;
 using static Mono.Security.X509.X520;
 using static ValheimEnforcer.common.DataObjects;
@@ -47,11 +48,20 @@ namespace ValheimEnforcer {
         public static ConfigEntry<string> CheatDetectionAction;
         public static ConfigEntry<int> CheatScanIntervalSeconds;
 
+        public static ConfigEntry<string> DiscordWebhookUrl;
+        public static ConfigEntry<bool> DiscordNotifyServerStartup;
+        public static ConfigEntry<bool> DiscordNotifyServerShutdown;
+        public static ConfigEntry<bool> DiscordNotifyPlayerJoined;
+        public static ConfigEntry<bool> DiscordNotifyPlayerLeft;
+        public static ConfigEntry<bool> DiscordNotifyWrongMods;
+
         internal const string ModsFileName = "Mods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
         internal const string CharacterFolder = "Characters";
+        internal const string KnownCheatersFileName = "KnownCheaters.yaml";
         internal static String ModsConfigFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, ModsFileName);
         internal static String CharacterFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder);
+        internal static String KnownCheatersFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, KnownCheatersFileName);
 
         internal static CustomRPC CharacterSaveRPC;
         internal static CustomRPC ReturnConfiscatedItemsRPC;
@@ -78,7 +88,11 @@ namespace ValheimEnforcer {
 
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
-            LoadYamlConfigs(new Dictionary<string, Action<string>>() {{ ModsConfigFilePath, CreateModsFile }});
+            LoadYamlConfigs(new Dictionary<string, Action<string>>() {
+                { ModsConfigFilePath, CreateModsFile },
+                { KnownCheatersFilePath, CreateKnownCheatersFile }
+            });
+            KnownCheaterTracker.Initialize();
         }
 
         private void CreateConfigValues(ConfigFile Config) {
@@ -104,7 +118,7 @@ namespace ValheimEnforcer {
             ItemValidationDurabilityAllowedVariance = BindServerConfig("Player Sync", "ItemValidationDurabilityAllowedVariance", 10f, "Allowed variance for item durability validation.", true, 0, 100f);
             SavePlayerStatusEffectsOnLogout = BindServerConfig("Player Sync", "SavePlayerStatusEffectsOnLogout", true, "Whether or not to save active character effects on logout and reapply on login");
             ItemRemovalForDirtyReconnection = BindServerConfig("Player Sync", "ItemRemovalForDirtyReconnection", false, "If enabled, items will not be removed from the player on a dirty reconnection.");
-            ItemReturnForDirtyReconnection = BindServerConfig("Player Sync", "ItemReturnForDirtyReconnection", false, "If enabled, items will not be returned to the player on a dirty reconnection.");
+            ItemReturnForDirtyReconnection = BindServerConfig("Player Sync", "ItemReturnForDirtyReconnection", false, "If enabled, items will be returned to the player on a dirty reconnection.");
 
             // portable mode
             InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
@@ -118,6 +132,14 @@ namespace ValheimEnforcer {
             //DetectSpeedhack = BindServerConfig("Anti-Cheat", "DetectSpeedhack", true, "Detect speedhack via Unity time vs. wall-clock drift.");
             CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a client reports a cheat detection.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
             CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 5, "Seconds between scans on the client.", false, 1, 60);
+
+            // Discord notifications. These are intentionally LOCAL (non-synced) configs: the webhook URL is a secret and must not be synced to clients
+            DiscordWebhookUrl = BindLocalConfig("Discord", "WebhookUrl", "", "Discord webhook URL the server posts notifications to. This is a server-only secret and is never synced to clients. Leave empty to disable. Note: player names are sent to Discord when enabled.");
+            DiscordNotifyServerStartup = BindLocalConfig("Discord", "NotifyServerStartup", true, "Post a message when the server comes online.");
+            DiscordNotifyServerShutdown = BindLocalConfig("Discord", "NotifyServerShutdown", true, "Post a message when the server shuts down.");
+            DiscordNotifyPlayerJoined = BindLocalConfig("Discord", "NotifyPlayerJoined", true, "Post a message when a player joins.");
+            DiscordNotifyPlayerLeft = BindLocalConfig("Discord", "NotifyPlayerLeft", true, "Post a message when a player leaves, including whether their saved data is up to date.");
+            DiscordNotifyWrongMods = BindLocalConfig("Discord", "NotifyWrongMods", true, "Post a message when a player is rejected for a mod mismatch, listing the offending mods.");
         }
 
         internal static void WritePlayerCharacterToSave(string id, DataObjects.Character character) {
@@ -212,6 +234,10 @@ namespace ValheimEnforcer {
                     Logger.LogDebug("Triggering Mod Settings update.");
                     ModManager.UpdateModSettingConfigs(filetext);
                     break;
+                case KnownCheatersFileName:
+                    Logger.LogDebug("Triggering KnownCheaters list update.");
+                    KnownCheaterTracker.LoadFromText(filetext);
+                    break;
             }
         }
 
@@ -224,6 +250,20 @@ namespace ValheimEnforcer {
 ";
                 writetext.WriteLine(header);
                 writetext.WriteLine(ModManager.GetDefaultConfig());
+            }
+        }
+
+        private static void CreateKnownCheatersFile(string filepath) {
+            Logger.LogDebug("KnownCheaters file missing, recreating.");
+            // Seeded with the embedded internal list by KnownCheaterTracker.Initialize(), which
+            // runs immediately after this and rewrites the file with the merged entries.
+            using (StreamWriter writetext = new StreamWriter(filepath)) {
+                String header = @"#################################################
+# Valheim Enforcer - Known Cheaters (server side)
+# Auto-populated when cheaters are banned. Entries: { id, reason }
+#################################################
+";
+                writetext.WriteLine(header);
             }
         }
 
@@ -358,6 +398,7 @@ namespace ValheimEnforcer {
                     break;
                 case "Ban":
                     Logger.LogWarning($"Banning {playerName} for cheat usage.");
+                    KnownCheaterTracker.AddCheater(peer.m_socket.GetHostName(), BuildCheatReason(summary));
                     ZNet.instance.Ban(playerName);
                     break;
                 case "Log":
@@ -365,6 +406,14 @@ namespace ValheimEnforcer {
                     break;
             }
             yield break;
+        }
+
+        private static string BuildCheatReason(DataObjects.CheatSummaryReport summary) {
+            List<string> detections = new List<string>();
+            if (summary.ValheimToolerStatus) { detections.Add("ValheimTooler"); }
+            if (summary.CheatEngineStatus != null && summary.CheatEngineStatus.IsCheatEngineDetected()) { detections.Add("CheatEngine"); }
+            string detail = detections.Count > 0 ? string.Join(", ", detections) : "cheat detected";
+            return $"Cheat detection: {detail}";
         }
 
         public static IEnumerator OnClientReceiveCheatReport(long sender, ZPackage package) {
@@ -546,6 +595,28 @@ namespace ValheimEnforcer {
             }
             Logger.LogInfo("Configuration file has been changed, reloading settings.");
             cfg.Reload();
+        }
+
+        /// <summary>
+        /// Binds a LOCAL (non-synced) string configuration entry. Unlike <see cref="BindServerConfig"/>, this does NOT
+        /// set IsAdminOnly, so Jotunn's SynchronizationManager will not push the value to clients. Use for server-only
+        /// secrets (e.g. the Discord webhook URL) that must never leave the host.
+        /// </summary>
+        public static ConfigEntry<string> BindLocalConfig(string catagory, string key, string value, string description, bool advanced = false) {
+            return cfg.Bind(catagory, key, value,
+                new ConfigDescription(description,
+                null,
+                new ConfigurationManagerAttributes { IsAdminOnly = false, IsAdvanced = advanced }));
+        }
+
+        /// <summary>
+        /// Binds a LOCAL (non-synced) bool configuration entry. See the string overload of <see cref="BindLocalConfig"/>.
+        /// </summary>
+        public static ConfigEntry<bool> BindLocalConfig(string catagory, string key, bool value, string description, bool advanced = false) {
+            return cfg.Bind(catagory, key, value,
+                new ConfigDescription(description,
+                null,
+                new ConfigurationManagerAttributes { IsAdminOnly = false, IsAdvanced = advanced }));
         }
 
         /// <summary>
