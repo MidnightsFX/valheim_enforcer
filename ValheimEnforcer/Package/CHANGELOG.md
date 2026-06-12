@@ -1,3 +1,9 @@
+**0.9.1**
+ ---
+ ```
+ - Admin only mods now strongly restricted to admins
+ ```
+
 **0.9.0**
  ---
  ```
