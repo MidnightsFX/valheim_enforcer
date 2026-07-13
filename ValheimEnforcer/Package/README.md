@@ -29,8 +29,10 @@ Mod Enforcement. All of the following features are configurable (server authorat
 - Prevents users connecting with mods not listed
 - Optional configuration for requiredMods, optionalMods and adminOnlyMods
 
-Cheat detection.
+Cheat detection (enabled by default, configurable).
 - Automatic log, kick or ban for common cheating utilities
+- ValheimTooler is detected even when injected mid-session (after mod validation) and is always auto-banned
+- Optional Discord notification whenever a player is banned for cheating
 
 *Disclaimer: Valheim is client authoratative and without extremely invasive measures, cheating cannot be fully prevented.*
 

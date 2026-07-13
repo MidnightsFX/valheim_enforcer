@@ -1,3 +1,15 @@
+**0.10.0**
+ ---
+ ```
+ - Anti-Cheat now enabled by default
+ - ValheimTooler detection reworked to be more flexible
+	- A confirmed ValheimTooler detection is always auto-banned (when cheat detection is enabled)
+ - Discord notification when a player is banned for cheat usage (NotifyCheaterBanned, default on, requires seperate webhook)
+ - Cheat Engine process scan throttled
+	- ScanIntervalSeconds default raised to 30 (now only affects the Cheat Engine check)
+- Added another user to the global ban list
+ ```
+
 **0.9.1**
  ---
  ```

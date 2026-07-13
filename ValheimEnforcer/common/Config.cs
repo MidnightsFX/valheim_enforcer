@@ -13,6 +13,7 @@ using ValheimEnforcer.modules;
 using ValheimEnforcer.modules.character;
 using ValheimEnforcer.modules.cheatmonitor;
 using ValheimEnforcer.modules.commands;
+using ValheimEnforcer.modules.notifications;
 using static Mono.Security.X509.X520;
 using static ValheimEnforcer.common.DataObjects;
 
@@ -54,6 +55,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> DiscordNotifyPlayerJoined;
         public static ConfigEntry<bool> DiscordNotifyPlayerLeft;
         public static ConfigEntry<bool> DiscordNotifyWrongMods;
+        public static ConfigEntry<bool> DiscordNotifyCheaterBanned;
 
         internal const string ModsFileName = "Mods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
@@ -126,12 +128,12 @@ namespace ValheimEnforcer {
             DeltaSynchronizationFrequencyInSeconds = BindServerConfig("Advanced", "CharacterDeltaTracker", 60, "How frequently (in seconds) the client sends incremental inventory/skill/custom-data updates to the server.", advanced: true, valmin: 30, valmax: 300);
             FullSaveDataSynchronizationFrequencyInSeconds = BindServerConfig("Advanced", "FullSaveDataSynchronizationFrequencyInSeconds", 300, "How frequently (in seconds) the client sends a full character save to the server.", advanced: true, valmin: 60, valmax: 3600);
 
-            EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", false, "Enable client-side scanning for known cheat tools (Cheat Engine, ValheimTooler). Detections are reported to the server.");
-            DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Scan loaded assemblies for ValheimTooler. High confidence, very low cost.");
+            EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Enable client-side scanning for known cheat tools (Cheat Engine, ValheimTooler). Detections are reported to the server.");
+            DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Detect ValheimTooler by the namespace of the types it loads (rename-proof), including assemblies injected mid-session. A confirmed detection is always auto-banned regardless of ActionOnDetection. High confidence, very low cost.");
             DetectCheatEngine = BindServerConfig("Anti-Cheat", "DetectCheatEngine", true, "Scan for Cheat Engine (processes, windows, injected speedhack/DBK modules, debugger). Note: Cheat Engine has legitimate uses — prefer Log action over Kick/Ban.");
             //DetectSpeedhack = BindServerConfig("Anti-Cheat", "DetectSpeedhack", true, "Detect speedhack via Unity time vs. wall-clock drift.");
-            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a client reports a cheat detection.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
-            CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 5, "Seconds between scans on the client.", false, 1, 60);
+            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a Cheat Engine detection is reported (ValheimTooler is always auto-banned).", new AcceptableValueList<string>("Log", "Kick", "Ban"));
+            CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 30, "Seconds between the periodic Cheat Engine process check on the client. ValheimTooler assembly detection is event-driven and not affected by this interval.", false, 5, 300);
 
             // Discord notifications. These are intentionally LOCAL (non-synced) configs: the webhook URL is a secret and must not be synced to clients
             DiscordWebhookUrl = BindLocalConfig("Discord", "WebhookUrl", "", "Discord webhook URL the server posts notifications to. This is a server-only secret and is never synced to clients. Leave empty to disable. Note: player names are sent to Discord when enabled.");
@@ -140,6 +142,7 @@ namespace ValheimEnforcer {
             DiscordNotifyPlayerJoined = BindLocalConfig("Discord", "NotifyPlayerJoined", true, "Post a message when a player joins.");
             DiscordNotifyPlayerLeft = BindLocalConfig("Discord", "NotifyPlayerLeft", true, "Post a message when a player leaves, including whether their saved data is up to date.");
             DiscordNotifyWrongMods = BindLocalConfig("Discord", "NotifyWrongMods", true, "Post a message when a player is rejected for a mod mismatch, listing the offending mods.");
+            DiscordNotifyCheaterBanned = BindLocalConfig("Discord", "NotifyCheaterBanned", true, "Post a message when a player is banned for cheat usage, including the detected cheat(s).");
         }
 
         internal static void WritePlayerCharacterToSave(string id, DataObjects.Character character) {
@@ -383,14 +386,24 @@ namespace ValheimEnforcer {
 
             ZNetPeer peer = ZNet.instance.GetPeer(sender);
             string playerName = summary.PlayerName;
-            string endpoint = peer.m_socket.GetEndPointString();
-            Logger.LogWarning($"Cheat detection from {playerName} ({endpoint}): valheim-tooler: {summary.ValheimToolerStatus} cheatengine: {summary.CheatEngineStatus.IsCheatEngineDetected()}");
-
-            string action = CheatDetectionAction.Value ?? "Log";
             if (peer == null) {
                 Logger.LogWarning($"Received cheat report for {playerName} but could not find corresponding peer. No action will be taken.");
                 yield break;
             }
+
+            string endpoint = peer.m_socket.GetEndPointString();
+            bool cheatEngineDetected = summary.CheatEngineStatus?.IsCheatEngineDetected() ?? false;
+            Logger.LogWarning($"Cheat detection from {playerName} ({endpoint}): valheim-tooler: {summary.ValheimToolerStatus} cheatengine: {cheatEngineDetected}");
+
+            // ValheimTooler is unambiguous cheat software; always ban regardless of ActionOnDetection.
+            if (summary.ValheimToolerStatus) {
+                Logger.LogWarning($"Banning {playerName} for ValheimTooler usage.");
+                BanCheater(peer, playerName, summary);
+                yield break;
+            }
+
+            // Cheat Engine (and any future non-ValheimTooler detection) honors the configured action.
+            string action = CheatDetectionAction.Value ?? "Log";
             switch (action) {
                 case "Kick":
                     Logger.LogWarning($"Kicking {playerName} for cheat usage.");
@@ -398,14 +411,30 @@ namespace ValheimEnforcer {
                     break;
                 case "Ban":
                     Logger.LogWarning($"Banning {playerName} for cheat usage.");
-                    KnownCheaterTracker.AddCheater(peer.m_socket.GetHostName(), BuildCheatReason(summary));
-                    ZNet.instance.Ban(playerName);
+                    BanCheater(peer, playerName, summary);
                     break;
                 case "Log":
                 default:
                     break;
             }
             yield break;
+        }
+
+        // Persists the ban to the KnownCheaters list (the durable rejoin barrier), applies the
+        // vanilla ban, and posts a Discord notification when enabled.
+        private static void BanCheater(ZNetPeer peer, string playerName, DataObjects.CheatSummaryReport summary) {
+            string hostId = peer.m_socket.GetHostName();
+            string reason = BuildCheatReason(summary);
+            KnownCheaterTracker.AddCheater(hostId, reason);
+            ZNet.instance.Ban(playerName);
+
+            if (ValConfig.DiscordNotifyCheaterBanned.Value) {
+                DiscordEmbed embed = new DiscordEmbed("Cheater Banned", null, Red)
+                    .AddField("Player", playerName, true)
+                    .AddField("Detected", reason, true)
+                    .AddField("Host ID", hostId, false);
+                DiscordNotifier.SendAsync(embed.ToMessage());
+            }
         }
 
         private static string BuildCheatReason(DataObjects.CheatSummaryReport summary) {
