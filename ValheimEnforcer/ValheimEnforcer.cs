@@ -9,6 +9,10 @@ using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
 using ValheimEnforcer.modules;
+using ValheimEnforcer.modules.character;
+using ValheimEnforcer.modules.cheatmonitor;
+using ValheimEnforcer.modules.commands;
+using ValheimEnforcer.modules.compat;
 
 namespace ValheimEnforcer
 {
@@ -20,7 +24,7 @@ namespace ValheimEnforcer
     {
         public const string PluginGUID = "MidnightsFX.ValheimEnforcer";
         public const string PluginName = "ValheimEnforcer";
-        public const string PluginVersion = "0.7.3";
+        public const string PluginVersion = "0.11.0";
 
         internal static ManualLogSource Log;
         internal ValConfig cfg;
@@ -36,14 +40,16 @@ namespace ValheimEnforcer
             // Just needs to run AFTER all mods are loaded
             // For client
             PrefabManager.OnPrefabsRegistered += ModManager.SetModsActive;
-            PrefabManager.OnPrefabsRegistered += InternalDataStore.InstanciateOrLinkMetadataRegistry;
+            ZoneManager.OnLocationsRegistered += InternalDataStore.InstanciateOrLinkMetadataRegistry;
             // For server
             PrefabManager.OnVanillaPrefabsAvailable += ModManager.SetModsActive;
             GUIManager.OnCustomGUIAvailable += ModManager.AddErrorMessageDetailsForMenu;
             InternalDataStore.RegisterMetadataHolder();
             TerminalCommands.AddCommands();
             MinimapManager.OnVanillaMapDataLoaded += CheatDetector.Initialize;
+            MinimapManager.OnVanillaMapDataLoaded += CharacterDeltaTracker.Initialize;
 
+            ModCompatability.CheckModCompat();
             Harmony harmony = Harmony.CreateAndPatchAll(Assembly.GetExecutingAssembly());
         }
 

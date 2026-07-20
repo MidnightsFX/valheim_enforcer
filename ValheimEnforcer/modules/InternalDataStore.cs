@@ -16,7 +16,6 @@ namespace ValheimEnforcer.modules {
 
         // This is for runtime registration
         internal static void SaveAccountCharacter(DataObjects.Character character) {
-            InstanciateOrLinkMetadataRegistry();
             UpdateAccountRegistry(character.HostID, character.Name);
             string rawAccountData = MetadataRegistry.GetString(character.HostID, null);
             if (rawAccountData != null) {
@@ -69,42 +68,41 @@ namespace ValheimEnforcer.modules {
         }
 
         internal static void InstanciateOrLinkMetadataRegistry() {
-            if (MetadataRegistry == null) {
-                if (ZoneSystem.instance.GetGlobalKey($"{DataObjects.CustomDataKey}", out string val)) {
-                    string[] parts = val.Split(' ');
-                    if (parts.Length == 2
-                        && long.TryParse(parts[0], out long userID)
-                        && uint.TryParse(parts[1], out uint objID)) {
-                        ZDOID zdoid = new ZDOID(userID, objID);
-                        ZDO zdo = ZDOMan.instance.GetZDO(zdoid);
-                        MetadataRegistry = zdo;
+            // The in-world registry only exists to back internal storage mode. Don't create the ZDO or
+            // write the global key when that mode is disabled — otherwise it fires eagerly on every world load.
+            if (ValConfig.InternalStorageMode.Value == false) { return; }
+            if (MetadataRegistry != null) { return; }
+
+            // Server-side only — the session id owns the registry ZDO so its writes propagate.
+            long sessionID = ZDOMan.GetSessionID();
+
+            // Re-link to a registry we've already stored in this world rather than orphaning it with a new one.
+            if (ZoneSystem.instance.GetGlobalKey($"{DataObjects.CustomDataKey}", out string val)) {
+                string[] parts = val.Split(' ');
+                if (parts.Length == 2
+                    && long.TryParse(parts[0], out long userID)
+                    && uint.TryParse(parts[1], out uint objID)) {
+                    ZDOID zdoid = new ZDOID(userID, objID);
+                    ZDO existing = ZDOMan.instance.GetZDO(zdoid);
+                    if (existing != null) {
+                        existing.SetOwner(sessionID);
+                        MetadataRegistry = existing;
+                        Logger.LogInfo($"Linked existing Metadata Registry. SessionID:{sessionID} ZDO:{existing.m_uid}");
+                        return;
                     }
+                    Logger.LogWarning($"Metadata Registry global key {DataObjects.CustomDataKey}={val} present but ZDO {zdoid} could not be found; creating a new registry.");
                 }
-
-                // Server-side only — do this once, store the ZDOID somewhere you can look it up
-                long sessionID = ZDOMan.GetSessionID();
-                ZDO metaZDO = ZDOMan.instance.CreateNewZDO(Vector3.zero, 0);
-                metaZDO.Persistent = true;
-                metaZDO.SetOwner(sessionID);
-                MetadataRegistry = metaZDO;
-                ZoneSystem.instance.SetGlobalKey($"{DataObjects.CustomDataKey} {MetadataRegistry.m_uid.UserID} {MetadataRegistry.m_uid.ID}");
-
-                Logger.LogInfo($"Hooking up Metadata Registry. SessionID:{sessionID} ZDO:{metaZDO.m_uid}");
-                Logger.LogInfo($"Setting globalkey: {DataObjects.CustomDataKey} {MetadataRegistry.m_uid.UserID} {MetadataRegistry.m_uid.ID}");
-                //GameObject loaded = ZNetScene.instance.GetPrefab("VE_METADATA(Clone)");
-                //if (loaded != null) {
-                //    ZNetView zview = loaded.GetComponent<ZNetView>();
-                //    Logger.LogInfo($"Found existing VE_METADATA Storage. {loaded} {zview} {zview.IsValid()}");
-                //    MetadataRegistry = zview.GetZDO();
-                //    return;
-                //}
-
-                //GameObject go = UnityEngine.Object.Instantiate(PrefabManager.Instance.GetPrefab("VE_METADATA"), Vector3.zero, Quaternion.identity);
-                //ZNetView view = go.GetComponent<ZNetView>();
-
-                //Logger.LogDebug($"Instantiating metadata registry... {go} {view} {view.IsValid()}");
-                //MetadataRegistry = view.GetZDO();
             }
+
+            // No usable existing registry — create one and record its ZDOID in a global key so it can be re-linked later.
+            ZDO metaZDO = ZDOMan.instance.CreateNewZDO(Vector3.zero, 0);
+            metaZDO.Persistent = true;
+            metaZDO.SetOwner(sessionID);
+            MetadataRegistry = metaZDO;
+            ZoneSystem.instance.SetGlobalKey($"{DataObjects.CustomDataKey} {MetadataRegistry.m_uid.UserID} {MetadataRegistry.m_uid.ID}");
+
+            Logger.LogInfo($"Hooking up Metadata Registry. SessionID:{sessionID} ZDO:{metaZDO.m_uid}");
+            Logger.LogInfo($"Setting globalkey: {DataObjects.CustomDataKey} {MetadataRegistry.m_uid.UserID} {MetadataRegistry.m_uid.ID}");
         }
 
         internal static void UpdateAccountRegistry(string accountID, string chara = null) {

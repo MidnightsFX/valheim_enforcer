@@ -1,3 +1,77 @@
+**0.11.0**
+ ---
+ ```
+ - Server-side character saves and delta updates are now written off the main thread
+    - Full/delta saves are deserialized, serialized and written on a background worker with an in-memory cache
+    - Repeated writes to the same character are coalesced, so a burst of saves (e.g. every client on a "save player profiles" broadcast) can no longer stall the server or time players out
+    - Internal storage mode keeps its existing behavior (registry writes must stay on the main thread)
+ - Full character saves are now pulled by the server instead of riding the world/profile autosave
+    - The server asks connected players for a full save every FullSyncPullIntervalMinutes (default 25)
+    - No more than FullSyncMaxConcurrentPlayers upload at once (default 5); larger player counts are staggered into waves so incoming saves never spike bandwidth
+    - Removes the client-side full-save timer and the Player.Save trigger; routine changes still stream up incrementally via CharacterDeltaTracker, and join/logout still push a full save
+ ```
+
+**0.10.1**
+ ---
+ ```
+ - Forward leads character saves to ensure first round of delta saves are not discarded
+ ```
+
+**0.10.0**
+ ---
+ ```
+ - Anti-Cheat now enabled by default
+ - ValheimTooler detection reworked to be more flexible
+	- A confirmed ValheimTooler detection is always auto-banned (when cheat detection is enabled)
+ - Discord notification when a player is banned for cheat usage (NotifyCheaterBanned, default on, requires seperate webhook)
+ - Cheat Engine process scan throttled
+	- ScanIntervalSeconds default raised to 30 (now only affects the Cheat Engine check)
+- Added another user to the global ban list
+ ```
+
+**0.9.1**
+ ---
+ ```
+ - Admin only mods now strongly restricted to admins
+ ```
+
+**0.9.0**
+ ---
+ ```
+ - Added Automatic ban list, built in known-banned
+ - Added discord notifications (server side) [Configurable!]
+	- Notify on player join
+	- Notify on player leave
+	- Notify on server start
+	- Notify on server shutdown
+	- Notify on mod mismatch
+ ```
+
+**0.8.2**
+ ---
+ ```
+ - Configurable save sync intervals for full saves and delta saves
+ - Last disconnect status tracked
+	- Allows reduction in strictness of item confiscation
+ - Added a confiscated timestamp
+ - Improved item return logic to drop items on the ground if the player does not have room for it
+ ```
+
+**0.8.1**
+ ---
+ ```
+ - Null check for status effects which no longer exist when adding to character
+ - Improves Item return RPC logic to deal with partially valid clients
+ - Improves compatibility with some custom status effects and saved custom data
+ ```
+
+**0.8.0**
+ ---
+ ```
+ - Improved Item, skill, status effect, and custom data consistency
+ - Added a catchall to persist character data when exiting without saving
+ ```
+
 **0.7.3**
  ---
  ```

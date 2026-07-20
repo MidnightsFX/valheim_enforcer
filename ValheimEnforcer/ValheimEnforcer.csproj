@@ -28,11 +28,18 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Vendor\**" />
+    <EmbeddedResource Remove="Vendor\**" />
+    <None Remove="Vendor\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Remove="assets\vebundle" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="assets\vebundle" />
+    <EmbeddedResource Include="assets\KnownCheaters.yaml" />
   </ItemGroup>
 
   <ItemGroup>
@@ -43,6 +50,7 @@
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="System.Data" />
     <Reference Include="System.Xml" />
+    <Reference Include="System.Net.Http" />
   </ItemGroup>
 
   <ItemGroup>

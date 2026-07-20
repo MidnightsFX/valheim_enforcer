@@ -1,22 +1,24 @@
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using UnityEngine;
 using ValheimEnforcer.common;
+using ValheimEnforcer.modules.character;
 using static ValheimEnforcer.common.DataObjects;
 
-namespace ValheimEnforcer.modules {
+namespace ValheimEnforcer.modules.cheatmonitor {
     internal static class CheatDetector {
 
-        private static readonly HashSet<string> ReportedSignals = new HashSet<string>();
-
-        private static readonly string[] ToolerAssemblyNames = {
-            "ValheimTooler", "ValheimToolerMod", "RapidGUI"
-        };
+        // ValheimTooler is detected by the namespace of the types it loads rather than the
+        // assembly name, so renaming the injected assembly does not evade detection.
+        private const string ToolerNamespace = "ValheimTooler";
+        private const string ToolerNamespacePrefix = "ValheimTooler.";
 
         private static readonly string[] CheatEngineProcessNames = {
             "cheatengine-x86_64", "cheatengine-i386",
@@ -38,23 +40,42 @@ namespace ValheimEnforcer.modules {
             Logger.LogDebug("CheatDetector initialized.");
         }
 
-        internal static bool ValheimToolerLoaded() {
+        /// <summary>
+        /// True if the assembly hosts any type in the ValheimTooler namespace. Skips dynamic
+        /// assemblies (Harmony/DMD) which never host the cheat and throw on GetTypes(), and
+        /// tolerates partially-loadable assemblies via ReflectionTypeLoadException.
+        /// </summary>
+        internal static bool AssemblyHostsTooler(Assembly asm, out string detail) {
+            detail = null;
+            if (asm == null || asm.IsDynamic) { return false; }
             try {
-                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies()) {
-                    string n = asm.GetName().Name ?? "";
-                    if (ToolerAssemblyNames.Any(t => t.Equals(n, StringComparison.OrdinalIgnoreCase))) {
+                Type[] types;
+                try {
+                    types = asm.GetTypes();
+                } catch (ReflectionTypeLoadException ex) {
+                    types = ex.Types;
+                }
+
+                foreach (Type t in types) {
+                    if (t == null) { continue; }
+                    string ns = t.Namespace;
+                    if (ns == null) { continue; }
+                    if (ns == ToolerNamespace || ns.StartsWith(ToolerNamespacePrefix, StringComparison.Ordinal)) {
+                        detail = $"type:{t.FullName} asm:{asm.GetName().Name}";
                         return true;
                     }
                 }
             } catch (Exception e) {
-                Logger.LogDebug($"CheatDetector.ValheimToolerLoaded failed: {e.Message}");
+                Logger.LogDebug($"CheatDetector.AssemblyHostsTooler failed for {asm.FullName}: {e.Message}");
             }
             return false;
         }
 
         internal static bool CheatEngineProcessRunning() {
+            Process[] procs = null;
             try {
-                foreach (var p in Process.GetProcesses()) {
+                procs = Process.GetProcesses();
+                foreach (var p in procs) {
                     string pn = p.ProcessName ?? "";
                     if (CheatEngineProcessNames.Any(n => pn.IndexOf(n, StringComparison.OrdinalIgnoreCase) >= 0)) {
                         return true;
@@ -62,6 +83,13 @@ namespace ValheimEnforcer.modules {
                 }
             } catch (Exception e) {
                 Logger.LogDebug($"CheatDetector.CheatEngineProcessRunning failed: {e.Message}");
+            } finally {
+                // Process objects hold OS handles; dispose them so the periodic scan does not leak.
+                if (procs != null) {
+                    foreach (var p in procs) {
+                        try { p.Dispose(); } catch { }
+                    }
+                }
             }
             return false;
         }
@@ -144,6 +172,7 @@ namespace ValheimEnforcer.modules {
                     ValConfig.CheatDetectionRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, package);
                 }
             } catch (Exception e) {
+                Logger.LogDebug($"CheatDetector.ReportCheatScanSummary failed: {e.Message}");
             }
         }
 
@@ -169,47 +198,119 @@ namespace ValheimEnforcer.modules {
         internal class CheatDetectorBehaviour : MonoBehaviour {
             private float nextScan;
 
+            // Assemblies (by full name) already type-inspected. Ensures GetTypes() runs at most
+            // once per assembly for the lifetime of the behaviour. Main-thread only.
+            private readonly HashSet<string> inspected = new HashSet<string>();
+
+            // Newly-loaded assemblies queued by the AssemblyLoad event. The event can fire on a
+            // non-Unity thread while the assembly is still loading, so we only enqueue here and
+            // inspect on the main thread in Update() where types are fully available.
+            private readonly ConcurrentQueue<Assembly> pending = new ConcurrentQueue<Assembly>();
+
+            private bool toolerDetected;
+            private string toolerDetail;
+            private bool reported;
+
+            private void OnEnable() {
+                AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoaded;
+            }
+
+            private void OnDisable() {
+                AppDomain.CurrentDomain.AssemblyLoad -= OnAssemblyLoaded;
+            }
+
             private void Start() {
-                // Not adding speedhack detection yet as its expensive
-                //StartCoroutine(SpeedhackDriftLoop());
+                // Inspect what is already loaded once, spread over frames to avoid a hitch. The
+                // AssemblyLoad subscription (OnEnable, runs before Start) already covers anything
+                // that loads during the sweep; the inspected-set dedupes the overlap.
+                StartCoroutine(InitialAssemblySweep());
+            }
+
+            private void OnAssemblyLoaded(object sender, AssemblyLoadEventArgs args) {
+                if (args?.LoadedAssembly != null) {
+                    pending.Enqueue(args.LoadedAssembly);
+                }
             }
 
             private void Update() {
-                if (!ValConfig.EnableCheatDetection.Value) return;
-                if (Time.unscaledTime < nextScan) return;
-                nextScan = Time.unscaledTime + Mathf.Max(1, ValConfig.CheatScanIntervalSeconds.Value);
-                RunScan();
+                // Always drain the queue so it cannot grow unbounded, even while disabled.
+                bool enabled = ValConfig.EnableCheatDetection.Value;
+                DrainPending(enabled && ValConfig.DetectValheimTooler.Value);
+
+                if (!enabled) { return; }
+
+                // Retry reporting until the local character identity is available.
+                if (toolerDetected && !reported) { TryReportTooler(); }
+
+                if (Time.unscaledTime < nextScan) { return; }
+                nextScan = Time.unscaledTime + Mathf.Max(5, ValConfig.CheatScanIntervalSeconds.Value);
+                RunPeriodicScan();
             }
 
-            private static void RunScan() {
-                // Skip if the local character is not yet set
-                if (CharacterManager.PlayerCharacter == null) {
-                    return;
+            private void DrainPending(bool inspect) {
+                while (pending.TryDequeue(out Assembly asm)) {
+                    if (inspect) { InspectAssembly(asm); }
                 }
+            }
 
-                CheatSummaryReport report = new CheatSummaryReport {
+            private IEnumerator InitialAssemblySweep() {
+                const int batchSize = 15;
+                int processed = 0;
+                foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies()) {
+                    if (ValConfig.EnableCheatDetection.Value && ValConfig.DetectValheimTooler.Value) {
+                        InspectAssembly(asm);
+                    }
+                    if (++processed % batchSize == 0) {
+                        yield return null;
+                    }
+                }
+            }
+
+            // Inspects an assembly exactly once (deduped by full name). Latches detection; the
+            // actual report is sent from TryReportTooler once the player identity is known.
+            private void InspectAssembly(Assembly asm) {
+                if (asm == null) { return; }
+                string id = asm.FullName;
+                if (id != null && !inspected.Add(id)) { return; }
+
+                if (!toolerDetected && AssemblyHostsTooler(asm, out string detail)) {
+                    toolerDetected = true;
+                    toolerDetail = detail;
+                    Logger.LogWarning($"ValheimTooler detected ({detail}).");
+                }
+            }
+
+            private void TryReportTooler() {
+                if (CharacterManager.PlayerCharacter == null) { return; }
+                reported = true;
+                Logger.LogWarning($"Reporting ValheimTooler detection to server for ban ({toolerDetail}).");
+                ReportCheatScanSummary(new CheatSummaryReport {
                     PlayerName = CharacterManager.PlayerCharacter.Name,
                     PlatformID = CharacterManager.PlayerCharacter.HostID,
-                    CheatEngineStatus = new CheatEngineDetector()
-                };
+                    ValheimToolerStatus = true
+                });
+            }
 
-                // check for ValheimTooler
-                if (ValConfig.DetectValheimTooler.Value && ValheimToolerLoaded()) {
-                    report.ValheimToolerStatus = true;
-                }
-
-                // Check for cheatEngine
-                if (ValConfig.DetectCheatEngine.Value) {
-                    if (CheatEngineProcessRunning()) {
-                        report.CheatEngineStatus.CheatEngineProcessDetected = true;
+            private void RunPeriodicScan() {
+                // Fallback assembly sweep: covers the rare case a native injector loads an
+                // assembly without raising the managed AssemblyLoad event. Cached assemblies are
+                // skipped, so this is near-free in steady state.
+                if (ValConfig.DetectValheimTooler.Value && !toolerDetected) {
+                    foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies()) {
+                        InspectAssembly(asm);
+                        if (toolerDetected) { break; }
                     }
                 }
 
-                // Check for suspicious native modules
-                //SuspiciousNativeModuleLoaded(report);
-
-                if (report.cheatsDetected()) {
-                    ReportCheatScanSummary(report);
+                // Cheat Engine process check (throttled to the scan interval, handles disposed).
+                if (ValConfig.DetectCheatEngine.Value && CharacterManager.PlayerCharacter != null) {
+                    if (CheatEngineProcessRunning()) {
+                        ReportCheatScanSummary(new CheatSummaryReport {
+                            PlayerName = CharacterManager.PlayerCharacter.Name,
+                            PlatformID = CharacterManager.PlayerCharacter.HostID,
+                            CheatEngineStatus = new CheatEngineDetector { CheatEngineProcessDetected = true }
+                        });
+                    }
                 }
             }
 

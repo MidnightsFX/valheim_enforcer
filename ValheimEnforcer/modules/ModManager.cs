@@ -12,10 +12,17 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using ValheimEnforcer.common;
+using ValheimEnforcer.modules.notifications;
 using static ValheimEnforcer.common.DataObjects;
 
 namespace ValheimEnforcer.modules {
     internal static class ModManager {
+
+        /// <summary>Best-effort lookup of a connecting peer's player name by its handshake RPC. May be empty early in the handshake.</summary>
+        private static string ResolvePeerName(ZRpc rpc) {
+            ZNetPeer peer = ZNet.instance?.GetPeer(rpc);
+            return string.IsNullOrEmpty(peer?.m_playerName) ? null : peer.m_playerName;
+        }
 
         internal static DataObjects.Mods ModSettings { get; set; }
         internal static Dictionary<string, BaseUnityPlugin> ActiveMods = new Dictionary<string, BaseUnityPlugin>();
@@ -85,11 +92,13 @@ namespace ValheimEnforcer.modules {
             }
         }
 
-        internal static bool ValidateModlist(Mods CheckingMods, Mods AuthoratativeMods, bool isAdmin, out string summay, out string details) {
+        internal static bool ValidateModlist(Mods CheckingMods, Mods AuthoratativeMods, bool isAdmin, bool adminStatusKnown, out string summay, out string details) {
             summay = "";
             details = "";
             List<string> extraMods = new List<string>();
             List<string> versionMismatch = new List<string>();
+            List<string> adminOnlyNotAllowed = new List<string>();
+            List<string> adminOnlyInfo = new List<string>();   // client-side: admin status not yet synced, surfaced as a neutral note
             List<string> requiredModsMissing = AuthoratativeMods.RequiredMods.Keys.Distinct().ToList();
 
             Logger.LogDebug($"Validating modlist of {CheckingMods.ActiveMods.Count} mods isAdmin? {isAdmin}");
@@ -109,19 +118,22 @@ namespace ValheimEnforcer.modules {
                     }
                 }
 
-                // Admin-only mods are allowed only for admins.
+                // Compare admin mods - prevent non-admin clients from joining with admin only mods.
+                // Non-admins carrying one are rejected; admins are version-enforced when EnforceVersion is set.
                 if (AuthoratativeMods.AdminOnlyMods.ContainsKey(mod.Key)) {
-                    if (!isAdmin) {
-                        extraMods.Add(mod.Key);
-                        continue;
-                    }
-
-                    if (AuthoratativeMods.AdminOnlyMods[mod.Key].EnforceVersion) {
-                        if (AuthoratativeMods.AdminOnlyMods[mod.Key].Version != mod.Value.Version) {
+                    if (!adminStatusKnown) {
+                        // Client side: Jotunn only syncs admin status after login (post-RPC_PeerInfo),
+                        // and PlayerIsAdmin defaults to true, so we cannot trust it here. Surface a
+                        // neutral note instead of guessing.
+                        adminOnlyInfo.Add(mod.Key);
+                    } else if (isAdmin) {
+                        if (AuthoratativeMods.AdminOnlyMods[mod.Key].EnforceVersion &&
+                            AuthoratativeMods.AdminOnlyMods[mod.Key].Version != mod.Value.Version) {
                             versionMismatch.Add(mod.Key);
                         }
+                    } else {
+                        adminOnlyNotAllowed.Add(mod.Key);
                     }
-
                     continue;
                 }
 
@@ -157,7 +169,17 @@ namespace ValheimEnforcer.modules {
                 summay += unallowedMods;
                 Logger.LogWarning(unallowedMods);
             }
-            if (versionMismatch.Count > 0 || requiredModsMissing.Count > 0 || extraMods.Count > 0) {
+            if (adminOnlyNotAllowed.Count > 0) {
+                string adminMods = $"\nAdmin-only mods not permitted for non-admins: {string.Join(", ", adminOnlyNotAllowed)}";
+                summay += adminMods;
+                Logger.LogWarning(adminMods);
+            }
+            if (adminOnlyInfo.Count > 0) {
+                string adminInfo = $"\nThis server restricts some mods to admins; if you are not an admin you will be disconnected: {string.Join(", ", adminOnlyInfo)}";
+                summay += adminInfo;
+                Logger.LogInfo(adminInfo);
+            }
+            if (versionMismatch.Count > 0 || requiredModsMissing.Count > 0 || extraMods.Count > 0 || adminOnlyNotAllowed.Count > 0 || adminOnlyInfo.Count > 0) {
                 // Build detailed error message for display in Jotunn's CompatibilityWindow
                 StringBuilder errorBuilder = new StringBuilder();
                 errorBuilder.AppendLine("\n<b>ValheimEnforcer - Mod Validation Failed</b>");
@@ -179,6 +201,20 @@ namespace ValheimEnforcer.modules {
                 if (extraMods.Count > 0) {
                     errorBuilder.AppendLine("\n<b>Non-Allowed Mods:</b>");
                     foreach (var modKey in extraMods) {
+                        errorBuilder.AppendLine($"  • {modKey}");
+                    }
+                }
+
+                if (adminOnlyNotAllowed.Count > 0) {
+                    errorBuilder.AppendLine("\n<b>Admin-Only Mods (not permitted):</b>");
+                    foreach (var modKey in adminOnlyNotAllowed) {
+                        errorBuilder.AppendLine($"  • {modKey}");
+                    }
+                }
+
+                if (adminOnlyInfo.Count > 0) {
+                    errorBuilder.AppendLine("\n<b>Admin-Only Mods (require admin):</b>");
+                    foreach (var modKey in adminOnlyInfo) {
                         errorBuilder.AppendLine($"  • {modKey}");
                     }
                 }
@@ -255,11 +291,14 @@ namespace ValheimEnforcer.modules {
                 // Client received data from server
                 Mods serverMods = new Mods().FromZPackage(data);
                 Logger.LogDebug($"Client received server mod data: Required: {serverMods.RequiredMods.Count}, Optional: {serverMods.OptionalMods.Count}, AdminOnly: {serverMods.AdminOnlyMods.Count} mods");
-                // Admin check on the client side is going to be iffy
-                bool modsvalid = ValidateModlist(ModSettings, serverMods, SynchronizationManager.Instance.PlayerIsAdmin, out string summary, out string details);
+                // Client cannot trust its admin status during the handshake: Jotunn syncs it only
+                // after login (post-RPC_PeerInfo) and PlayerIsAdmin defaults to true. Pass it as
+                // unknown so admin-only mods are surfaced as a neutral note rather than a false pass.
+                bool modsvalid = ValidateModlist(ModSettings, serverMods, isAdmin: false, adminStatusKnown: false, out string summary, out string details);
 
+                // Always update so a clean run clears any note left over from a previous attempt.
+                DetailsUpdater?.UpdateErrorText(summary, details);
                 if (modsvalid == false) {
-                    DetailsUpdater.UpdateErrorText(summary, details);
                     // Client does not kick, but it does set the error message, the server ultimately does the actual validation-
                     // this client side comparison is just to provide feedback to the user
                     Logger.LogWarning($"Mod compatibility check failed for client.");
@@ -269,9 +308,14 @@ namespace ValheimEnforcer.modules {
                 Mods clientMods = new Mods().FromZPackage(data);
                 bool isadmin = ZNet.instance.IsAdmin(sender.m_socket.GetHostName());
                 Logger.LogDebug($"Server received server mod data from {peerAddress} Admin?{isadmin}: Required: {clientMods.RequiredMods.Count}, Optional: {clientMods.OptionalMods.Count}, AdminOnly: {clientMods.AdminOnlyMods.Count} mods");;
-                bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, out string summary, out string details);
+                bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, adminStatusKnown: true, out string summary, out string details);
                 if (modsvalid == false) {
                     Logger.LogWarning($"Mod compatibility check failed for client at {peerAddress}\n{summary}");
+                    if (ValConfig.DiscordNotifyWrongMods.Value) {
+                        string playerName = ResolvePeerName(sender) ?? peerAddress;
+                        DiscordEmbed embed = new DiscordEmbed("Connection Rejected: Mod Mismatch", summary.Trim(), Red).AddField("Player", playerName, true);
+                        DiscordNotifier.SendAsync(embed.ToMessage());
+                    }
                     // Kick the player
                     sender.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorVersion);
                 }
