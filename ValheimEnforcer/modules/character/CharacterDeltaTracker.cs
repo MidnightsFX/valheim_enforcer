@@ -10,7 +10,6 @@ using Logger = ValheimEnforcer.Logger;
 namespace ValheimEnforcer.modules.character {
     internal static class CharacterDeltaTracker {
         internal static float LastDeltaSyncTime = 0;
-        internal static float LastFullSaveDataSyncTime = 0;
         internal static DeltaChangeTracker DeltaTracker;
 
         internal static void Initialize() {
@@ -78,17 +77,12 @@ internal class DeltaChangeTracker : MonoBehaviour {
 
     public void Update() {
 
-        // Only run Delta sync based on its timeframe
+        // Only run Delta sync based on its timeframe. Full character saves are no longer driven from here;
+        // the server pulls them on its own schedule (see FullSyncScheduler) and the client responds to that
+        // request via OnClientReceiveFullSyncRequest.
         if (Time.unscaledTime > CharacterDeltaTracker.LastDeltaSyncTime) {
             CharacterDeltaTracker.LastDeltaSyncTime = Time.unscaledTime + ValConfig.DeltaSynchronizationFrequencyInSeconds.Value;
             SyncChangesToServer();
-        }
-
-        // Full save data sync based on timeframe
-        if (Time.unscaledTime > CharacterDeltaTracker.LastFullSaveDataSyncTime) {
-            CharacterDeltaTracker.LastFullSaveDataSyncTime = Time.unscaledTime + ValConfig.FullSaveDataSynchronizationFrequencyInSeconds.Value;
-            Logger.LogDebug("Forcing full save data sync to server.");
-            CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
         }
 
     }
@@ -144,6 +138,10 @@ internal class DeltaChangeTracker : MonoBehaviour {
         DeltaSummaryUpdate payload = new DeltaSummaryUpdate {
             Name = CharacterManager.PlayerCharacter.Name,
             HostID = CharacterManager.PlayerCharacter.HostID,
+            // A routine delta is emitted mid-session, so the server save is only current as of this update:
+            // if the player disappears without a clean logout it is a dirty (stale) disconnect. A clean logout
+            // sends a full save with LastDisconnect = Clean, which is the last write and wins.
+            DisconnectionState = DisconnectionState.DirtyDisconnect,
             ItemModifications = itemDeltas,
             SkillLevels = Player.m_localPlayer.GetSkills().GetSkillList().ToDictionary(s => s.m_info.m_skill, s => s.m_level),
             PlayerCustomDataModifications = customDataModifications,

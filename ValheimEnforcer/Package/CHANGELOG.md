@@ -1,3 +1,22 @@
+**0.11.0**
+ ---
+ ```
+ - Server-side character saves and delta updates are now written off the main thread
+    - Full/delta saves are deserialized, serialized and written on a background worker with an in-memory cache
+    - Repeated writes to the same character are coalesced, so a burst of saves (e.g. every client on a "save player profiles" broadcast) can no longer stall the server or time players out
+    - Internal storage mode keeps its existing behavior (registry writes must stay on the main thread)
+ - Full character saves are now pulled by the server instead of riding the world/profile autosave
+    - The server asks connected players for a full save every FullSyncPullIntervalMinutes (default 25)
+    - No more than FullSyncMaxConcurrentPlayers upload at once (default 5); larger player counts are staggered into waves so incoming saves never spike bandwidth
+    - Removes the client-side full-save timer and the Player.Save trigger; routine changes still stream up incrementally via CharacterDeltaTracker, and join/logout still push a full save
+ ```
+
+**0.10.1**
+ ---
+ ```
+ - Forward leads character saves to ensure first round of delta saves are not discarded
+ ```
+
 **0.10.0**
  ---
  ```

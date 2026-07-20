@@ -17,6 +17,10 @@ using static Version;
 namespace ValheimEnforcer.modules.character {
     internal static class CharacterManager {
         internal static DataObjects.Character PlayerCharacter = null;
+        // Set while a clean Game.Logout is in progress so any save triggered during logout records the character
+        // as cleanly disconnected. Every other save (routine Player.Save, the periodic full-save timer, a full-sync
+        // response) happens during an active session and must record DirtyDisconnect. See SavePlayerCharacter.
+        internal static bool LogoutInProgress = false;
         internal static List<string> staringAllowedPrefabs = new List<string>() {
             "ArmorRagsChest",
             "ArmorRagsLegs",
@@ -62,8 +66,11 @@ namespace ValheimEnforcer.modules.character {
             return selectedID;
         }
 
-        internal static void SavePlayerCharacter(Player __instance, DataObjects.DisconnectionState lastDisconnect = DisconnectionState.Clean) {
+        internal static void SavePlayerCharacter(Player __instance) {
             if (__instance == null || SceneManager.GetActiveScene().name.Equals("main") == false) { return; }
+            // A save marks the character Clean only when it is produced by a clean logout; every other save
+            // represents an active (potentially soon-to-be-stale) session and is recorded as DirtyDisconnect.
+            DataObjects.DisconnectionState lastDisconnect = LogoutInProgress ? DisconnectionState.Clean : DisconnectionState.DirtyDisconnect;
             string playerID = "";
             string PlayerName = "";
             DataObjects.Character savableChar = null;
@@ -110,6 +117,7 @@ namespace ValheimEnforcer.modules.character {
                 }
             } else {
                 Logger.LogDebug($"Existing character data found for player {PlayerName} with ID {playerID}. Updating character data with current player information.");
+                savableChar.LastDisconnect = lastDisconnect;
                 savableChar.SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
                 Logger.LogDebug($"Updated player skills for {PlayerName} with ID {playerID}.");
                 if (ValConfig.PreventExternalCustomDataChanges.Value) {
@@ -153,6 +161,8 @@ namespace ValheimEnforcer.modules.character {
         }
 
         internal static void LoadAndValidatePlayer(Player player) {
+            // A fresh spawn is an active session; clear any stale logout flag so saves record DirtyDisconnect.
+            LogoutInProgress = false;
             string playerID;
             string PlayerName;
             if (PlayerCharacter != null) {
@@ -220,7 +230,13 @@ namespace ValheimEnforcer.modules.character {
                 }
             }
 
-            if (ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value && (ValConfig.ItemRemovalForDirtyReconnection.Value == true && savableChar.LastDisconnect == DisconnectionState.DirtyDisconnect)) {
+            // Base enforcement runs on every join. On a *dirty* reconnect the server save can be up to one
+            // delta window stale, so an admin may opt into leniency (ItemRemovalForDirtyReconnection) to avoid
+            // confiscating items a crash victim legitimately gained in that window. Default keeps removal on for
+            // every join — a forced-dirty disconnect cannot be used to bypass confiscation.
+            bool skipRemovalForDirty = savableChar.LastDisconnect == DisconnectionState.DirtyDisconnect
+                                       && ValConfig.ItemRemovalForDirtyReconnection.Value;
+            if (ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value && !skipRemovalForDirty) {
                 List<ItemDrop.ItemData> removeItems = new List<ItemDrop.ItemData>();
                 Dictionary<ItemDrop.ItemData, ItemValidatorResult> ValidatorResults = ValidateItems(player.m_inventory.GetAllItems(), savableChar);
 
@@ -234,7 +250,12 @@ namespace ValheimEnforcer.modules.character {
                 }
             }
 
-            if (ValConfig.AddMissingItemsFromPlayerServerSave.Value && (ValConfig.ItemReturnForDirtyReconnection.Value == true && savableChar.LastDisconnect == DisconnectionState.DirtyDisconnect)) {
+            // Base restoration runs on every join. On a *dirty* reconnect the save can be stale, so restoring
+            // "missing" items risks duping items the player consumed in the last (unsaved) delta window; default
+            // skips restore on a dirty reconnect unless the admin opts in (ItemReturnForDirtyReconnection).
+            bool suppressReturnForDirty = savableChar.LastDisconnect == DisconnectionState.DirtyDisconnect
+                                          && !ValConfig.ItemReturnForDirtyReconnection.Value;
+            if (ValConfig.AddMissingItemsFromPlayerServerSave.Value && !suppressReturnForDirty) {
                 Logger.LogDebug("Checking to restore player items.");
                 List<Tuple<string, int>> prefablist = new List<Tuple<string, int>>();
                 foreach(ItemDrop.ItemData item in player.m_inventory.GetAllItems()) {

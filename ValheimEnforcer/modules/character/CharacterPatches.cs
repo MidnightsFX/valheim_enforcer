@@ -29,6 +29,7 @@ namespace ValheimEnforcer.modules.character {
                     Logger.LogDebug($"Clearing selected save profile for {CharacterManager.PlayerCharacter.Name} on logout.");
                     CharacterManager.PlayerCharacter = null;
                 }
+                CharacterManager.LogoutInProgress = false;
             }
         }
 
@@ -66,14 +67,10 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
-        [HarmonyPatch(typeof(Player), nameof(Player.Save))]
-        public static class SaveSync {
-            [HarmonyPrefix]
-            [HarmonyPriority(Priority.Last)]
-            private static void PlayerSave(Player __instance) {
-                CharacterManager.SavePlayerCharacter(__instance);
-            }
-        }
+        // NOTE: full character saves are no longer triggered by the vanilla Player.Save (world/profile
+        // autosave). The server now pulls full saves on its own schedule — see FullSyncScheduler — while
+        // routine changes stream up incrementally through CharacterDeltaTracker. Join (LoadAndValidatePlayer)
+        // and logout (SaveSyncForLogout) still push a full save directly.
 
         //[HarmonyPatch(typeof(ZNet), nameof(ZNet.ShutdownWithoutSave))]
         //public static class SaveSyncForShutdown {
@@ -84,17 +81,33 @@ namespace ValheimEnforcer.modules.character {
         //    }
         //}
 
+        // Drain the async character persistence store before the server stops so no queued save is lost.
+        // No-op on clients (the store is only used server-side, in disk storage mode).
+        [HarmonyPatch(typeof(ZNet), nameof(ZNet.Shutdown))]
+        public static class FlushCharacterStoreOnShutdown {
+            [HarmonyPrefix]
+            [HarmonyPriority(Priority.First)]
+            private static void Prefix(ZNet __instance) {
+                if (__instance != null && __instance.IsServer()) {
+                    CharacterStore.Shutdown();
+                }
+            }
+        }
+
         [HarmonyPatch(typeof(Game), nameof(Game.Logout))]
         public static class SaveSyncForLogout {
             [HarmonyPrefix]
             [HarmonyPriority(Priority.First)]
             private static void PlayerSave() {
+                // Mark the logout so this save — and any Player.Save the vanilla Logout body triggers afterwards —
+                // records the character as cleanly disconnected. Reset by ClearPlayerCharacterOnLogout.
+                CharacterManager.LogoutInProgress = true;
                 if (Player.m_localPlayer != null) {
                     CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
                 } else {
                     Logger.LogWarning("Player.m_localPlayer was null during logout. Skipping character sync.");
                 }
-                
+
             }
         }
 
