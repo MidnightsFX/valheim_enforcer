@@ -68,18 +68,15 @@ namespace ValheimEnforcer.modules.character {
         }
 
         // NOTE: full character saves are no longer triggered by the vanilla Player.Save (world/profile
-        // autosave). The server now pulls full saves on its own schedule — see FullSyncScheduler — while
-        // routine changes stream up incrementally through CharacterDeltaTracker. Join (LoadAndValidatePlayer)
-        // and logout (SaveSyncForLogout) still push a full save directly.
-
-        //[HarmonyPatch(typeof(ZNet), nameof(ZNet.ShutdownWithoutSave))]
-        //public static class SaveSyncForShutdown {
-        //    [HarmonyPrefix]
-        //    [HarmonyPriority(Priority.Last)]
-        //    private static void PlayerSave() {
-        //        CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
-        //    }
-        //}
+        // autosave). Persistence map:
+        //  - End-of-session: SaveSyncForShutdown (Game.Shutdown prefix) writes a full save recorded Clean.
+        //    Game.Shutdown is the choke point both exit paths funnel through — menu logout
+        //    (Game.Logout -> ContinueLogout -> Shutdown) AND quit-to-desktop / Alt+F4
+        //    (Game.OnApplicationQuit -> Shutdown, which never calls Game.Logout).
+        //  - Mid-session (networked clients only): routine changes stream up incrementally through
+        //    CharacterDeltaTracker and the server pulls periodic full saves on its own schedule
+        //    (FullSyncScheduler); both are recorded DirtyDisconnect.
+        //  - Join: LoadAndValidatePlayer still pushes a full save directly.
 
         // Drain the async character persistence store before the server stops so no queued save is lost.
         // No-op on clients (the store is only used server-side, in disk storage mode).
@@ -94,20 +91,24 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
-        [HarmonyPatch(typeof(Game), nameof(Game.Logout))]
-        public static class SaveSyncForLogout {
+        [HarmonyPatch(typeof(Game), nameof(Game.Shutdown))]
+        public static class SaveSyncForShutdown {
             [HarmonyPrefix]
             [HarmonyPriority(Priority.First)]
-            private static void PlayerSave() {
-                // Mark the logout so this save — and any Player.Save the vanilla Logout body triggers afterwards —
-                // records the character as cleanly disconnected. Reset by ClearPlayerCharacterOnLogout.
+            private static void PlayerSave(Game __instance, bool saveWorld) {
+                // Shutdown can run twice (e.g. Logout then OnApplicationQuit); vanilla ignores the second
+                // call via m_shuttingDown and so do we.
+                if (__instance.m_shuttingDown) { return; }
+                // Stay in lockstep with vanilla: when it skips SavePlayerProfile (disk-space decline) the
+                // enforcer save must stay equally stale, or the two stores diverge and cause false
+                // confiscation/restoration on the next join.
+                if (!saveWorld) { return; }
+                if (Player.m_localPlayer == null) { return; } // dedicated server
+                // Mark the shutdown so this save — and any save the vanilla Shutdown body triggers afterwards —
+                // records the character as cleanly disconnected. Reset by ClearPlayerCharacterOnLogout on a
+                // return-to-menu, and by LoadAndValidatePlayer on the next spawn.
                 CharacterManager.LogoutInProgress = true;
-                if (Player.m_localPlayer != null) {
-                    CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
-                } else {
-                    Logger.LogWarning("Player.m_localPlayer was null during logout. Skipping character sync.");
-                }
-
+                CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
             }
         }
 

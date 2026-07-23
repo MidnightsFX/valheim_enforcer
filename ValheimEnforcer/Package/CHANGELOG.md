@@ -1,3 +1,9 @@
+**0.11.1**
+ ---
+ ```
+ - Improves accuracy of saves in singleplayer games
+ ```
+
 **0.11.0**
  ---
  ```

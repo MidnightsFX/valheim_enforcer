@@ -17,9 +17,10 @@ using static Version;
 namespace ValheimEnforcer.modules.character {
     internal static class CharacterManager {
         internal static DataObjects.Character PlayerCharacter = null;
-        // Set while a clean Game.Logout is in progress so any save triggered during logout records the character
-        // as cleanly disconnected. Every other save (routine Player.Save, the periodic full-save timer, a full-sync
-        // response) happens during an active session and must record DirtyDisconnect. See SavePlayerCharacter.
+        // Set while a saving Game.Shutdown is in progress (menu logout and quit-to-desktop both funnel through
+        // it — see SaveSyncForShutdown) so the end-of-session save records the character as cleanly
+        // disconnected. Every other save (delta stream, the periodic full-save pull, a full-sync response)
+        // happens during an active session and must record DirtyDisconnect. See SavePlayerCharacter.
         internal static bool LogoutInProgress = false;
         internal static List<string> staringAllowedPrefabs = new List<string>() {
             "ArmorRagsChest",
@@ -155,6 +156,10 @@ namespace ValheimEnforcer.modules.character {
             if (ZNet.instance != null && ZNet.instance.GetServerPeer() != null) {
                 Logger.LogDebug("Sending updated character data to server.");
                 ValConfig.CharacterSaveRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
+            } else if (ZNet.instance != null && ZNet.instance.IsServer()) {
+                // Singleplayer / listen host: there is no server peer because we ARE the server; the local
+                // write above is the authoritative save, so there is nothing to sync and no desync risk.
+                Logger.LogDebug("No server peer; local write is authoritative.");
             } else {
                 Logger.LogWarning("Server Disconnected, can't sync player data. This may result in desync issues.");
             }
