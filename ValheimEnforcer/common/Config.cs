@@ -14,7 +14,6 @@ using ValheimEnforcer.modules.character;
 using ValheimEnforcer.modules.cheatmonitor;
 using ValheimEnforcer.modules.commands;
 using ValheimEnforcer.modules.notifications;
-using static Mono.Security.X509.X520;
 using static ValheimEnforcer.common.DataObjects;
 
 namespace ValheimEnforcer {
@@ -292,28 +291,40 @@ namespace ValheimEnforcer {
 
             // Disk mode. Prefer the in-memory store (kept current by the async writer, so it can be newer
             // than disk while a write is pending) and fall back to disk, warming the store so the player's
-            // first deltas can be applied without re-reading the file.
-            string cached = modules.character.CharacterStore.GetYaml(id, peer.m_playerName);
+            // first deltas can be applied without re-reading the file. If the on-disk file has been edited
+            // out-of-band (e.g. an admin edited the save while the player was offline) since we cached it, the
+            // store reports a miss so the edited file is re-read and re-seeded below.
+            var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, $"{id}");
+            string fullpath = Path.Combine(charFile, $"{peer.m_playerName}.yaml");
+            bool exists = File.Exists(fullpath);
+            DateTime diskMtime = exists ? File.GetLastWriteTimeUtc(fullpath) : DateTime.MinValue;
+
+            string cached = modules.character.CharacterStore.GetYamlIfCurrent(id, peer.m_playerName, diskMtime);
             if (cached != null) {
                 package.Write(cached);
                 return package;
             }
 
-            var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, $"{id}");
-            string fullpath = Path.Combine(charFile, $"{peer.m_playerName}.yaml");
-            if (!File.Exists(fullpath)) {
+            if (!exists) {
                 Logger.LogInfo($"path: {fullpath} does not exist, no character data will be sent.");
                 return new ZPackage();
             }
             string filecontents = File.ReadAllText(fullpath);
-            modules.character.CharacterStore.Seed(id, peer.m_playerName, filecontents);
+            modules.character.CharacterStore.Seed(id, peer.m_playerName, filecontents, diskMtime);
             package.Write(filecontents);
             return package;
         }
 
         public static IEnumerator OnServerRecieveCharacter(long sender, ZPackage package) {
             string yaml = package.ReadString(); // must run on the main thread (consumes the ZPackage); cheap
+            PersistReceivedCharacterYaml(sender, yaml);
+            yield break;
+        }
 
+        // Shared server-side persistence for a full character save received from a client. Used by the
+        // Jotunn CharacterSaveRPC handler (OnServerRecieveCharacter) and the synchronous end-of-session
+        // FinalSaveRpc. The ZPackage must already be consumed on the main thread before calling this.
+        internal static void PersistReceivedCharacterYaml(long sender, string yaml) {
             if (ValConfig.InternalStorageMode.Value) {
                 // Internal storage writes touch a registry ZDO and must stay on the main thread.
                 try {
@@ -323,14 +334,13 @@ namespace ValheimEnforcer {
                 } catch (Exception e) {
                     Logger.LogWarning($"Failed to deserialize character data from {sender}: {e.Message}");
                 }
-                yield break;
+                return;
             }
 
             // Disk mode: hand the raw YAML to the background store. All parsing, serialization and disk I/O
             // happen off the main thread, so a burst of saves (e.g. every client saving at once on a
             // "save player profiles" broadcast) cannot stall the server and time peers out.
             modules.character.CharacterStore.SubmitFullSave(yaml);
-            yield break;
         }
 
         public static IEnumerator OnServerRecieveClearConfiscated(long sender, ZPackage package) {

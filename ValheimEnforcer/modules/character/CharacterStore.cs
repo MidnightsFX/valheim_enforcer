@@ -32,6 +32,10 @@ namespace ValheimEnforcer.modules.character {
         private sealed class Entry {
             public DataObjects.Character Character; // may be null when seeded from YAML only; parsed lazily by the worker
             public string Yaml;
+            // UTC last-write time of the on-disk file this cached YAML corresponds to. MinValue = unknown
+            // (never written/seeded from disk), which always compares as older than a real file mtime so an
+            // external edit is detected. Used by GetYamlIfCurrent to spot out-of-band edits at login.
+            public DateTime SourceMtime;
         }
 
         private abstract class Message { }
@@ -98,12 +102,28 @@ namespace ValheimEnforcer.modules.character {
             return cache.TryGetValue(KeyFor(id, name), out Entry e) ? e.Yaml : null;
         }
 
+        /// <summary>Latest serialized YAML for a character, but only when the on-disk save has NOT been
+        /// modified out-of-band since we cached it. Returns null when there is no cached entry, or when
+        /// <paramref name="diskMtime"/> is strictly newer than the cached copy's source mtime (an external
+        /// edit) — the caller should then reload from disk and re-seed. A pending async write leaves the disk
+        /// mtime unchanged/older than what we recorded, so the (newer) cache still wins via the equality case.
+        /// Safe on any thread.</summary>
+        internal static string GetYamlIfCurrent(string id, string name, DateTime diskMtime) {
+            string key = KeyFor(id, name);
+            if (!cache.TryGetValue(key, out Entry e)) { return null; }
+            if (diskMtime > e.SourceMtime) {
+                Logger.LogInfo($"On-disk save for {key} is newer than cache; reloading from disk.");
+                return null;
+            }
+            return e.Yaml;
+        }
+
         /// <summary>Warm the cache from an already-loaded save (e.g. the connect-time disk read) without
         /// enqueuing a write. Stores the YAML only; the worker parses the <see cref="Character"/> lazily
         /// on the first delta, keeping this call cheap on the connection path.</summary>
-        internal static void Seed(string id, string name, string yaml) {
+        internal static void Seed(string id, string name, string yaml, DateTime sourceMtime) {
             if (string.IsNullOrEmpty(yaml)) { return; }
-            cache[KeyFor(id, name)] = new Entry { Character = null, Yaml = yaml };
+            cache[KeyFor(id, name)] = new Entry { Character = null, Yaml = yaml, SourceMtime = sourceMtime };
         }
 
         /// <summary>Block until currently-queued work has been drained to disk. Intended for shutdown /
@@ -158,7 +178,9 @@ namespace ValheimEnforcer.modules.character {
                 foreach (string key in dirty) {
                     if (cache.TryGetValue(key, out Entry entry) && entry.Character != null && entry.Yaml != null) {
                         try {
-                            WriteToDisk(entry.Character, entry.Yaml);
+                            // Record the mtime the OS reports for our own write so a later login can tell an
+                            // out-of-band edit apart from a file we wrote ourselves.
+                            entry.SourceMtime = WriteToDisk(entry.Character, entry.Yaml);
                         } catch (Exception e) {
                             Logger.LogWarning($"CharacterStore failed to write {key} to disk: {e.Message}");
                         }
@@ -224,7 +246,7 @@ namespace ValheimEnforcer.modules.character {
             try {
                 string text = File.ReadAllText(path);
                 DataObjects.Character c = yamldeserializer.Deserialize<DataObjects.Character>(text);
-                cache[key] = new Entry { Character = c, Yaml = text };
+                cache[key] = new Entry { Character = c, Yaml = text, SourceMtime = File.GetLastWriteTimeUtc(path) };
                 return c;
             } catch (Exception ex) {
                 // Leave a present-but-corrupt save alone; dropping the update avoids overwriting it.
@@ -233,13 +255,16 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
-        private static void WriteToDisk(DataObjects.Character c, string yaml) {
+        // Returns the UTC last-write time the OS records for the file we just wrote, so the caller can store
+        // it as the entry's SourceMtime and later distinguish our own write from an out-of-band edit.
+        private static DateTime WriteToDisk(DataObjects.Character c, string yaml) {
             Directory.CreateDirectory(ValConfig.CharacterFilePath);
             string dir = Path.Combine(ValConfig.CharacterFilePath, c.HostID);
             Directory.CreateDirectory(dir);
             string path = Path.Combine(dir, $"{c.Name}.yaml");
             File.WriteAllText(path, yaml);
             Logger.LogInfo($"Writing to {path}");
+            return File.GetLastWriteTimeUtc(path);
         }
     }
 }

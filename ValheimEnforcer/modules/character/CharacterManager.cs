@@ -153,9 +153,18 @@ namespace ValheimEnforcer.modules.character {
 
             ValConfig.WritePlayerCharacterToSave(playerID, savableChar);
 
-            if (ZNet.instance != null && ZNet.instance.GetServerPeer() != null) {
-                Logger.LogDebug("Sending updated character data to server.");
-                ValConfig.CharacterSaveRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
+            ZNetPeer serverPeer = ZNet.instance?.GetServerPeer();
+            if (serverPeer != null) {
+                if (LogoutInProgress) {
+                    // End-of-session save: send synchronously and flush the socket so it lands before the
+                    // vanilla Game.Shutdown tears the connection down. Jotunn's paced coroutine send would be
+                    // lost in the teardown here (see FinalSaveRpc).
+                    Logger.LogDebug("Sending final character data to server (synchronous, logout).");
+                    FinalSaveRpc.SendFinalSaveSync(serverPeer, savableChar);
+                } else {
+                    Logger.LogDebug("Sending updated character data to server.");
+                    ValConfig.CharacterSaveRPC.SendPackage(serverPeer.m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
+                }
             } else if (ZNet.instance != null && ZNet.instance.IsServer()) {
                 // Singleplayer / listen host: there is no server peer because we ARE the server; the local
                 // write above is the authoritative save, so there is nothing to sync and no desync risk.

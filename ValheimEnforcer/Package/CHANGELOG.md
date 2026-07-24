@@ -1,3 +1,10 @@
+**0.12.0**
+ ---
+ ```
+ - Improves multiplayer disconnect saving for extremely large character saves
+ - Allows server admin editing of save files to be hot-reloaded (please ensure the player you are editing is logged off first)
+ ```
+
 **0.11.1**
  ---
  ```
