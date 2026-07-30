@@ -127,7 +127,7 @@ namespace ValheimEnforcer {
             // portable mode
             InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
             ConfigPollIntervalSeconds = BindServerConfig("Advanced", "ConfigPollIntervalSeconds", 30, "How frequently (in seconds) the mod polls config files on disk for changes.", advanced: true, valmin: 1, valmax: 300);
-            DeltaSynchronizationFrequencyInSeconds = BindServerConfig("Advanced", "CharacterDeltaTracker", 60, "How frequently (in seconds) the client sends incremental inventory/skill/custom-data updates to the server.", advanced: true, valmin: 30, valmax: 300);
+            DeltaSynchronizationFrequencyInSeconds = BindServerConfig("Advanced", "CharacterDeltaTracker", 15, "Minimum time (in seconds) between incremental inventory/skill/custom-data updates. Updates are only produced when the player's inventory actually changes, so an idle player sends nothing; this is a rate limit rather than a polling interval.", advanced: true, valmin: 5, valmax: 300);
             FullSyncPullIntervalMinutes = BindServerConfig("Advanced", "FullSyncPullIntervalMinutes", 25, "How often (in minutes) the server asks connected players to upload a full character save. Full saves are a periodic reconciliation layered on top of the incremental delta updates (CharacterDeltaTracker); they are no longer tied to the world/profile autosave.", advanced: true, valmin: 1, valmax: 1440);
             FullSyncMaxConcurrentPlayers = BindServerConfig("Advanced", "FullSyncMaxConcurrentPlayers", 5, "Maximum number of players the server asks to upload a full character save at the same time. Larger player counts are staggered into successive waves of this size to avoid a bandwidth spike. 10 is safe on a healthy server; lower it on constrained upload/VPS hosts.", advanced: true, valmin: 1, valmax: 50);
 
@@ -148,16 +148,19 @@ namespace ValheimEnforcer {
             DiscordNotifyCheaterBanned = BindLocalConfig("Discord", "NotifyCheaterBanned", true, "Post a message when a player is banned for cheat usage, including the detected cheat(s).");
         }
 
-        internal static void WritePlayerCharacterToSave(string id, DataObjects.Character character) {
+        // routine: set for the recurring background baseline write driven by CharacterDeltaTracker, which happens
+        // often enough that logging every one at info level would drown the log. Notable saves (join, logout,
+        // death, an incoming character from a client) leave it false and stay visible without debug logging.
+        internal static void WritePlayerCharacterToSave(string id, DataObjects.Character character, bool routine = false) {
             if (ValConfig.InternalStorageMode.Value) {
-                Logger.LogInfo("Saving character with internal storage mode.");
+                if (routine) { Logger.LogDebug("Saving character with internal storage mode."); } else { Logger.LogInfo("Saving character with internal storage mode."); }
                 InternalDataStore.SaveAccountCharacter(character);
             }
             // Double write the data so that if the storage mode is switched the data will still be present.
             Directory.CreateDirectory(Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder));
             var saveDir = Directory.CreateDirectory(Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, id));
             string path = Path.Combine(saveDir.FullName, $"{character.Name}.yaml");
-            Logger.LogInfo($"Writing to {path}");
+            if (routine) { Logger.LogDebug($"Writing to {path}"); } else { Logger.LogInfo($"Writing to {path}"); }
             try {
                 File.WriteAllText(path, DataObjects.yamlserializer.Serialize(character));
             } catch (Exception e) {

@@ -13,7 +13,15 @@ namespace ValheimEnforcer.common {
     internal static class DataObjects {
 
         public static IDeserializer yamldeserializer = new DeserializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).Build();
-        public static ISerializer yamlserializer = new SerializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitDefaults).Build();
+        // DisableAliases is required, not cosmetic. YamlDotNet's anchor assigner keys objects by Equals/GetHashCode
+        // rather than by reference, so once PackedItem gained value equality two *distinct* items that compare
+        // equal would be emitted as one anchor plus an alias - and because durability, grid position, equipped
+        // state and the confiscation fields sit outside that equality, the aliased entry would silently inherit
+        // the other's values for all of them (two identical stacks collapsing onto one grid slot, a confiscated
+        // item losing its reason and timestamp). Writing every item out in full costs a little disk and wire size
+        // and keeps each entry independent. The deserializer still understands aliases, so saves written by
+        // earlier versions load unchanged.
+        public static ISerializer yamlserializer = new SerializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).ConfigureDefaultValuesHandling(DefaultValuesHandling.OmitDefaults).DisableAliases().Build();
 
         public static readonly string CustomDataKey = "VE_CUSTOM_DATA";
 
@@ -202,8 +210,23 @@ namespace ValheimEnforcer.common {
             }
         }
 
+        // Equality is value based and deliberately partial - it answers "is this the same item?", not "is every
+        // field identical?". Excluded from Equals/GetHashCode:
+        //   m_durability  - drains continuously (Attack, Humanoid.DrainEquipedItemDurability) without ever firing
+        //                   Inventory.Changed, so including it would make every delta a full inventory replace the
+        //                   moment any unrelated change happened to flush. Durability is reconciled by the full
+        //                   save pushes instead, and enforced separately by CharacterManager.ValidateItems.
+        //   m_gridpos,
+        //   m_equipped    - identity is what the player possesses, not where it sits or whether it is worn.
+        //   confiscated*  - confiscation bookkeeping, not part of the item.
+        // The excluded fields all still reach the server: SavePlayerCharacter rebuilds PlayerItems from the live
+        // inventory on join, respawn, clean logout and every FullSyncScheduler pull.
+        //
+        // NOTE for ConfiscatedItems: two confiscated entries that differ only in reason/timestamp compare equal.
+        // Nothing calls Remove/Contains on that list today (CommandHelpers filters by prefab), but a future caller
+        // needs to know.
         [Serializable]
-        public class PackedItem {
+        public class PackedItem : IEquatable<PackedItem> {
             public string prefabName { get; set; }
             public int m_stack { get; set; }
             public float m_durability { get; set; }
@@ -222,6 +245,78 @@ namespace ValheimEnforcer.common {
             public Vector2i m_gridpos { get; set; }
             public string confiscatedReason { get; set; }
             public DateTime confiscatedTime { get; set; }
+
+            // The live ItemDrop.ItemData dictionary keeps being mutated by the game, so a PackedItem that merely
+            // referenced it would compare equal to every later snapshot of the same item no matter what changed.
+            // Every capture site copies instead. Null is preserved rather than normalised to empty so the
+            // OmitDefaults serialization shape does not change.
+            internal static Dictionary<string, string> CopyCustomData(Dictionary<string, string> source) {
+                return source == null ? null : new Dictionary<string, string>(source);
+            }
+
+            // Quality 0 means "unset" in older saves and is treated as 1 everywhere else (see AddToInventory and
+            // CharacterManager.ValidateItems), so normalise here too - otherwise a legacy save would churn one
+            // spurious remove/add pair for every item on the first flush after a join.
+            private static int NormalizedQuality(int quality) {
+                return quality == 0 ? 1 : quality;
+            }
+
+            private static bool CustomDataEquals(Dictionary<string, string> a, Dictionary<string, string> b) {
+                int acount = a == null ? 0 : a.Count;
+                int bcount = b == null ? 0 : b.Count;
+                if (acount != bcount) { return false; }
+                if (acount == 0) { return true; } // null and empty are the same thing here
+                foreach (KeyValuePair<string, string> kvp in a) {
+                    if (!b.TryGetValue(kvp.Key, out string other)) { return false; }
+                    if (kvp.Value != other) { return false; }
+                }
+                return true;
+            }
+
+            private static int CustomDataHash(Dictionary<string, string> data) {
+                if (data == null || data.Count == 0) { return 0; } // must agree with CustomDataEquals
+                int acc = 0;
+                foreach (KeyValuePair<string, string> kvp in data) {
+                    // XOR the per-pair hashes so the result does not depend on enumeration order - a yaml round
+                    // trip is free to reorder the map.
+                    unchecked {
+                        acc ^= ((kvp.Key?.GetHashCode() ?? 0) * 31) ^ (kvp.Value?.GetHashCode() ?? 0);
+                    }
+                }
+                return acc;
+            }
+
+            public bool Equals(PackedItem other) {
+                if (ReferenceEquals(this, other)) { return true; }
+                if (other is null) { return false; }
+                return prefabName == other.prefabName
+                    && m_stack == other.m_stack
+                    && NormalizedQuality(m_quality) == NormalizedQuality(other.m_quality)
+                    && m_variant == other.m_variant
+                    && m_worldlevel == other.m_worldlevel
+                    && m_crafterID == other.m_crafterID
+                    && m_crafterName == other.m_crafterName
+                    && CustomDataEquals(m_customdata, other.m_customdata);
+            }
+
+            public override bool Equals(object obj) {
+                return Equals(obj as PackedItem);
+            }
+
+            public override int GetHashCode() {
+                unchecked {
+                    int hash = 17;
+                    hash = (hash * 31) + (prefabName?.GetHashCode() ?? 0);
+                    hash = (hash * 31) + m_stack;
+                    hash = (hash * 31) + NormalizedQuality(m_quality);
+                    hash = (hash * 31) + m_variant;
+                    hash = (hash * 31) + m_worldlevel;
+                    hash = (hash * 31) + m_crafterID.GetHashCode();
+                    hash = (hash * 31) + (m_crafterName?.GetHashCode() ?? 0);
+                    hash = (hash * 31) + CustomDataHash(m_customdata);
+                    return hash;
+                }
+            }
 
             public void AddToInventory(Player player, bool use_position) {
                 Inventory inv = player.GetInventory();
@@ -250,28 +345,40 @@ namespace ValheimEnforcer.common {
                 } else {
                     itemdrop.m_itemData.m_crafterName = m_crafterName;
                 }
-                itemdrop.m_itemData.m_customData = m_customdata;
+                // Copy rather than hand over the dictionary: the join-time restore feeds items straight from the
+                // tracked baseline (CharacterManager.LoadAndValidatePlayer), so sharing it would let the live item
+                // mutate the baseline it was restored from. The empty fallback keeps a legacy save that carries no
+                // custom data from handing vanilla a null dictionary.
+                itemdrop.m_itemData.m_customData = CopyCustomData(m_customdata) ?? new Dictionary<string, string>();
                 itemdrop.m_itemData.m_pickedUp = true; // Its not the real object, but it gets picked up like a real object.
 
-                if (inv.CanAddItem(itemdrop.m_itemData) == false) {
-                    if (use_position) {
-                        itemdrop.m_itemData.m_gridPos = m_gridpos;
-                        inv.AddItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, m_gridpos.x, m_gridpos.y);
-                    } else if (ModCompatability.IsExtraSlotsEnabled && modules.compat.ExtraSlots.API.IsGridPositionASlot(m_gridpos)) {
-                        Logger.LogDebug($"Item {prefabName} saved grid position {m_gridpos} maps to an ExtraSlots slot. Placing into that slot.");
-                        itemdrop.m_itemData.m_gridPos = m_gridpos;
-                        inv.AddItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, m_gridpos.x, m_gridpos.y);
-                    } else {
-                        inv.AddItem(itemdrop.m_itemData);
+                bool placed = false;
+
+                // Restore into the exact saved slot when we have one. ExtraSlots equipment slots sit outside the
+                // normal grid flow, so they have to be tried before the generic add - AddItem(item) would reflow
+                // the item into an ordinary bag slot instead. The positional overload returns false without adding
+                // anything when the target slot is occupied or out of grid range, so the result must be checked.
+                bool wantSavedSlot = use_position
+                    || (ModCompatability.IsExtraSlotsEnabled && modules.compat.ExtraSlots.API.IsGridPositionASlot(m_gridpos));
+                if (wantSavedSlot) {
+                    itemdrop.m_itemData.m_gridPos = m_gridpos;
+                    placed = inv.AddItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, m_gridpos.x, m_gridpos.y);
+                    if (!placed) {
+                        Logger.LogDebug($"Saved grid position {m_gridpos} for {prefabName} is occupied or out of range, falling back to the first free slot.");
                     }
-                } else {
-                    Logger.LogDebug($"Dropping item {prefabName} at player position because it cannot be added to the inventory.");
-                    ItemDrop.DropItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, player.gameObject.transform.position, player.gameObject.transform.rotation);
                 }
 
+                // Inventory.CanAddItem returns true when there IS room for the item.
+                if (!placed && inv.CanAddItem(itemdrop.m_itemData)) {
+                    placed = inv.AddItem(itemdrop.m_itemData);
+                }
 
-                // Restore the equipped status of the item if it was equipped
-                if (m_equipped) {
+                if (!placed) {
+                    Logger.LogDebug($"Dropping item {prefabName} at player position because it cannot be added to the inventory.");
+                    ItemDrop.DropItem(itemdrop.m_itemData, itemdrop.m_itemData.m_stack, player.gameObject.transform.position, player.gameObject.transform.rotation);
+                } else if (m_equipped) {
+                    // Restore the equipped status, but only for an item that actually made it into the inventory -
+                    // equipping a dropped item leaves the player in a desynced "equipped but not carried" state.
                     player.EquipItem(itemdrop.m_itemData);
                 }
                 UnityEngine.Object.Destroy(instancedGo);
@@ -315,15 +422,20 @@ namespace ValheimEnforcer.common {
 
             public bool RemoveFromPlayerItems(PackedItem packedItem) {
                 bool removed = false;
+                if (packedItem == null) { return false; }
 
-                // exact match
+                // Primary path: PackedItem.Equals is value based, so this matches the client's delta against our
+                // copy on everything that identifies an item (including custom data), while tolerating the
+                // durability/slot/equip drift that deltas deliberately do not report.
                 if (PlayerItems != null && PlayerItems.Contains(packedItem)) {
                     removed = PlayerItems.Remove(packedItem);
                 }
                 if (removed == true ) { return true; }
 
-                // Fuzzy match, ignore durability and quality as those can be changed by the player and still be the same item for the most part.
-                // TODO: Add custom data as a comparison factor for the future
+                // Drift recovery only. Strictly weaker than Equals - it additionally ignores quality and custom
+                // data - so it fires when our copy has diverged in a way the delta stream cannot express (a save
+                // that predates a change, or a dropped delta). Keeping it means the server still converges rather
+                // than accumulating phantom items.
                 if (PlayerItems != null) {
                     foreach (var item in PlayerItems) {
                         if (packedItem.prefabName == item.prefabName &&
@@ -358,7 +470,7 @@ namespace ValheimEnforcer.common {
                     m_worldlevel = item.m_worldLevel,
                     m_crafterID = item.m_crafterID,
                     m_crafterName = item.m_crafterName,
-                    m_customdata = item.m_customData,
+                    m_customdata = PackedItem.CopyCustomData(item.m_customData),
                     m_equipped = item.m_equipped,
                     m_gridpos = item.m_gridPos
                 });
@@ -376,7 +488,7 @@ namespace ValheimEnforcer.common {
                     m_worldlevel = item.m_worldLevel,
                     m_crafterID = item.m_crafterID,
                     m_crafterName = item.m_crafterName,
-                    m_customdata = item.m_customData,
+                    m_customdata = PackedItem.CopyCustomData(item.m_customData),
                     m_equipped = item.m_equipped,
                     m_gridpos = item.m_gridPos
                 };

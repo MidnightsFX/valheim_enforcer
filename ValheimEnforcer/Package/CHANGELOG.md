@@ -1,3 +1,16 @@
+**0.13.0**
+ ---
+ ```
+ - Fixes item duplication on death edgecases
+ - Adds compatibility with death mods that change what happens to items on death
+ - Inventory changes are now tracked as they happen instead of being polled on a timer
+    - An idle player sends nothing at all; CharacterDeltaTracker is now a rate limit (default 15s, was a 60s poll)
+    - Singleplayer and listen-host sessions now keep their character save current mid-session
+ - Fixes restored items being dropped on the ground when the player had room for them
+ - Fixes skill progress earned during a session being rolled back on every death in singleplayer
+ - Status effects can no longer carry across a death
+ ```
+
 **0.12.0**
  ---
  ```

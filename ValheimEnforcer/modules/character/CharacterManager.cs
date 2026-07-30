@@ -22,6 +22,11 @@ namespace ValheimEnforcer.modules.character {
         // disconnected. Every other save (delta stream, the periodic full-save pull, a full-sync response)
         // happens during an active session and must record DirtyDisconnect. See SavePlayerCharacter.
         internal static bool LogoutInProgress = false;
+        // Join validation (confiscation + item restore) is a once-per-session event. Vanilla re-instantiates the
+        // Player prefab on every respawn, so Game.SpawnPlayer fires again after every death and after SkipIntro -
+        // none of which are joins. Reset only when the session ends (ClearPlayerCharacterOnLogout), so the player
+        // has to actually log out and back in before their inventory is validated against the save again.
+        internal static bool JoinValidationComplete = false;
         internal static List<string> staringAllowedPrefabs = new List<string>() {
             "ArmorRagsChest",
             "ArmorRagsLegs",
@@ -251,17 +256,7 @@ namespace ValheimEnforcer.modules.character {
             bool skipRemovalForDirty = savableChar.LastDisconnect == DisconnectionState.DirtyDisconnect
                                        && ValConfig.ItemRemovalForDirtyReconnection.Value;
             if (ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value && !skipRemovalForDirty) {
-                List<ItemDrop.ItemData> removeItems = new List<ItemDrop.ItemData>();
-                Dictionary<ItemDrop.ItemData, ItemValidatorResult> ValidatorResults = ValidateItems(player.m_inventory.GetAllItems(), savableChar);
-
-                foreach (KeyValuePair<ItemDrop.ItemData, ItemValidatorResult> eval in ValidatorResults) {
-                    if (eval.Value.Validated == false) {
-                        Logger.LogInfo($"Removing item {eval.Key.m_dropPrefab.name}x{eval.Key.m_stack} from player {savableChar.Name}. Validation message: {eval.Value.ValidationMessage}");
-                        savableChar.AddConfiscatedItem(eval.Key, eval.Value.ValidationMessage);
-                        player.UnequipItem(eval.Key);
-                        player.GetInventory().RemoveItem(eval.Key);
-                    }
-                }
+                ConfiscateUntrackedItems(player, savableChar);
             }
 
             // Base restoration runs on every join. On a *dirty* reconnect the save can be stale, so restoring
@@ -310,12 +305,96 @@ namespace ValheimEnforcer.modules.character {
             }
 
             PlayerCharacter = savableChar;
-            ValConfig.WritePlayerCharacterToSave(playerID, savableChar);
+            PersistAndPushCharacter(playerID, savableChar);
+            // Everything above is join-only enforcement. Later spawns in this session (deaths, SkipIntro) take
+            // RebaselineFromLiveInventory instead - see CharacterPatches.LoadAndValidatePlayerPatch.
+            JoinValidationComplete = true;
+        }
 
-            if (ZNet.instance.GetServerPeer() != null) {
-                ValConfig.CharacterSaveRPC.SendPackage(ZNet.instance.GetServerPeer().m_uid, ValConfig.SendCharacterAsZpackage(savableChar));
+        // Validate the player's live inventory against their tracked save and confiscate anything that does not
+        // match. Shared by the join path; deliberately NOT run on a respawn, where a death mod may legitimately
+        // have handed items back that the save cannot know about yet.
+        private static void ConfiscateUntrackedItems(Player player, DataObjects.Character savableChar) {
+            Dictionary<ItemDrop.ItemData, ItemValidatorResult> ValidatorResults = ValidateItems(player.m_inventory.GetAllItems(), savableChar);
+
+            foreach (KeyValuePair<ItemDrop.ItemData, ItemValidatorResult> eval in ValidatorResults) {
+                if (eval.Value.Validated == false) {
+                    Logger.LogInfo($"Removing item {eval.Key.m_dropPrefab.name}x{eval.Key.m_stack} from player {savableChar.Name}. Validation message: {eval.Value.ValidationMessage}");
+                    savableChar.AddConfiscatedItem(eval.Key, eval.Value.ValidationMessage);
+                    player.UnequipItem(eval.Key);
+                    player.GetInventory().RemoveItem(eval.Key);
+                }
+            }
+        }
+
+        // Write the character to the local save and, when connected to a dedicated server, push it as a full save.
+        // The full push matters: BuildCharacterItemDeltas only describes the transition from the client's own
+        // baseline, so a delta stream can never reconcile a server copy that has drifted away from it. The full
+        // push is also the only thing that carries the fields PackedItem equality deliberately ignores -
+        // durability, grid position and equipped state.
+        internal static void PersistAndPushCharacter(string playerID, DataObjects.Character character) {
+            if (character == null) { return; }
+            ValConfig.WritePlayerCharacterToSave(playerID, character);
+
+            ZNetPeer serverPeer = ZNet.instance?.GetServerPeer();
+            if (serverPeer != null) {
+                ValConfig.CharacterSaveRPC.SendPackage(serverPeer.m_uid, ValConfig.SendCharacterAsZpackage(character));
+            }
+        }
+
+        // Every spawn after the session's first one is a respawn, not a join. Vanilla and any death mod have
+        // already decided what the player keeps, so the live inventory is the truth - adopt it wholesale. No
+        // confiscation (it would delete items a death mod legitimately returned) and no restore (the difference
+        // is sitting in the tombstone, or was deliberately destroyed).
+        internal static void RebaselineFromLiveInventory(Player player) {
+            if (player == null) { return; }
+            // A fresh spawn is an active session; clear any stale logout flag so saves record DirtyDisconnect.
+            LogoutInProgress = false;
+
+            DataObjects.Character savableChar = PlayerCharacter;
+            if (savableChar == null) {
+                // No tracked character (state was reset mid-session). The join pipeline bootstraps from the live
+                // inventory, which is the same truth we would establish here.
+                Logger.LogWarning("Respawn with no tracked character, falling back to full join validation.");
+                LoadAndValidatePlayer(player);
+                return;
             }
 
+            Logger.LogInfo($"Player {savableChar.Name} respawned, re-baselining tracked state from their live inventory.");
+            // Mid-session save, so it records the session as still active and potentially soon-to-be-stale.
+            savableChar.LastDisconnect = DisconnectionState.DirtyDisconnect;
+            savableChar.PlayerItems.Clear();
+            foreach (ItemDrop.ItemData item in player.GetInventory().GetAllItems().ToList()) {
+                savableChar.AddItemToPlayerItems(item);
+            }
+            // Vanilla has already applied the death skill penalty and removed every status effect by this point.
+            savableChar.SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
+            savableChar.ActiveCharacterEffects.Clear();
+            if (ValConfig.PreventExternalCustomDataChanges.Value) {
+                savableChar.PlayerCustomData = player.m_customData;
+            }
+
+            PlayerCharacter = savableChar;
+            PersistAndPushCharacter(savableChar.HostID, savableChar);
+        }
+
+        // Drop the tracked item list the moment the player dies. This is deliberately a clear rather than a
+        // snapshot: snapshotting would race other mods' Player.OnDeath patches and bake in whatever they happened
+        // to have done by that instant. Clearing is order independent - it destroys the pre-death list, which is
+        // the thing that was being duplicated back into the inventory on respawn, and leaves re-population to
+        // CharacterDeltaTracker, which observes the inventory instead of guessing when a death mod is finished.
+        // Pushing immediately means an alt-F4 during the 10s respawn wait cannot leave the pre-death list
+        // authoritative and dupe the grave on rejoin.
+        internal static void ClearTrackedItemsForDeath(Player player) {
+            if (player == null || PlayerCharacter == null) { return; }
+            Logger.LogInfo($"Player {PlayerCharacter.Name} died, clearing tracked items pending re-enumeration.");
+            // Mid-session save. Recording it dirty also means that if the player crashes out before looting their
+            // grave, the next join skips the item restore by default rather than restoring against this save.
+            PlayerCharacter.LastDisconnect = DisconnectionState.DirtyDisconnect;
+            PlayerCharacter.PlayerItems.Clear();
+            PlayerCharacter.ActiveCharacterEffects.Clear();
+            PlayerCharacter.SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
+            PersistAndPushCharacter(PlayerCharacter.HostID, PlayerCharacter);
         }
 
         // Validate Item, stacksize, custom data, and quality
