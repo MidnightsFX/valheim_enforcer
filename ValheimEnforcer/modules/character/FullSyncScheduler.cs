@@ -40,6 +40,8 @@ namespace ValheimEnforcer.modules.character {
             if (host == null) { return; }
             UnityEngine.Object.Destroy(host); // also stops the running pull coroutine
             host = null;
+            // Nothing is left to drain the queue, and every peer it referenced is going away with the server.
+            CharacterStore.ClearDriftResyncs();
         }
 
         // Spawn the scheduler only on the server, once ZNet is up.
@@ -73,10 +75,25 @@ namespace ValheimEnforcer.modules.character {
         }
 
         private void Update() {
-            if (cycleRunning) { return; }
             if (ZNet.instance == null || !ZNet.instance.IsServer()) { return; }
+
+            // Drain any recovery requests the CharacterStore worker queued after a delta merge found the server
+            // copy had drifted. They are issued here because the worker thread must not touch ZNet, and this
+            // behaviour is already a server-only main-thread tick. Independent of the pull cycle below, so a
+            // repair is not delayed by a wave that happens to be in flight.
+            DrainDriftResyncs();
+
+            if (cycleRunning) { return; }
             if (Time.unscaledTime < nextCycle) { return; }
             StartCoroutine(RunPullCycle());
+        }
+
+        private static void DrainDriftResyncs() {
+            CharacterStore.DriftResync request;
+            while ((request = CharacterStore.TryDequeueDriftResync()) != null) {
+                // Rate limiting and the "peer already left" check both live in RequestFullSyncForDrift.
+                ValConfig.RequestFullSyncForDrift(request.Sender, request.HostID, request.Name);
+            }
         }
 
         private static float IntervalSeconds() {

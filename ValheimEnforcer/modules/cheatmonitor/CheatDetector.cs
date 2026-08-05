@@ -20,10 +20,9 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         private const string ToolerNamespace = "ValheimTooler";
         private const string ToolerNamespacePrefix = "ValheimTooler.";
 
-        private static readonly string[] CheatEngineProcessNames = {
-            "cheatengine-x86_64", "cheatengine-i386",
-            "cheatengine-x86_64-sse4-avx2", "cheatengine"
-        };
+        // Upper bound on window matches collected in a single EnumWindows pass, so a pathological
+        // desktop cannot turn one scan into an unbounded report.
+        private const int MaxWindowMatches = 8;
 
         internal static void Initialize() {
             if (ZNet.instance != null && ZNet.instance.IsDedicated()) {
@@ -71,71 +70,123 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             return false;
         }
 
-        internal static bool CheatEngineProcessRunning() {
+        /// <summary>
+        /// Walks the running processes once and tests every signature against each name. A single
+        /// enumeration is used regardless of catalog size; the cost here is the syscall, not the
+        /// string matching.
+        /// </summary>
+        internal static List<CheatToolDetection> ScanProcesses(List<CheatToolSignature> signatures) {
+            List<CheatToolDetection> found = new List<CheatToolDetection>();
             Process[] procs = null;
             try {
                 procs = Process.GetProcesses();
-                foreach (var p in procs) {
-                    string pn = p.ProcessName ?? "";
-                    if (CheatEngineProcessNames.Any(n => pn.IndexOf(n, StringComparison.OrdinalIgnoreCase) >= 0)) {
-                        return true;
+                bool genericTrainers = ValConfig.DetectGenericTrainers.Value;
+                foreach (Process p in procs) {
+                    string name;
+                    // ProcessName throws for processes that exit between enumeration and access.
+                    try { name = p.ProcessName ?? ""; } catch { continue; }
+                    if (name.Length == 0 || CheatToolCatalog.IsIgnored(name)) { continue; }
+
+                    foreach (CheatToolSignature sig in signatures) {
+                        if (CheatToolCatalog.Matches(name, sig.ProcessNames, sig.ProcessMatch)) {
+                            Add(found, sig.Tool, "process", name);
+                        }
+                    }
+
+                    if (genericTrainers && CheatToolCatalog.IsGenericTrainerName(name)) {
+                        Add(found, CheatToolCatalog.GenericTrainerLabel, "process", name);
                     }
                 }
             } catch (Exception e) {
-                Logger.LogDebug($"CheatDetector.CheatEngineProcessRunning failed: {e.Message}");
+                Logger.LogDebug($"CheatDetector.ScanProcesses failed: {e.Message}");
             } finally {
                 // Process objects hold OS handles; dispose them so the periodic scan does not leak.
                 if (procs != null) {
-                    foreach (var p in procs) {
+                    foreach (Process p in procs) {
                         try { p.Dispose(); } catch { }
                     }
                 }
             }
-            return false;
+            return found;
         }
 
-        //internal static bool SuspiciousNativeModuleLoaded(CheatSummaryReport cheatSummary) {
-        //    try {
-        //        foreach (ProcessModule m in Process.GetCurrentProcess().Modules) {
-        //            string n = (m.ModuleName ?? "").ToLowerInvariant();
-        //            if (n.StartsWith("speedhack-") || n.StartsWith("dbk32") || n.StartsWith("dbk64") || n.Contains("vehdebug")) {
-        //                return true;
-        //            }
-        //        }
-        //    } catch (Exception e) {
-        //        Logger.LogDebug($"CheatDetector.SuspiciousNativeModuleLoaded failed: {e.Message}");
-        //    }
-        //    return false;
-        //}
+        /// <summary>
+        /// Inspects the native modules loaded into our own process. This is the only vector that sees
+        /// a cheat which has already injected and then closed its launcher, and it is unaffected by
+        /// renaming the tool's executable.
+        /// </summary>
+        internal static List<CheatToolDetection> ScanLoadedModules(List<CheatToolSignature> signatures) {
+            List<CheatToolDetection> found = new List<CheatToolDetection>();
+            try {
+                using (Process self = Process.GetCurrentProcess()) {
+                    foreach (ProcessModule m in self.Modules) {
+                        string name;
+                        try { name = m.ModuleName ?? ""; } catch { continue; }
+                        if (name.Length == 0 || CheatToolCatalog.IsIgnored(name)) { continue; }
 
-        //internal static bool CheatEngineWindowPresent(out string detail) {
-        //    detail = null;
-        //    if (Application.platform != RuntimePlatform.WindowsPlayer && Application.platform != RuntimePlatform.WindowsEditor) {
-        //        return false;
-        //    }
-        //    string found = null;
-        //    try {
-        //        NativeWin32.EnumWindows((hWnd, _) => {
-        //            var cls = new StringBuilder(256);
-        //            NativeWin32.GetClassName(hWnd, cls, cls.Capacity);
-        //            var txt = new StringBuilder(256);
-        //            NativeWin32.GetWindowTextW(hWnd, txt, txt.Capacity);
-        //            string c = cls.ToString();
-        //            string t = txt.ToString();
-        //            if (c.StartsWith("TfrmMain") || c.StartsWith("TfrmMemView") ||
-        //                t.IndexOf("Cheat Engine", StringComparison.OrdinalIgnoreCase) >= 0) {
-        //                found = $"window:class={c}|title={t}";
-        //                return false;
-        //            }
-        //            return true;
-        //        }, IntPtr.Zero);
-        //    } catch (Exception e) {
-        //        Logger.LogDebug($"CheatDetector.CheatEngineWindowPresent failed: {e.Message}");
-        //        return false;
-        //    }
-        //    detail = found;
-        //    return found != null;
-        //}
+                        foreach (CheatToolSignature sig in signatures) {
+                            if (CheatToolCatalog.Matches(name, sig.ModuleNames, MatchMode.Prefix)) {
+                                Add(found, sig.Tool, "module", name);
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Logger.LogDebug($"CheatDetector.ScanLoadedModules failed: {e.Message}");
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// Enumerates top-level windows and matches their class and title. Catches tools renamed to
+        /// evade the process check - Cheat Engine's TfrmMain window class in particular survives an
+        /// executable rename. MainWindowTitle is deliberately not used: it is slow and comes back
+        /// empty for windowless and elevated processes.
+        /// </summary>
+        internal static List<CheatToolDetection> ScanWindows(List<CheatToolSignature> signatures) {
+            List<CheatToolDetection> found = new List<CheatToolDetection>();
+            if (Application.platform != RuntimePlatform.WindowsPlayer && Application.platform != RuntimePlatform.WindowsEditor) {
+                return found;
+            }
+            List<CheatToolSignature> windowed = signatures
+                .Where(s => s.WindowClasses.Length > 0 || s.WindowTitles.Length > 0).ToList();
+            if (windowed.Count == 0) { return found; }
+
+            try {
+                // Held in a local so the delegate cannot be collected while EnumWindows is running.
+                NativeWin32.EnumWindowsProc callback = (hWnd, _) => {
+                    StringBuilder cls = new StringBuilder(256);
+                    NativeWin32.GetClassName(hWnd, cls, cls.Capacity);
+                    StringBuilder txt = new StringBuilder(256);
+                    NativeWin32.GetWindowTextW(hWnd, txt, txt.Capacity);
+                    string c = cls.ToString();
+                    string t = txt.ToString();
+
+                    if (CheatToolCatalog.IsIgnored(c) || CheatToolCatalog.IsIgnored(t)) { return true; }
+
+                    foreach (CheatToolSignature sig in windowed) {
+                        if (CheatToolCatalog.Matches(c, sig.WindowClasses, MatchMode.Prefix) ||
+                            CheatToolCatalog.Matches(t, sig.WindowTitles, sig.WindowTitleMatch)) {
+                            Add(found, sig.Tool, "window", $"class={c}|title={t}");
+                        }
+                    }
+                    // Keep enumerating so every distinct tool on screen is reported, not just the first.
+                    return found.Count < MaxWindowMatches;
+                };
+                NativeWin32.EnumWindows(callback, IntPtr.Zero);
+            } catch (Exception e) {
+                Logger.LogDebug($"CheatDetector.ScanWindows failed: {e.Message}");
+            }
+            return found;
+        }
+
+        // One entry per tool per scan; the first sighting carries the detail.
+        private static void Add(List<CheatToolDetection> found, string tool, string vector, string detail) {
+            foreach (CheatToolDetection existing in found) {
+                if (existing.Tool == tool) { return; }
+            }
+            found.Add(new CheatToolDetection { Tool = tool, Vector = vector, Detail = detail });
+        }
 
         //internal static bool DebuggerAttached(out string detail) {
         //    detail = null;
@@ -210,6 +261,15 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             private bool toolerDetected;
             private string toolerDetail;
             private bool reported;
+
+            // Tools already reported this session. Without this latch a tool left running would be
+            // re-reported every scan interval, flooding the server log under the Log action and
+            // re-triggering the kick under Kick.
+            private readonly HashSet<string> reportedTools = new HashSet<string>();
+
+            // Rotates the three scan vectors across successive ticks so their cost never lands on
+            // the same frame. Process enumeration in particular is a blocking syscall.
+            private int scanPhase;
 
             private void OnEnable() {
                 AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoaded;
@@ -302,16 +362,48 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                     }
                 }
 
-                // Cheat Engine process check (throttled to the scan interval, handles disposed).
-                if (ValConfig.DetectCheatEngine.Value && CharacterManager.PlayerCharacter != null) {
-                    if (CheatEngineProcessRunning()) {
-                        ReportCheatScanSummary(new CheatSummaryReport {
-                            PlayerName = CharacterManager.PlayerCharacter.Name,
-                            PlatformID = CharacterManager.PlayerCharacter.HostID,
-                            CheatEngineStatus = new CheatEngineDetector { CheatEngineProcessDetected = true }
-                        });
-                    }
+                // Identity comes from the character save, and the report is useless without it.
+                if (CharacterManager.PlayerCharacter == null) { return; }
+
+                List<CheatToolSignature> signatures = CheatToolCatalog.Enabled();
+                if (signatures.Count == 0 && !ValConfig.DetectGenericTrainers.Value) { return; }
+
+                List<CheatToolDetection> detections;
+                switch (scanPhase++ % 3) {
+                    case 0:
+                        detections = ScanProcesses(signatures);
+                        break;
+                    case 1:
+                        detections = ValConfig.ScanLoadedModules.Value
+                            ? ScanLoadedModules(signatures)
+                            : new List<CheatToolDetection>();
+                        break;
+                    default:
+                        detections = ValConfig.ScanWindowTitles.Value
+                            ? ScanWindows(signatures)
+                            : new List<CheatToolDetection>();
+                        break;
                 }
+
+                ReportNewDetections(detections);
+            }
+
+            // Sends only tools not already reported this session, in a single report.
+            private void ReportNewDetections(List<CheatToolDetection> detections) {
+                List<CheatToolDetection> fresh = null;
+                foreach (CheatToolDetection d in detections) {
+                    if (!reportedTools.Add(d.Tool)) { continue; }
+                    if (fresh == null) { fresh = new List<CheatToolDetection>(); }
+                    fresh.Add(d);
+                    Logger.LogWarning($"Cheat tool detected: {d.Tool} ({d.Vector}: {d.Detail}).");
+                }
+                if (fresh == null) { return; }
+
+                ReportCheatScanSummary(new CheatSummaryReport {
+                    PlayerName = CharacterManager.PlayerCharacter.Name,
+                    PlatformID = CharacterManager.PlayerCharacter.HostID,
+                    DetectedTools = fresh
+                });
             }
 
             //private IEnumerator SpeedhackDriftLoop() {

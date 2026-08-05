@@ -34,7 +34,23 @@ Cheat detection (enabled by default, configurable).
 - ValheimTooler is detected even when injected mid-session (after mod validation) and is always auto-banned
 - Optional Discord notification whenever a player is banned for cheating
 
-*Disclaimer: Valheim is client authoratative and without extremely invasive measures, cheating cannot be fully prevented.*
+Clients are checked against a catalog of known cheat tools across three vectors:
+
+| Vector | What it looks at | Why it exists |
+| --- | --- | --- |
+| Process | Names of running programs | Catches the tool while it is open |
+| Module | DLLs loaded into Valheim itself | Sees a cheat that already injected and then closed its launcher, and survives renaming the tool |
+| Window | Window classes and titles | Catches tools renamed to dodge the process check (Cheat Engine's `TfrmMain` window class does not change when you rename the exe) |
+
+Detected by default: **WeMod / Wand / Infinity**, **Cheat Engine** (including the `magic-engine` fork and injected speedhack/DBK modules), **ArtMoney** (SE and Pro), **PLITCH**, **Speed Gear**, **Squalr**, **WPE Pro**, generic trainers such as FLiNG and Cheat Happens, and the loaders used to deliver Valheim cheats — **ValheimTooler**, **ValHack**, **Valheim Mod Menu**, **SharpMonoInjector**, **Xenos** and **Extreme Injector**.
+
+Tools with no purpose other than cheating (the loaders and injectors above) are banned on sight. Everything else follows `ActionOnDetection`, which defaults to `Kick`. The auto-ban decision is made by the *server* from its own catalog — a client only ever reports what it saw, so a tampered client cannot get another player banned.
+
+**Privacy:** only matched entries are sent to the server. A player's full process list never leaves their machine.
+
+**False positives:** developer tools that also read game memory — x64dbg, Process Hacker / System Informer, HxD, ReClass.NET, Frida, Fiddler — are deliberately **not** detected by default, because modders and streamers use them routinely. Add them to `AdditionalCheatProcesses` if your server wants them treated as cheats. `Aurora`, `Process Lasso`, `AutoHotkey`, and overlay tools like MSI Afterburner and OBS are excluded on purpose and are not recommended additions; see the config file comments for the reasoning. If something legitimate trips a detection, add it to `IgnoredCheatProcesses`, which overrides everything else.
+
+*Disclaimer: Valheim is client authoratative and without extremely invasive measures, cheating cannot be fully prevented. Process-name detection in particular is a speed bump rather than a wall — renaming Cheat Engine is a documented feature of the tool, and trainer executables are renameable by design. The module and window checks exist because they survive a rename, but a client that can cheat can also lie about what it is running.*
 
 ### Server Management
 

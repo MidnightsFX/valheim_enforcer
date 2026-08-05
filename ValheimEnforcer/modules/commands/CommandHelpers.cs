@@ -18,6 +18,10 @@ namespace ValheimEnforcer.modules.commands {
             if (string.Compare(prefab, "all", true) == 0) {
                 character.ConfiscatedItems.Clear();
                 ValConfig.WritePlayerCharacterToSave(account, character);
+                // This write bypasses the async store, so drop any cached copy it holds - otherwise the next
+                // delta rewrites the file from the pre-clear cache and the entries come straight back. Mirrors
+                // the same guard on the confiscated-item return path. No-op client side (the store is server only).
+                modules.character.CharacterStore.Invalidate(account, username);
                 Logger.LogInfo($"Cleared all confiscated items.");
                 return;
             }

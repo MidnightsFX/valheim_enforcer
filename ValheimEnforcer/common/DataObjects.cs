@@ -91,22 +91,28 @@ namespace ValheimEnforcer.common {
             public string Reason { get; set; }
         }
 
-        public class CheatEngineDetector {
-            public bool CheatEngineModuleLoaded { get; set; }
-            public bool CheatEngineProcessDetected { get; set; }
-            public bool IsCheatEngineDetected() {
-                return CheatEngineModuleLoaded || CheatEngineProcessDetected;
-            }
+        /// <summary>
+        /// A single cheat tool sighting on a client. The client reports what it saw and nothing more;
+        /// the server decides what that means by resolving the label against its own CheatToolCatalog.
+        /// </summary>
+        public class CheatToolDetection {
+            /// <summary>Canonical tool label from CheatToolCatalog.</summary>
+            public string Tool { get; set; }
+            /// <summary>Which scan found it: "process", "module" or "window".</summary>
+            public string Vector { get; set; }
+            /// <summary>The matched process name, module name, or window class/title.</summary>
+            public string Detail { get; set; }
         }
 
         public class CheatSummaryReport {
             public string PlayerName { get; set; }
             public string PlatformID { get; set; }
-            public CheatEngineDetector CheatEngineStatus { get; set; }
+            // Only matched entries are ever sent - never the player's full process list.
+            public List<CheatToolDetection> DetectedTools { get; set; }
             public bool ValheimToolerStatus { get; set; }
 
             public bool cheatsDetected() {
-                return (CheatEngineStatus != null && CheatEngineStatus.IsCheatEngineDetected()) || ValheimToolerStatus;
+                return ValheimToolerStatus || (DetectedTools != null && DetectedTools.Count > 0);
             }
         }
 
@@ -218,13 +224,14 @@ namespace ValheimEnforcer.common {
         //                   save pushes instead, and enforced separately by CharacterManager.ValidateItems.
         //   m_gridpos,
         //   m_equipped    - identity is what the player possesses, not where it sits or whether it is worn.
-        //   confiscated*  - confiscation bookkeeping, not part of the item.
+        //   confiscated*,
+        //   confiscationId - confiscation bookkeeping, not part of the item.
         // The excluded fields all still reach the server: SavePlayerCharacter rebuilds PlayerItems from the live
         // inventory on join, respawn, clean logout and every FullSyncScheduler pull.
         //
-        // NOTE for ConfiscatedItems: two confiscated entries that differ only in reason/timestamp compare equal.
-        // Nothing calls Remove/Contains on that list today (CommandHelpers filters by prefab), but a future caller
-        // needs to know.
+        // NOTE for ConfiscatedItems: two confiscated entries that differ only in reason/timestamp/id compare equal.
+        // Nothing calls Remove/Contains on that list today (CommandHelpers filters by prefab), and the server-side
+        // append merge keys on confiscationId rather than Equals precisely because of this.
         [Serializable]
         public class PackedItem : IEquatable<PackedItem> {
             public string prefabName { get; set; }
@@ -245,6 +252,14 @@ namespace ValheimEnforcer.common {
             public Vector2i m_gridpos { get; set; }
             public string confiscatedReason { get; set; }
             public DateTime confiscatedTime { get; set; }
+            // Stable per-confiscation identity, assigned once in Character.AddConfiscatedItem. The server uses it to
+            // append a client's newly confiscated items idempotently (MergeConfiscatedItems) - re-sending the same
+            // entry on a later full push must not duplicate it. confiscatedTime cannot serve this purpose:
+            // ConfiscateUntrackedItems confiscates in a tight loop and DateTime.UtcNow has ~15ms resolution on
+            // Windows, so a batch routinely shares one timestamp. Null on every non-confiscated item, and on
+            // confiscated entries written before this field existed.
+            [DefaultValue(null)]
+            public string confiscationId { get; set; }
 
             // The live ItemDrop.ItemData dictionary keeps being mutated by the game, so a PackedItem that merely
             // referenced it would compare equal to every later snapshot of the same item no matter what changed.
@@ -497,7 +512,43 @@ namespace ValheimEnforcer.common {
                     packedItem.confiscatedReason = reason;
                 }
                 packedItem.confiscatedTime = DateTime.UtcNow;
+                packedItem.confiscationId = Guid.NewGuid().ToString("N");
                 ConfiscatedItems.Add(packedItem);
+            }
+
+            /// <summary>
+            /// Server side: fold a client's reported confiscations into this (authoritative) character's list.
+            ///
+            /// Append only - the client's copy is never allowed to replace ours. Confiscation happens client side
+            /// (CharacterManager.ConfiscateUntrackedItems at join) but the list is owned by the server, because
+            /// admin commands (/clear, /return) mutate it while the player is connected. A wholesale overwrite
+            /// from a client's later full push would resurrect entries an admin had just cleared or handed back.
+            ///
+            /// Incoming entries with no confiscationId are ignored: the field is assigned at the moment of
+            /// confiscation, so a missing one means the entry is legacy data mirrored back from a save we already
+            /// hold. Matching on the id also makes a repeated push idempotent, so a full save that gets sent twice
+            /// (or one that gets dropped and re-sent) neither duplicates nor loses a confiscation.
+            /// </summary>
+            /// <returns>How many new entries were appended.</returns>
+            public int MergeConfiscatedItems(List<PackedItem> incoming) {
+                if (incoming == null || incoming.Count == 0) { return 0; }
+                if (ConfiscatedItems == null) { ConfiscatedItems = new List<PackedItem>(); }
+
+                HashSet<string> known = new HashSet<string>();
+                foreach (PackedItem existing in ConfiscatedItems) {
+                    if (existing != null && !string.IsNullOrEmpty(existing.confiscationId)) {
+                        known.Add(existing.confiscationId);
+                    }
+                }
+
+                int added = 0;
+                foreach (PackedItem candidate in incoming) {
+                    if (candidate == null || string.IsNullOrEmpty(candidate.confiscationId)) { continue; }
+                    if (!known.Add(candidate.confiscationId)) { continue; } // already recorded
+                    ConfiscatedItems.Add(candidate);
+                    added++;
+                }
+                return added;
             }
         }
 

@@ -4,6 +4,7 @@ using Jotunn.Entities;
 using Jotunn.Managers;
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -45,6 +46,14 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> EnableCheatDetection;
         public static ConfigEntry<bool> DetectCheatEngine;
         public static ConfigEntry<bool> DetectValheimTooler;
+        public static ConfigEntry<bool> DetectCheatTools;
+        public static ConfigEntry<bool> DetectGenericTrainers;
+        public static ConfigEntry<bool> ScanLoadedModules;
+        public static ConfigEntry<bool> ScanWindowTitles;
+        // Comma-separated rather than List<string>: BepInEx's config system only supports primitives,
+        // string and enums, so binding a List<string> throws at startup.
+        public static ConfigEntry<string> AdditionalCheatProcesses;
+        public static ConfigEntry<string> IgnoredCheatProcesses;
         //public static ConfigEntry<bool> DetectSpeedhack;
         public static ConfigEntry<string> CheatDetectionAction;
         public static ConfigEntry<int> CheatScanIntervalSeconds;
@@ -131,12 +140,18 @@ namespace ValheimEnforcer {
             FullSyncPullIntervalMinutes = BindServerConfig("Advanced", "FullSyncPullIntervalMinutes", 25, "How often (in minutes) the server asks connected players to upload a full character save. Full saves are a periodic reconciliation layered on top of the incremental delta updates (CharacterDeltaTracker); they are no longer tied to the world/profile autosave.", advanced: true, valmin: 1, valmax: 1440);
             FullSyncMaxConcurrentPlayers = BindServerConfig("Advanced", "FullSyncMaxConcurrentPlayers", 5, "Maximum number of players the server asks to upload a full character save at the same time. Larger player counts are staggered into successive waves of this size to avoid a bandwidth spike. 10 is safe on a healthy server; lower it on constrained upload/VPS hosts.", advanced: true, valmin: 1, valmax: 50);
 
-            EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Enable client-side scanning for known cheat tools (Cheat Engine, ValheimTooler). Detections are reported to the server.");
+            EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Master switch for client-side cheat scanning. When enabled the client checks running processes, the DLLs loaded into the game, and open window titles against a catalog of known cheat tools. Only matched entries are reported to the server - the player's full process list is never transmitted.");
             DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Detect ValheimTooler by the namespace of the types it loads (rename-proof), including assemblies injected mid-session. A confirmed detection is always auto-banned regardless of ActionOnDetection. High confidence, very low cost.");
-            DetectCheatEngine = BindServerConfig("Anti-Cheat", "DetectCheatEngine", true, "Scan for Cheat Engine (processes, windows, injected speedhack/DBK modules, debugger). Note: Cheat Engine has legitimate uses — prefer Log action over Kick/Ban.");
+            DetectCheatTools = BindServerConfig("Anti-Cheat", "DetectCheatTools", true, "Scan for the built-in catalog of known cheat tools: WeMod/Wand, ArtMoney, PLITCH, Speed Gear, Squalr, WPE Pro, and the injectors/loaders used to deliver Valheim cheats (SharpMonoInjector, Xenos, Extreme Injector, ValheimTooler launcher, ValHack, Valheim Mod Menu). Tools with no legitimate purpose are auto-banned; the rest follow ActionOnDetection.");
+            DetectCheatEngine = BindServerConfig("Anti-Cheat", "DetectCheatEngine", true, "Include Cheat Engine in the catalog scan (process names, TfrmMain/TfrmMemView windows, and injected speedhack/DBK modules). Note: Cheat Engine has legitimate uses — prefer Log action over Kick/Ban. Requires DetectCheatTools.");
+            DetectGenericTrainers = BindServerConfig("Anti-Cheat", "DetectGenericTrainers", true, "Flag any running process whose executable name contains the word 'trainer' (e.g. 'Valheim Trainer.exe', 'Hitman 3 Trainer - FLiNG.exe'). Catches FLiNG, MrAntiFun and Cheat Happens trainers without listing each one. Follows ActionOnDetection.");
+            ScanLoadedModules = BindServerConfig("Anti-Cheat", "ScanLoadedModules", true, "Scan the native DLLs loaded into the game process itself. This is the only way to see a cheat that has already injected and then closed its launcher, and it survives renaming the tool's executable. Cheap - the module list is local to our own process.");
+            ScanWindowTitles = BindServerConfig("Anti-Cheat", "ScanWindowTitles", true, "Scan open window classes and titles. Catches tools that have been renamed to evade the process-name check, most notably Cheat Engine (window class TfrmMain is not affected by renaming the exe).");
+            AdditionalCheatProcesses = BindServerConfig("Anti-Cheat", "AdditionalCheatProcesses", "", "Comma-separated list of extra process names to treat as cheat tools, without the '.exe' suffix, matched exactly and case-insensitively. Empty by default. Suggested opt-in values for strict servers: x64dbg, x32dbg, x96dbg, ProcessHacker, SystemInformer, HxD, ReClass.NET, ollydbg, Scylla_x64, frida, Fiddler, Charles. WARNING: every one of those is a standard developer tool with heavy legitimate use by modders and streamers, which is why none of them ship enabled. Deliberately excluded from the built-in catalog and NOT recommended here: Aurora (collides with Aurora RGB lighting software), Process Lasso (a CPU priority optimiser, not a speedhack), AutoHotkey (compiled scripts take arbitrary names, so the check is worthless, and it is widely used for accessibility and key remapping), and MSI Afterburner/RivaTuner/OBS (their overlay DLLs look injector-shaped).");
+            IgnoredCheatProcesses = BindServerConfig("Anti-Cheat", "IgnoredCheatProcesses", "", "Comma-separated allowlist of process, module or window names to never flag, matched as a case-insensitive substring. Applied last, so it overrides the built-in catalog and AdditionalCheatProcesses. Use this to keep playing when a legitimate program trips a signature.");
             //DetectSpeedhack = BindServerConfig("Anti-Cheat", "DetectSpeedhack", true, "Detect speedhack via Unity time vs. wall-clock drift.");
-            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a Cheat Engine detection is reported (ValheimTooler is always auto-banned).", new AcceptableValueList<string>("Log", "Kick", "Ban"));
-            CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 30, "Seconds between the periodic Cheat Engine process check on the client. ValheimTooler assembly detection is event-driven and not affected by this interval.", false, 5, 300);
+            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a cheat tool is reported. Note that dedicated game-cheating tools (injectors, ValheimTooler, ValHack, Valheim Mod Menu) are always auto-banned regardless of this setting.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
+            CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 30, "Seconds between periodic client scan ticks. The process, module and window scans are staggered across successive ticks so their cost never lands on the same frame, so each individual scan runs every three intervals. ValheimTooler assembly detection is event-driven and not affected by this interval.", false, 5, 300);
 
             // Discord notifications. These are intentionally LOCAL (non-synced) configs: the webhook URL is a secret and must not be synced to clients
             DiscordWebhookUrl = BindLocalConfig("Discord", "WebhookUrl", "", "Discord webhook URL the server posts notifications to. This is a server-only secret and is never synced to clients. Leave empty to disable. Note: player names are sent to Discord when enabled.");
@@ -287,9 +302,7 @@ namespace ValheimEnforcer {
                     Logger.LogInfo($"No character data found for player {peer.m_playerName} with ID: {id}, no character data will be sent.");
                     return new ZPackage();
                 }
-                string serialChara = DataObjects.yamlserializer.Serialize(chara);
-                package.Write(serialChara);
-                return package;
+                return SendCharacterToClientAsZpackage(chara);
             }
 
             // Disk mode. Prefer the in-memory store (kept current by the async writer, so it can be newer
@@ -302,9 +315,15 @@ namespace ValheimEnforcer {
             bool exists = File.Exists(fullpath);
             DateTime diskMtime = exists ? File.GetLastWriteTimeUtc(fullpath) : DateTime.MinValue;
 
+            // Both branches below strip ConfiscatedItems before the payload goes out (see
+            // SendCharacterToClientAsZpackage). That costs a parse + re-serialize on a path that otherwise just
+            // forwards a cached string, which is accepted deliberately: this runs once per player connect, not on
+            // the save-burst path the async store exists to protect, and the disk branch already does file I/O.
+            // If connect latency ever becomes a concern, cache the stripped form on CharacterStore.Entry and have
+            // the worker thread produce it.
             string cached = modules.character.CharacterStore.GetYamlIfCurrent(id, peer.m_playerName, diskMtime);
             if (cached != null) {
-                package.Write(cached);
+                package.Write(StripConfiscatedItemsFromYaml(cached));
                 return package;
             }
 
@@ -313,8 +332,10 @@ namespace ValheimEnforcer {
                 return new ZPackage();
             }
             string filecontents = File.ReadAllText(fullpath);
+            // Seed the store with the FULL save - it is the server's authoritative copy. Only the outbound
+            // payload is stripped.
             modules.character.CharacterStore.Seed(id, peer.m_playerName, filecontents, diskMtime);
-            package.Write(filecontents);
+            package.Write(StripConfiscatedItemsFromYaml(filecontents));
             return package;
         }
 
@@ -333,6 +354,15 @@ namespace ValheimEnforcer {
                 try {
                     DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(yaml);
                     Logger.LogInfo($"Recieved Player data update for {sender} - {chara.Name}|{chara.HostID}");
+                    // The client's confiscated list is a report of what it confiscated this session, never a
+                    // replacement for ours - see Character.MergeConfiscatedItems.
+                    DataObjects.Character existing = InternalDataStore.GetAccountCharacter(chara.HostID, chara.Name);
+                    List<PackedItem> reported = chara.ConfiscatedItems;
+                    chara.ConfiscatedItems = existing?.ConfiscatedItems ?? new List<PackedItem>();
+                    int appended = chara.MergeConfiscatedItems(reported);
+                    if (appended > 0) {
+                        Logger.LogInfo($"Recorded {appended} newly confiscated item(s) for {chara.Name}.");
+                    }
                     WritePlayerCharacterToSave(chara.HostID, chara);
                 } catch (Exception e) {
                     Logger.LogWarning($"Failed to deserialize character data from {sender}: {e.Message}");
@@ -364,7 +394,27 @@ namespace ValheimEnforcer {
             RPCServerUpdateData data = DataObjects.yamldeserializer.Deserialize<DataObjects.RPCServerUpdateData>(package.ReadString());
 
             CommandHelpers.ClearSpecifiedPlayerConfiscatedItems(data.PlatformID, data.PlayerName, data.ItemPrefabFilter);
+            // The call above only touches a copy loaded from disk. The in-memory character is what gets pushed
+            // back to the server, so it has to be cleared too - otherwise the entries the admin just removed are
+            // still held here and would be re-appended by confiscationId on this session's next full push.
+            ClearInMemoryConfiscatedItems(data.ItemPrefabFilter);
             yield break;
+        }
+
+        // Client side: drop confiscated entries matching an admin's /clear filter from the tracked character.
+        // Mirrors the filter handling in CommandHelpers.ClearSpecifiedPlayerConfiscatedItems.
+        private static void ClearInMemoryConfiscatedItems(string prefabFilter) {
+            DataObjects.Character tracked = CharacterManager.PlayerCharacter;
+            if (tracked?.ConfiscatedItems == null || tracked.ConfiscatedItems.Count == 0) { return; }
+
+            int before = tracked.ConfiscatedItems.Count;
+            if (string.Compare(prefabFilter, "all", true) == 0) {
+                tracked.ConfiscatedItems.Clear();
+            } else {
+                List<string> targets = prefabFilter.Split(',').Select(s => s.Trim()).ToList();
+                tracked.ConfiscatedItems.RemoveAll(i => i != null && targets.Contains(i.prefabName));
+            }
+            Logger.LogDebug($"Cleared {before - tracked.ConfiscatedItems.Count} tracked confiscated item(s) locally.");
         }
 
         public static IEnumerator OnClientReceiveCharacter(long sender, ZPackage package) {
@@ -409,8 +459,10 @@ namespace ValheimEnforcer {
             ZPackage returnableItems = new ZPackage();
             returnableItems.Write(DataObjects.yamlserializer.Serialize(itemsToReturn));
             ValConfig.ReturnConfiscatedItemsRPC.SendPackage(targetPeer.m_uid, returnableItems);
-            // Send the updated player character to the client so that their client-side data is also updated with the returned items
-            ValConfig.CharacterSaveRPC.SendPackage(targetPeer.m_uid, ValConfig.SendCharacterAsZpackage(character));
+            // Send the updated player character to the client so that their client-side data is also updated with
+            // the returned items. Stripped of the confiscated list like every other client-bound character send -
+            // which also resets the client's in-memory copy, so it cannot re-report the entries we just returned.
+            ValConfig.CharacterSaveRPC.SendPackage(targetPeer.m_uid, ValConfig.SendCharacterToClientAsZpackage(character));
             yield break;
         }
 
@@ -432,8 +484,7 @@ namespace ValheimEnforcer {
             }
 
             string endpoint = peer.m_socket.GetEndPointString();
-            bool cheatEngineDetected = summary.CheatEngineStatus?.IsCheatEngineDetected() ?? false;
-            Logger.LogWarning($"Cheat detection from {playerName} ({endpoint}): valheim-tooler: {summary.ValheimToolerStatus} cheatengine: {cheatEngineDetected}");
+            Logger.LogWarning($"Cheat detection from {playerName} ({endpoint}): valheim-tooler: {summary.ValheimToolerStatus} tools: {DescribeDetectedTools(summary)}");
 
             // ValheimTooler is unambiguous cheat software; always ban regardless of ActionOnDetection.
             if (summary.ValheimToolerStatus) {
@@ -442,7 +493,20 @@ namespace ValheimEnforcer {
                 yield break;
             }
 
-            // Cheat Engine (and any future non-ValheimTooler detection) honors the configured action.
+            // Tools with no purpose other than cheating also ban on sight. AutoBan is resolved from
+            // the server's own catalog by label, never taken from the payload, so a tampered client
+            // cannot escalate a report into a ban.
+            if (summary.DetectedTools != null) {
+                foreach (DataObjects.CheatToolDetection detection in summary.DetectedTools) {
+                    if (CheatToolCatalog.IsAutoBan(detection.Tool)) {
+                        Logger.LogWarning($"Banning {playerName} for {detection.Tool} usage.");
+                        BanCheater(peer, playerName, summary);
+                        yield break;
+                    }
+                }
+            }
+
+            // Everything else honors the configured action.
             string action = CheatDetectionAction.Value ?? "Log";
             switch (action) {
                 case "Kick":
@@ -480,9 +544,19 @@ namespace ValheimEnforcer {
         private static string BuildCheatReason(DataObjects.CheatSummaryReport summary) {
             List<string> detections = new List<string>();
             if (summary.ValheimToolerStatus) { detections.Add("ValheimTooler"); }
-            if (summary.CheatEngineStatus != null && summary.CheatEngineStatus.IsCheatEngineDetected()) { detections.Add("CheatEngine"); }
+            if (summary.DetectedTools != null) {
+                foreach (CheatToolDetection detection in summary.DetectedTools) {
+                    detections.Add($"{detection.Tool} ({detection.Vector}: {detection.Detail})");
+                }
+            }
             string detail = detections.Count > 0 ? string.Join(", ", detections) : "cheat detected";
             return $"Cheat detection: {detail}";
+        }
+
+        // Compact one-line rendering of the reported tools for the server log.
+        private static string DescribeDetectedTools(DataObjects.CheatSummaryReport summary) {
+            if (summary.DetectedTools == null || summary.DetectedTools.Count == 0) { return "none"; }
+            return string.Join(", ", summary.DetectedTools.Select(d => $"{d.Tool} [{d.Vector}: {d.Detail}]"));
         }
 
         public static IEnumerator OnClientReceiveCheatReport(long sender, ZPackage package) {
@@ -561,7 +635,10 @@ namespace ValheimEnforcer {
                     yield break;
                 }
                 Logger.LogInfo($"Received delta update from {deltaUpdate.Name} ({deltaUpdate.HostID}): {deltaUpdate.ItemModifications?.Count ?? 0} item delta(s).");
-                UpdatePlayerSaveWithDeltaData(deltaUpdate, character);
+                if (UpdatePlayerSaveWithDeltaData(deltaUpdate, character)) {
+                    // Our copy no longer matches the client's baseline, so no later delta can repair it.
+                    RequestFullSyncForDrift(sender, deltaUpdate.HostID, deltaUpdate.Name);
+                }
                 yield break;
             }
 
@@ -579,7 +656,7 @@ namespace ValheimEnforcer {
             }
 
             Logger.LogInfo($"Received delta update from {deltaUpdate.Name} ({deltaUpdate.HostID}): {deltaUpdate.ItemModifications?.Count ?? 0} item delta(s).");
-            modules.character.CharacterStore.SubmitDelta(deltaUpdate);
+            modules.character.CharacterStore.SubmitDelta(deltaUpdate, sender);
             yield break;
         }
 
@@ -590,6 +667,39 @@ namespace ValheimEnforcer {
             Logger.LogInfo($"No saved data for {deltaUpdate.Name} ({deltaUpdate.HostID}); requesting a full character sync from the client. This delta is dropped and will be superseded by the full save.");
             ZPackage req = new ZPackage();
             req.Write(deltaUpdate.Name);
+            ValConfig.FullSyncRequestRPC.SendPackage(sender, req);
+        }
+
+        // A full save takes a moment to arrive and the client keeps streaming deltas in the meantime, every one of
+        // which can re-detect the same drift. Without a cooldown a single divergence would pull a full save on
+        // every flush for as long as it lasted. Not exposed as config, matching FullSyncScheduler.WaveStaggerSeconds.
+        private const double DriftResyncCooldownSeconds = 60d;
+        private static readonly ConcurrentDictionary<string, DateTime> lastDriftResync = new ConcurrentDictionary<string, DateTime>();
+
+        /// <summary>
+        /// Main thread only. Ask a client for a full character save because a delta merge found our copy had
+        /// drifted, rate limited per character. Callers on the CharacterStore worker must not call this directly -
+        /// they queue the request for the main thread instead (see CharacterStore.TryDequeueDriftResync).
+        /// </summary>
+        internal static void RequestFullSyncForDrift(long sender, string hostId, string name) {
+            string key = modules.character.CharacterStore.KeyFor(hostId, name);
+            DateTime now = DateTime.UtcNow;
+            if (lastDriftResync.TryGetValue(key, out DateTime last)
+                && (now - last).TotalSeconds < DriftResyncCooldownSeconds) {
+                Logger.LogDebug($"Drift resync for {name} already requested recently; skipping.");
+                return;
+            }
+            lastDriftResync[key] = now;
+
+            // The peer may have gone since the delta was received (disk mode queues this across frames).
+            if (ZNet.instance == null || ZNet.instance.GetPeer(sender) == null) {
+                Logger.LogDebug($"Not requesting a drift resync for {name}: peer {sender} is no longer connected.");
+                return;
+            }
+
+            Logger.LogInfo($"Requesting a full character sync from {name} ({hostId}) to repair drifted server state.");
+            ZPackage req = new ZPackage();
+            req.Write(name);
             ValConfig.FullSyncRequestRPC.SendPackage(sender, req);
         }
 
@@ -619,7 +729,15 @@ namespace ValheimEnforcer {
         /// background <see cref="modules.character.CharacterStore"/> worker; it is also reused by the
         /// internal-storage path in <see cref="UpdatePlayerSaveWithDeltaData"/>.
         /// </summary>
-        internal static void MergeDelta(DeltaSummaryUpdate deltaSummary, DataObjects.Character character) {
+        /// <returns>
+        /// True when the merge detected drift - a Removed delta that matched nothing at all, not even
+        /// <see cref="DataObjects.Character.RemoveFromPlayerItems"/>'s fuzzy fallback. That means our copy no
+        /// longer reflects the client's baseline, so no further delta can reconcile it and the caller should ask
+        /// the client for a full save. Callers, not this method, issue that request: this runs off the main
+        /// thread in disk mode and must not touch ZNet.
+        /// </returns>
+        internal static bool MergeDelta(DeltaSummaryUpdate deltaSummary, DataObjects.Character character) {
+            bool drifted = false;
             // Apply item deltas
             foreach (ItemDelta delta in deltaSummary.ItemModifications) {
                 switch (delta.Op) {
@@ -628,7 +746,10 @@ namespace ValheimEnforcer {
                         Logger.LogDebug($"Delta: added {delta.Item.prefabName} x{delta.Item.m_stack}.");
                         break;
                     case ItemDeltaChangeType.Removed:
-                        character.RemoveFromPlayerItems(delta.Item);
+                        if (!character.RemoveFromPlayerItems(delta.Item)) {
+                            drifted = true;
+                            Logger.LogWarning($"Delta removal for {character.Name} found no match for {delta.Item?.prefabName} x{delta.Item?.m_stack}; our copy has drifted from the client's baseline.");
+                        }
                         break;
                 }
             }
@@ -649,12 +770,15 @@ namespace ValheimEnforcer {
 
             // Set the connection state (applied before any persistence so internal-storage and disk copies agree)
             character.LastDisconnect = deltaSummary.DisconnectionState;
+
+            return drifted;
         }
 
         // Internal-storage delta persistence — runs on the main thread because it writes the registry ZDO.
         // Disk mode routes deltas through the async CharacterStore instead.
-        internal static void UpdatePlayerSaveWithDeltaData(DeltaSummaryUpdate deltaSummary, DataObjects.Character character) {
-            MergeDelta(deltaSummary, character);
+        // Returns true when the merge detected drift and the client should be asked for a full save.
+        internal static bool UpdatePlayerSaveWithDeltaData(DeltaSummaryUpdate deltaSummary, DataObjects.Character character) {
+            bool drifted = MergeDelta(deltaSummary, character);
 
             if (ValConfig.InternalStorageMode.Value) {
                 Logger.LogInfo("Saving character with internal storage mode.");
@@ -668,6 +792,8 @@ namespace ValheimEnforcer {
             string fullpath = Path.Combine(charDir, $"{deltaSummary.Name}.yaml");
             File.WriteAllText(fullpath, DataObjects.yamlserializer.Serialize(character));
             Logger.LogInfo($"Saved delta update for {character.Name}.");
+
+            return drifted;
         }
 
         internal static ZPackage SendCharacterAsZpackage(DataObjects.Character chara) {
@@ -675,6 +801,48 @@ namespace ValheimEnforcer {
             ZPackage package = new ZPackage();
             package.Write(serialChara);
             return package;
+        }
+
+        /// <summary>
+        /// Server -> client character payload, with ConfiscatedItems withheld.
+        ///
+        /// The client has no use for the confiscated history (nothing client side reads it) and mirroring it back
+        /// on every full push wasted a lot of bandwidth - a real test character carried 239 entries in a 309KB
+        /// save, re-sent both directions on join, death, respawn, logout and every full-sync pull. Worse, the
+        /// mirror went stale the moment an admin ran /clear or /return, and the client's next push resurrected
+        /// what the admin had removed. With the list withheld, a client's ConfiscatedItems only ever holds what it
+        /// confiscated this session, which is exactly what MergeConfiscatedItems expects to receive.
+        ///
+        /// Deliberately NOT folded into SendCharacterAsZpackage: that one also serves client -> server pushes,
+        /// which must keep carrying the new confiscations.
+        /// </summary>
+        internal static ZPackage SendCharacterToClientAsZpackage(DataObjects.Character chara) {
+            if (chara == null) { return new ZPackage(); }
+            List<PackedItem> held = chara.ConfiscatedItems;
+            try {
+                chara.ConfiscatedItems = null;
+                return SendCharacterAsZpackage(chara);
+            } finally {
+                // The caller's object is server-side authoritative state; never leave it stripped.
+                chara.ConfiscatedItems = held;
+            }
+        }
+
+        /// <summary>Same as <see cref="SendCharacterToClientAsZpackage"/> but for a raw YAML string that has not
+        /// been parsed yet - used on the connect path, where the store hands back cached/on-disk YAML. Falls back
+        /// to the original text if it cannot be parsed, so a corrupt save still reaches the client unchanged
+        /// rather than becoming an empty payload.</summary>
+        internal static string StripConfiscatedItemsFromYaml(string yaml) {
+            if (string.IsNullOrEmpty(yaml)) { return yaml; }
+            try {
+                DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(yaml);
+                if (chara == null) { return yaml; }
+                chara.ConfiscatedItems = null;
+                return DataObjects.yamlserializer.Serialize(chara);
+            } catch (Exception e) {
+                Logger.LogWarning($"Could not strip confiscated items from a character payload, sending it as-is: {e.Message}");
+                return yaml;
+            }
         }
 
         public static ZNetPeer GetPeerByPlatformID(string platformID) {

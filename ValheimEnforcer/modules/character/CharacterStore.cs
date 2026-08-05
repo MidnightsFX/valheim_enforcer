@@ -40,10 +40,19 @@ namespace ValheimEnforcer.modules.character {
 
         private abstract class Message { }
         private sealed class FullSaveMessage : Message { public string RawYaml; }
-        private sealed class DeltaMessage : Message { public DeltaSummaryUpdate Delta; }
+        private sealed class DeltaMessage : Message { public DeltaSummaryUpdate Delta; public long Sender; }
+
+        /// <summary>A delta merge on the worker thread found our copy had drifted from the client's baseline.
+        /// Sending the recovery RPC requires ZNet, so the request is handed back to the main thread instead.</summary>
+        internal sealed class DriftResync {
+            public long Sender;
+            public string HostID;
+            public string Name;
+        }
 
         private static readonly ConcurrentDictionary<string, Entry> cache = new ConcurrentDictionary<string, Entry>();
         private static readonly ConcurrentQueue<Message> messages = new ConcurrentQueue<Message>();
+        private static readonly ConcurrentQueue<DriftResync> driftResyncs = new ConcurrentQueue<DriftResync>();
         private static readonly AutoResetEvent signal = new AutoResetEvent(false);
         private static readonly object startLock = new object();
         private static Thread worker;
@@ -77,11 +86,24 @@ namespace ValheimEnforcer.modules.character {
         }
 
         /// <summary>Apply an incremental delta update (already parsed on the main thread — the delta
-        /// payload is small by design) and persist the result on the worker thread.</summary>
-        internal static void SubmitDelta(DeltaSummaryUpdate delta) {
+        /// payload is small by design) and persist the result on the worker thread. <paramref name="sender"/> is
+        /// carried through so a drift detected during the merge can be answered with a full-sync request once the
+        /// main thread picks it back up.</summary>
+        internal static void SubmitDelta(DeltaSummaryUpdate delta, long sender) {
             EnsureWorker();
-            messages.Enqueue(new DeltaMessage { Delta = delta });
+            messages.Enqueue(new DeltaMessage { Delta = delta, Sender = sender });
             signal.Set();
+        }
+
+        /// <summary>Main thread: take the next queued drift-recovery request, or null when there are none.
+        /// Drained by FullSyncSchedulerBehaviour, which already ticks server-side every frame.</summary>
+        internal static DriftResync TryDequeueDriftResync() {
+            return driftResyncs.TryDequeue(out DriftResync r) ? r : null;
+        }
+
+        /// <summary>Drop any queued drift-recovery requests (server shutting down; the peers are going away).</summary>
+        internal static void ClearDriftResyncs() {
+            while (driftResyncs.TryDequeue(out _)) { }
         }
 
         /// <summary>Drop any cached state for a character so the next access reloads from disk. Used
@@ -202,6 +224,16 @@ namespace ValheimEnforcer.modules.character {
                         return null;
                     }
                     string key = KeyFor(c.HostID, c.Name);
+                    // The incoming save replaces everything EXCEPT the confiscated list, which the server owns:
+                    // the client only reports what it confiscated this session, and an overwrite would resurrect
+                    // entries an admin cleared or returned mid-session. See Character.MergeConfiscatedItems.
+                    List<PackedItem> reported = c.ConfiscatedItems;
+                    DataObjects.Character existing = GetOrLoad(key, c.HostID, c.Name);
+                    c.ConfiscatedItems = existing?.ConfiscatedItems ?? new List<PackedItem>();
+                    int appended = c.MergeConfiscatedItems(reported);
+                    if (appended > 0) {
+                        Logger.LogInfo($"Recorded {appended} newly confiscated item(s) for {c.Name}.");
+                    }
                     // Re-serialize from the parsed object so on-disk format is always server-canonical.
                     cache[key] = new Entry { Character = c, Yaml = yamlserializer.Serialize(c) };
                     Logger.LogInfo($"Recieved Player data update - {c.Name}|{c.HostID}");
@@ -217,7 +249,10 @@ namespace ValheimEnforcer.modules.character {
                         Logger.LogWarning($"CharacterStore dropped a delta for {d.Name} ({d.HostID}): no existing save to apply onto.");
                         return null;
                     }
-                    ValConfig.MergeDelta(d, cur);
+                    if (ValConfig.MergeDelta(d, cur)) {
+                        // Worker thread - queue the recovery request rather than touching ZNet from here.
+                        driftResyncs.Enqueue(new DriftResync { Sender = deltaMsg.Sender, HostID = d.HostID, Name = d.Name });
+                    }
                     cache[key] = new Entry { Character = cur, Yaml = yamlserializer.Serialize(cur) };
                     Logger.LogInfo($"Saved delta update for {cur.Name}.");
                     return key;
