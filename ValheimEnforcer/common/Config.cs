@@ -23,6 +23,11 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> EnableDebugMode;
         public static ConfigEntry<bool> UpdateLoadedModsOnStartup;
         public static ConfigEntry<bool> AutoAddModsToRequired;
+        public static ConfigEntry<string> HashEnforcement;
+        public static ConfigEntry<bool> RecordHashesForLoadedMods;
+        public static ConfigEntry<bool> ResolveThunderstoreHashes;
+        public static ConfigEntry<int> HashComputeTimeoutSeconds;
+        public static ConfigEntry<int> ThunderstoreMaxArchiveMB;
         public static ConfigEntry<bool> RemoveNontrackedItemsFromJoiningPlayers;
         public static ConfigEntry<bool> AddMissingItemsFromPlayerServerSave;
         public static ConfigEntry<bool> PreventExternalSkillRaises;
@@ -119,6 +124,9 @@ namespace ValheimEnforcer {
 
             UpdateLoadedModsOnStartup = BindServerConfig("Mods", "UpdateLoadedModsOnStartup", true, "Whether or not the mod configuration file will update its loaded mods once they are detected.");
             AutoAddModsToRequired = BindServerConfig("Mods", "AutoAddModsToRequired", true, "If true, automatically adds mods not found in the optional, admin, or server-only mod lists.");
+            HashEnforcement = BindServerConfig("Mods", "HashEnforcement", "WhenKnown", "Controls SHA256 file verification of client plugin DLLs during the connect handshake, which catches a mod somebody recompiled with different numbers in it even though its version string is unchanged. 'Off' never checks. 'WhenKnown' (the default) enforces only the mods this server has a recorded hash for, so verification is opt-in per mod and enabling it breaks nothing. 'Strict' additionally rejects any client carrying a Required or AdminOnly mod the server has NO recorded hash for - a deliberately loud signal that the mod list is not fully pinned. Individual mods override this with a 'hashEnforcement' field in Mods.yaml. Note this raises the bar from 'edit one file and rebuild' to 'reverse engineer and patch the enforcer'; it is not a wall.", new AcceptableValueList<string>("Off", "WhenKnown", "Strict"));
+            RecordHashesForLoadedMods = BindServerConfig("Mods", "RecordHashesForLoadedMods", true, "If enabled, the SHA256 of every plugin DLL loaded on this machine is recorded into Mods.yaml at startup, so the mods the server itself runs get pinned with no manual work. Hashes an admin pinned by hand, or that came from a thunderstorePackage, are never overwritten. Requires UpdateLoadedModsOnStartup for the result to reach disk.");
+            ResolveThunderstoreHashes = BindServerConfig("Mods", "ResolveThunderstoreHashes", false, "If enabled, the server downloads any mod in Mods.yaml carrying a 'thunderstorePackage' field (format Owner-ModName or Owner-ModName-Version, the same format a Thunderstore manifest uses), hashes the DLLs inside the archive in memory, records them, and discards the download. This is how you pin a client-only mod the server never loads itself. Only thunderstore.io and its CDN are ever contacted; arbitrary download URLs are deliberately not supported. Off by default because it makes outbound network requests.");
             RemoveNontrackedItemsFromJoiningPlayers = BindServerConfig("Player Sync", "RemoveNontrackedItemsFromJoiningPlayers", true, "If enabled, any items that are not tracked by the server will be removed from joining player's inventories.");
             AddMissingItemsFromPlayerServerSave = BindServerConfig("Player Sync", "AddMissingItemsFromPlayerServerSave", true, "If enabled, any items the player does not have that are listed on the server will be given to the player when joining");
             PreventExternalSkillRaises = BindServerConfig("Player Sync", "PreventExternalSkillRaises", true, "If enabled, player skill gains outside of the server are removed when connecting.");
@@ -138,6 +146,8 @@ namespace ValheimEnforcer {
             ConfigPollIntervalSeconds = BindServerConfig("Advanced", "ConfigPollIntervalSeconds", 30, "How frequently (in seconds) the mod polls config files on disk for changes.", advanced: true, valmin: 1, valmax: 300);
             DeltaSynchronizationFrequencyInSeconds = BindServerConfig("Advanced", "CharacterDeltaTracker", 15, "Minimum time (in seconds) between incremental inventory/skill/custom-data updates. Updates are only produced when the player's inventory actually changes, so an idle player sends nothing; this is a rate limit rather than a polling interval.", advanced: true, valmin: 5, valmax: 300);
             FullSyncPullIntervalMinutes = BindServerConfig("Advanced", "FullSyncPullIntervalMinutes", 25, "How often (in minutes) the server asks connected players to upload a full character save. Full saves are a periodic reconciliation layered on top of the incremental delta updates (CharacterDeltaTracker); they are no longer tied to the world/profile autosave.", advanced: true, valmin: 1, valmax: 1440);
+            HashComputeTimeoutSeconds = BindServerConfig("Advanced", "HashComputeTimeoutSeconds", 30, "Maximum time spent hashing local plugin DLLs at startup before giving up and reporting the remainder as unverifiable. Hashing runs on background threads and usually takes well under a second; this is a safety valve for a stalled disk, not a tuning knob.", advanced: true, valmin: 5, valmax: 300);
+            ThunderstoreMaxArchiveMB = BindServerConfig("Advanced", "ThunderstoreMaxArchiveMB", 128, "Largest Thunderstore archive, in megabytes, the server will download when resolving mod hashes. Archives are held in memory while their DLLs are hashed, so this is also the peak transient allocation; packages are resolved one at a time so it is never multiplied. Larger archives are skipped and logged.", advanced: true, valmin: 1, valmax: 512);
             FullSyncMaxConcurrentPlayers = BindServerConfig("Advanced", "FullSyncMaxConcurrentPlayers", 5, "Maximum number of players the server asks to upload a full character save at the same time. Larger player counts are staggered into successive waves of this size to avoid a bandwidth spike. 10 is safe on a healthy server; lower it on constrained upload/VPS hosts.", advanced: true, valmin: 1, valmax: 50);
 
             EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Master switch for client-side cheat scanning. When enabled the client checks running processes, the DLLs loaded into the game, and open window titles against a catalog of known cheat tools. Only matched entries are reported to the server - the player's full process list is never transmitted.");
@@ -257,6 +267,10 @@ namespace ValheimEnforcer {
                 case ModsFileName:
                     Logger.LogDebug("Triggering Mod Settings update.");
                     ModManager.UpdateModSettingConfigs(filetext);
+                    // An admin may have just added or repinned a thunderstorePackage.
+                    if (ZNet.instance != null && ZNet.instance.IsServer()) {
+                        modules.mods.ThunderstoreResolver.RequestPass("Mods.yaml changed");
+                    }
                     break;
                 case KnownCheatersFileName:
                     Logger.LogDebug("Triggering KnownCheaters list update.");
@@ -266,13 +280,12 @@ namespace ValheimEnforcer {
         }
 
         private static void CreateModsFile(string filepath) {
-            Logger.LogDebug("Loot config missing, recreating.");
+            Logger.LogDebug("Mods config missing, recreating.");
             using (StreamWriter writetext = new StreamWriter(filepath)) {
-                String header = @"#################################################
-# Valheim Enforcer - Required, Admin and Optional Mods
-#################################################
-";
-                writetext.WriteLine(header);
+                // Shared with the header restore in ModManager.PersistModSettings, so a file that is recreated
+                // and one that is rewritten carry the same guide. It survives rewrites now that comments do.
+                writetext.WriteLine(string.Join(Environment.NewLine, ModManager.ModsFileHeaderLines));
+                writetext.WriteLine();
                 writetext.WriteLine(ModManager.GetDefaultConfig());
             }
         }

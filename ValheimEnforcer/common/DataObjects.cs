@@ -12,7 +12,13 @@ using YamlDotNet.Serialization.NamingConventions;
 namespace ValheimEnforcer.common {
     internal static class DataObjects {
 
-        public static IDeserializer yamldeserializer = new DeserializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).Build();
+        // IgnoreUnmatchedProperties is a compatibility guard, not laziness. YamlDotNet throws on any key it
+        // cannot map to a property, so a document written by a *newer* build - a Mods.yaml carrying fields an
+        // older VE does not know, or a handshake payload from a peer one version ahead - would throw out of
+        // Deserialize rather than simply ignoring what it does not understand. On the handshake path ZRpc
+        // swallows that exception, which would silently skip mod validation entirely. Ignoring unknown keys
+        // degrades to "validate what I understand" instead.
+        public static IDeserializer yamldeserializer = new DeserializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).IgnoreUnmatchedProperties().Build();
         // DisableAliases is required, not cosmetic. YamlDotNet's anchor assigner keys objects by Equals/GetHashCode
         // rather than by reference, so once PackedItem gained value equality two *distinct* items that compare
         // equal would be emitted as one anchor plus an alias - and because durability, grid position, equipped
@@ -59,6 +65,90 @@ namespace ValheimEnforcer.common {
             public bool EnforceVersion { get; set; }
             [DefaultValue("Minor")]
             public string VersionStrictness { get; set; } = "Minor";
+
+            // ---- File verification ------------------------------------------------------------------------
+            // Every field below defaults to null, so with OmitDefaults a mod that uses none of them serializes
+            // exactly as it did before this feature existed. Existing Mods.yaml files are unchanged on rewrite
+            // apart from the entries that actually gain hashes.
+
+            /// <summary>
+            /// Client -> server: lowercase hex SHA256 of the DLL BepInEx loaded this plugin from. Null when the
+            /// plugin could not be hashed, in which case <see cref="HashStatus"/> says why. A null hash is never
+            /// treated as a pass - omitting it would otherwise be the cheapest possible bypass.
+            /// </summary>
+            [DefaultValue(null)]
+            public string Hash { get; set; }
+
+            /// <summary>
+            /// Server side: every hash considered valid for this mod; matching any one of them passes. A list
+            /// rather than a single value because one Thunderstore archive can ship several DLLs and, when the
+            /// plugin GUID cannot be read back out of them, any is a candidate. Accepting N hashes for one GUID
+            /// does not weaken the check: producing a DLL whose SHA256 equals one of the others is a preimage
+            /// attack, and the comparison is per-GUID.
+            /// Deliberately not initialized inline - an empty list would defeat OmitDefaults and write
+            /// "acceptedHashes: []" onto every entry in the file.
+            /// </summary>
+            [DefaultValue(null)]
+            public List<string> AcceptedHashes { get; set; }
+
+            /// <summary>
+            /// Provenance of <see cref="AcceptedHashes"/>: "Local", "Manual" or "Thunderstore". Only "Local"
+            /// entries are refreshed by the startup pass, so a hash an admin pinned by hand or one resolved
+            /// from Thunderstore survives a restart instead of being overwritten by whatever this machine
+            /// happens to have on disk.
+            /// </summary>
+            [DefaultValue(null)]
+            public string HashSource { get; set; }
+
+            /// <summary>
+            /// What produced <see cref="AcceptedHashes"/>: "local:&lt;version&gt;" for a DLL this machine loads
+            /// itself, or "Owner-Name-Version" for a resolved Thunderstore package. Re-resolution happens only
+            /// when this stops matching what we would fetch today, so a restart re-downloads nothing.
+            /// </summary>
+            [DefaultValue(null)]
+            public string HashedFrom { get; set; }
+
+            /// <summary>
+            /// Admin authored: the Thunderstore package to resolve hashes from, as "Owner-ModName" or
+            /// "Owner-ModName-Version" - the same dependency string format used in a Thunderstore manifest.
+            /// This is the only way the server reaches the network; arbitrary download URLs are deliberately
+            /// not supported.
+            /// </summary>
+            [DefaultValue(null)]
+            public string ThunderstorePackage { get; set; }
+
+            /// <summary>
+            /// Admin authored: per-mod override of the server's HashEnforcement setting. "Off", "WhenKnown" or
+            /// "Strict".
+            /// </summary>
+            [DefaultValue(null)]
+            public string HashEnforcement { get; set; }
+
+            /// <summary>
+            /// Client -> server: why <see cref="Hash"/> is null. One of a fixed set of tokens ("dynamic",
+            /// "missing", "unreadable", "timeout") - never a filesystem path. Surfaced in the rejection text so
+            /// a player is told what actually happened rather than getting a bare failure.
+            /// </summary>
+            [DefaultValue(null)]
+            public string HashStatus { get; set; }
+
+            /// <summary>
+            /// True when <paramref name="candidate"/> is one of the accepted hashes. Case insensitive so an
+            /// admin who pastes uppercase hex (as Get-FileHash produces) is not silently rejected.
+            /// </summary>
+            public bool AcceptsHash(string candidate) {
+                if (AcceptedHashes == null || AcceptedHashes.Count == 0) { return false; }
+                if (string.IsNullOrEmpty(candidate)) { return false; }
+                foreach (string accepted in AcceptedHashes) {
+                    if (string.Equals(accepted, candidate, StringComparison.OrdinalIgnoreCase)) { return true; }
+                }
+                return false;
+            }
+
+            /// <summary>True when the server holds at least one hash to compare a client against.</summary>
+            public bool HasRecordedHash() {
+                return AcceptedHashes != null && AcceptedHashes.Count > 0;
+            }
         }
 
         public class Mods {
@@ -72,6 +162,22 @@ namespace ValheimEnforcer.common {
                 string stringified = DataObjects.yamlserializer.Serialize(this);
                 ZPackage package = new ZPackage();
                 package.Write(stringified);
+                return package;
+            }
+
+            /// <summary>
+            /// Client -> server handshake payload: ActiveMods only.
+            ///
+            /// The server reads nothing but ActiveMods out of a client's payload (see
+            /// ModManager.ValidateModlist), so shipping the client's own Required/Optional/AdminOnly/ServerOnly
+            /// lists was always dead weight - and it got substantially worse once every entry could carry a
+            /// 64 character hash. The four empty dictionaries still serialize and deserialize, so the receiving
+            /// side's count logging is unaffected.
+            /// </summary>
+            public ZPackage ActiveModsToZPackage() {
+                Mods trimmed = new Mods { ActiveMods = ActiveMods };
+                ZPackage package = new ZPackage();
+                package.Write(DataObjects.yamlserializer.Serialize(trimmed));
                 return package;
             }
 

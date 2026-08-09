@@ -42,6 +42,26 @@ namespace ValheimEnforcer.common {
             Logger.LogDebug($"ConfigFileWatcher watching {fullPath}");
         }
 
+        /// <summary>
+        /// Records a write we made ourselves so the next poll does not read it back as an external edit.
+        ///
+        /// Without this, every file the mod rewrites (Mods.yaml on startup, and again whenever resolved hashes
+        /// land) bounces straight back in through the change callback one poll later. That is wasted work at
+        /// best, and at worst it re-parses our own output as though an admin had typed it.
+        /// Call immediately after the write completes.
+        /// </summary>
+        internal static void NoteSelfWrite(string fullPath) {
+            if (!WatchedFiles.TryGetValue(fullPath, out WatchEntry entry)) { return; }
+            try {
+                FileInfo info = new FileInfo(fullPath);
+                if (!info.Exists) { return; }
+                entry.Update(info.LastWriteTimeUtc, info.Length);
+            } catch (Exception e) {
+                // Leaving the entry stale only costs one redundant reload, so this is never worth failing on.
+                Logger.LogDebug($"Could not record our own write to {fullPath}: {e.Message}");
+            }
+        }
+
 
 
         internal class ConfigFileWatcherBehaviour : MonoBehaviour {

@@ -24,7 +24,11 @@ namespace ValheimEnforcer
     {
         public const string PluginGUID = "MidnightsFX.ValheimEnforcer";
         public const string PluginName = "ValheimEnforcer";
-        public const string PluginVersion = "0.14.1";
+        // Minor bump, not a patch, and that matters. New fields on the Mods handshake payload make an older
+        // peer's deserializer throw, which would silently skip its mod validation entirely. VersionStrictness
+        // .Minor on the NetworkCompatibility attribute above is what keeps a mixed-version pair from connecting
+        // in the first place - so this must not be renumbered to 0.14.2.
+        public const string PluginVersion = "0.15.0";
 
         internal static ManualLogSource Log;
         internal ValConfig cfg;
