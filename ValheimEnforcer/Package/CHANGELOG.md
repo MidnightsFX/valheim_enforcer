@@ -1,3 +1,16 @@
+**0.15.0**
+ ---
+ ```
+ - Adds file verification of client plugin DLLs at connect time
+    - New HashEnforcement setting: Off / WhenKnown (default) / Strict, overridable per mod in Mods.yaml
+    - Mods the server loads pin themselves; client-only mods pin by hand or from a thunderstorePackage
+ - Fixes a mod with the wrong version being reported as both a version mismatch and a non-allowed mod
+ - Comments in Mods.yaml now survive the startup rewrite, which used to delete them - a note stays
+   attached to the entry it was written above
+ - Documents the mod list in the README: the five lists, how an entry is structured, what is kept up
+   to date for you and what you have to write yourself
+ ```
+
 **0.14.1**
  ---
  ```
