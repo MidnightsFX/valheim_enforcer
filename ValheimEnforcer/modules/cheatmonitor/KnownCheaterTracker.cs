@@ -91,19 +91,10 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             if (string.IsNullOrEmpty(hostId)) { return null; }
             if (Cheaters.ContainsKey(hostId)) { return hostId; }
 
-            string normalized = Normalize(hostId);
             foreach (var key in Cheaters.Keys) {
-                if (Normalize(key) == normalized) { return key; }
+                if (PlatformIds.Matches(key, hostId)) { return key; }
             }
             return null;
-        }
-
-        // Strips a leading platform prefix ("Steam_", "PlayFab_", ...) so ids compare on their
-        // platform-specific suffix.
-        private static string Normalize(string id) {
-            if (string.IsNullOrEmpty(id)) { return id; }
-            int idx = id.LastIndexOf('_');
-            return idx >= 0 && idx < id.Length - 1 ? id.Substring(idx + 1) : id;
         }
 
         private static void Upsert(DataObjects.KnownCheaterEntry entry) {

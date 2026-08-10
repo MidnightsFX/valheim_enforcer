@@ -42,6 +42,16 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> ItemRemovalForDirtyReconnection;
         public static ConfigEntry<bool> ItemReturnForDirtyReconnection;
 
+        public static ConfigEntry<bool> EnforceCharacterLimit;
+        public static ConfigEntry<int> MaxCharactersPerAccount;
+        // Comma-separated rather than List<string>: BepInEx's config system only supports primitives,
+        // string and enums, so binding a List<string> throws at startup.
+        public static ConfigEntry<string> CharacterLimitExemptAccounts;
+        public static ConfigEntry<bool> CharacterLimitExemptAdmins;
+
+        public static ConfigEntry<bool> ImportServerCharacters;
+        public static ConfigEntry<string> ServerCharactersImportPath;
+
         public static ConfigEntry<bool> InternalStorageMode;
         public static ConfigEntry<int> ConfigPollIntervalSeconds;
         public static ConfigEntry<int> DeltaSynchronizationFrequencyInSeconds;
@@ -70,6 +80,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> DiscordNotifyPlayerLeft;
         public static ConfigEntry<bool> DiscordNotifyWrongMods;
         public static ConfigEntry<bool> DiscordNotifyCheaterBanned;
+        public static ConfigEntry<bool> DiscordNotifyCharacterRejected;
 
         internal const string ModsFileName = "Mods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
@@ -86,6 +97,7 @@ namespace ValheimEnforcer {
         internal static CustomRPC ListPlayerRPC;
         internal static CustomRPC ClearConfiscatedRPC;
         internal static CustomRPC FullSyncRequestRPC;
+        internal static CustomRPC ImportServerCharactersRPC;
 
         public ValConfig(ConfigFile cf) {
             // ensure all the config values are created
@@ -103,6 +115,7 @@ namespace ValheimEnforcer {
             ListPlayerRPC = NetworkManager.Instance.AddRPC("VENFORCE_LIST_PLAYER", OnServerReceiveListPlayer, OnClientReceiveListPlayer);
             ClearConfiscatedRPC = NetworkManager.Instance.AddRPC("VENFORCE_CLEAR_CONFISCATED", OnServerRecieveClearConfiscated, OnClientReceiveClearConfiscated);
             FullSyncRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_FULLSYNC_REQ", OnServerReceiveFullSyncRequest, OnClientReceiveFullSyncRequest);
+            ImportServerCharactersRPC = NetworkManager.Instance.AddRPC("VENFORCE_IMPORT_SC", OnServerReceiveImportRequest, OnClientReceiveImportReport);
 
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
@@ -141,6 +154,18 @@ namespace ValheimEnforcer {
             ItemRemovalForDirtyReconnection = BindServerConfig("Player Sync", "ItemRemovalForDirtyReconnection", false, "Leniency for dirty reconnects (crash/timeout, where the server save may be up to one delta window stale). RemoveNontrackedItemsFromJoiningPlayers always runs otherwise; if this is enabled, untracked items are NOT confiscated when the player's last disconnect was dirty, so crash victims keep items gained in the unsaved window.");
             ItemReturnForDirtyReconnection = BindServerConfig("Player Sync", "ItemReturnForDirtyReconnection", false, "Leniency for dirty reconnects. AddMissingItemsFromPlayerServerSave always restores missing tracked items on a clean join; on a dirty reconnect restoration is skipped by default (to avoid duping items consumed in the unsaved window) unless this is enabled.");
 
+            EnforceCharacterLimit = BindServerConfig("Player Sync", "EnforceCharacterLimit", false, "Master switch for the one-character-per-account rule. When enabled, an account may only join with a character the server already has a save for, up to MaxCharactersPerAccount; any other character is refused at the connect handshake and told which character to use instead. Characters that already have a save are always allowed, so turning this on never locks out an existing player - it only stops new characters being added. Freeing a slot means deleting that character's save file (BepInEx/config/ValheimEnforcer/Characters/<accountId>/<Name>.yaml), which is what a character reset already involves. Off by default.");
+            MaxCharactersPerAccount = BindServerConfig("Player Sync", "MaxCharactersPerAccount", 1, "How many characters one account may have on this server when EnforceCharacterLimit is enabled. Accounts that already have more than this keep every character they have; the limit only blocks adding another.", valmin: 1, valmax: 20);
+            CharacterLimitExemptAccounts = BindServerConfig("Player Sync", "CharacterLimitExemptAccounts", "", "Comma-separated list of account ids allowed to connect with any number of characters, regardless of EnforceCharacterLimit. Independent of admin status - an id listed here does not need to be an admin, and an admin is not exempt unless listed (or CharacterLimitExemptAdmins is enabled). Both the platform-prefixed form (Steam_76561198012345678) and the bare id (76561198012345678) are accepted. Note this setting is synced to connected clients, so the ids in it are visible to players.");
+            CharacterLimitExemptAdmins = BindServerConfig("Player Sync", "CharacterLimitExemptAdmins", false, "If enabled, anyone on the server's adminlist is exempt from the character limit without needing an entry in CharacterLimitExemptAccounts. Off by default so the two permissions stay separate.");
+
+            // Migration. Deliberately local (non-synced) configs: these are server-only operational settings
+            // with no client-side behaviour, and the path in particular would otherwise be pushed to every
+            // connected client, exposing the server's filesystem layout. Edit them in the config file; the
+            // server-side main file watcher reloads it.
+            ImportServerCharacters = BindLocalConfig("Migration", "ImportServerCharacters", false, "If enabled, the server imports character saves from the ServerCharacters mod once at startup, so players migrating from it keep their inventory and skills instead of having everything confiscated on their first join. Characters that already have a save here are left alone, so the pass is safe to leave on. IMPORTANT: uninstall ServerCharacters first - the two mods are declared incompatible and BepInEx will refuse to load ValheimEnforcer while both are present. The files ServerCharacters leaves behind in the character folder are what gets read; nothing is moved or deleted. Off by default.");
+            ServerCharactersImportPath = BindLocalConfig("Migration", "ServerCharactersImportPath", "", "Where to look for ServerCharacters' character files. Leave empty to use the game's own local character folder, which is where ServerCharacters puts them and which follows Valheim's -savedir argument automatically. Only set this if you moved the files somewhere else.");
+
             // portable mode
             InternalStorageMode = BindServerConfig("Advanced", "InternalStorageMode", false, "If enabled, player character data will be stored within your world. Enables full portability of the world without having to synchronize configurations.", advanced: true);
             ConfigPollIntervalSeconds = BindServerConfig("Advanced", "ConfigPollIntervalSeconds", 30, "How frequently (in seconds) the mod polls config files on disk for changes.", advanced: true, valmin: 1, valmax: 300);
@@ -171,6 +196,7 @@ namespace ValheimEnforcer {
             DiscordNotifyPlayerLeft = BindLocalConfig("Discord", "NotifyPlayerLeft", true, "Post a message when a player leaves, including whether their saved data is up to date.");
             DiscordNotifyWrongMods = BindLocalConfig("Discord", "NotifyWrongMods", true, "Post a message when a player is rejected for a mod mismatch, listing the offending mods.");
             DiscordNotifyCheaterBanned = BindLocalConfig("Discord", "NotifyCheaterBanned", true, "Post a message when a player is banned for cheat usage, including the detected cheat(s).");
+            DiscordNotifyCharacterRejected = BindLocalConfig("Discord", "NotifyCharacterRejected", true, "Post a message when a connection is refused by EnforceCharacterLimit, naming the character that was turned away.");
         }
 
         // routine: set for the recurring background baseline write driven by CharacterDeltaTracker, which happens
@@ -574,6 +600,45 @@ namespace ValheimEnforcer {
 
         public static IEnumerator OnClientReceiveCheatReport(long sender, ZPackage package) {
             // Client -> server only; clients do not act on this RPC.
+            yield break;
+        }
+
+        public static IEnumerator OnClientReceiveImportReport(long sender, ZPackage package) {
+            foreach (string line in package.ReadString().Split('\n')) {
+                Logger.LogInfo(line.TrimEnd());
+            }
+            yield break;
+        }
+
+        public static IEnumerator OnServerReceiveImportRequest(long sender, ZPackage package) {
+            // Unlike the older command RPCs this one is admin gated on the server. IsCheat on the console
+            // command only gates the vanilla client; this handler can write character saves (and overwrite them
+            // outright with 'force'), so it must not take a crafted client's word for who is asking.
+            ZNetPeer peer = ZNet.instance?.GetPeer(sender);
+            string hostId = peer?.m_socket?.GetHostName();
+            if (string.IsNullOrEmpty(hostId) || !ZNet.instance.IsAdmin(hostId)) {
+                Logger.LogWarning($"Ignoring a ServerCharacters import request from non-admin {hostId ?? sender.ToString()}.");
+                yield break;
+            }
+
+            // Anything unrecognised falls through to a dry run - the safe reading of a malformed request.
+            string mode = package.ReadString() ?? "";
+            bool force = mode.IndexOf("force", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool dryRun = mode.IndexOf("import", StringComparison.OrdinalIgnoreCase) < 0;
+
+            string summary;
+            try {
+                summary = modules.migration.ServerCharactersImport.Run(dryRun, force).Summary();
+            } catch (Exception e) {
+                summary = $"ServerCharacters import failed: {e.Message}";
+                Logger.LogError($"ServerCharacters import failed: {e}");
+            }
+            Logger.LogInfo(summary);
+            // Write the text into the package rather than using the ZPackage(string) constructor: that overload
+            // is a base64 decoder (Convert.FromBase64String) and throws on arbitrary text.
+            ZPackage reply = new ZPackage();
+            reply.Write(summary);
+            ValConfig.ImportServerCharactersRPC.SendPackage(sender, reply);
             yield break;
         }
 

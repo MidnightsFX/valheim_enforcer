@@ -23,6 +23,8 @@ Server saved character progression lock. All of the following features are confi
 - Character progress is saved on the server
 - Prevents characters from bringing untracked items onto the server
 - Prevents characters from raising skills externally
+- Optionally limits each account to a single character, with an exemption list ([One Character Per Account](#one-character-per-account))
+- Imports existing characters from ServerCharacters so players migrate without losing anything ([Migrating from ServerCharacters](#migrating-from-servercharacters))
 
 Mod Enforcement. All of the following features are configurable (server authoratative).
 - All mods are checked on connection, allows strict version enforcement
@@ -199,6 +201,66 @@ Tools with no purpose other than cheating (the loaders and injectors above) are 
 **False positives:** developer tools that also read game memory — x64dbg, Process Hacker / System Informer, HxD, ReClass.NET, Frida, Fiddler — are deliberately **not** detected by default, because modders and streamers use them routinely. Add them to `AdditionalCheatProcesses` if your server wants them treated as cheats. `Aurora`, `Process Lasso`, `AutoHotkey`, and overlay tools like MSI Afterburner and OBS are excluded on purpose and are not recommended additions; see the config file comments for the reasoning. If something legitimate trips a detection, add it to `IgnoredCheatProcesses`, which overrides everything else.
 
 *Disclaimer: Valheim is client authoratative and without extremely invasive measures, cheating cannot be fully prevented. Process-name detection in particular is a speed bump rather than a wall — renaming Cheat Engine is a documented feature of the tool, and trainer executables are renameable by design. The module and window checks exist because they survive a rename, but a client that can cheat can also lie about what it is running. The same applies to mod file verification: the hash is computed and reported by the client, so it stops a recompiled mod, not a patched enforcer. What it changes is the cost — from "edit one file and rebuild" to "reverse engineer and patch the anti-cheat", which is a real barrier to the people who actually do the former and none at all to the people who can do the latter.*
+
+### One Character Per Account
+
+Off by default. Set `EnforceCharacterLimit` to `true` and an account may only join with a character this server already has a save for — anyone else is turned away at the connect handshake and told which character to come back as. Nothing about this is retroactive punishment: **every character an account already has stays playable**, so switching it on locks nobody out. It only stops the *next* new character.
+
+There is no separate list to maintain. The characters an account "has" are exactly the saves under `BepInEx/config/ValheimEnforcer/Characters/<PlatformID>/`, which the mod already writes on the first join. So a brand new player joins normally, that character becomes theirs, and a second one is refused. Run `enforcer-list-players` to see who has what.
+
+**Giving someone a fresh start** is deleting their character's `.yaml` from that folder while they are offline. The slot frees itself; the next character they connect with takes it.
+
+#### Settings
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `EnforceCharacterLimit` | `false` | Master switch. Everything below is inert until this is on |
+| `MaxCharactersPerAccount` | `1` | How many characters an account may have. Accounts already over it keep what they have |
+| `CharacterLimitExemptAccounts` | *(empty)* | Comma-separated account ids allowed any number of characters |
+| `CharacterLimitExemptAdmins` | `false` | Whether being on the adminlist is itself an exemption |
+| `NotifyCharacterRejected` | `true` | Post refused joins to Discord, if a webhook is configured |
+
+Exemptions are deliberately independent of admin rights — an exempt account does not need to be an admin, and an admin is not exempt unless you list them or turn `CharacterLimitExemptAdmins` on. Ids go in either form: `Steam_76561198012345678` or the bare `76561198012345678`. Note that this setting syncs to connected clients like every other server setting, so the ids in it are visible to players; if that matters for your server, the alternative is editing it in the config file with the list left empty in-game.
+
+#### Things worth knowing
+
+- **Identity is the character name.** It is the only thing about a character the server learns during the handshake. A player who deletes "Bjorn" locally and makes a new "Bjorn" gets past the check — though since this mod pushes the saved Bjorn's items and skills back on join, it is a poor way to get a clean slate.
+- **The save holds the slot, not the player.** Delete someone's save while they still have that character locally and it counts as new again next time they join.
+- If the server cannot read its character folder at all, joins are **allowed** and a warning is logged. A disk problem should not lock out your playerbase.
+- On a player-hosted (listen) server the host never goes through the connect handshake, so the host's own account is not checked. Dedicated servers check everyone.
+- Enforcement is tied to the game's network version. If Valheim ships a new one, the rule stops applying until the mod is rebuilt against it — the check goes quiet rather than guessing at a changed wire format.
+
+### Migrating from ServerCharacters
+
+Coming from [ServerCharacters](https://thunderstore.io/c/valheim/p/Smoothbrain/ServerCharacters/)? Valheim Enforcer can read the character files it leaves behind, so your players keep their inventories and skills instead of having everything confiscated on their first join.
+
+**The two mods cannot run at the same time.** They both take over character saving and would fight over every profile, so Enforcer declares ServerCharacters incompatible. Be aware of how BepInEx enforces that: it refuses to load **Enforcer**, not ServerCharacters. A server with both installed runs with no Enforcer at all — no mod enforcement, no character sync, no anti-cheat — and the only sign is a line in the BepInEx log. So the order matters:
+
+1. Stop the server.
+2. Uninstall ServerCharacters. **Leave its character files alone** — they are what gets imported.
+3. Set `ImportServerCharacters = true` in `ValheimEnforcer.cfg`.
+4. Start the server and read the log. It reports how many characters were imported, skipped or unreadable.
+5. Optionally set it back to `false`. Leaving it on is harmless — characters that already have a save are skipped, so the pass does nothing on later starts.
+
+Want to look before you leap? With the server running, an admin can use `Enforcer-Import-ServerCharacters dryrun`, which reports exactly what it would do and writes nothing. `Enforcer-Import-ServerCharacters import` runs it on demand, and adding `force` overwrites saves that already exist (normally they are left alone).
+
+The importer only ever **reads** ServerCharacters' files. Nothing is moved, renamed or deleted, so your old setup stays intact if you want to go back.
+
+#### What comes across
+
+Inventory (including item quality, variants, crafter names and the custom data mods like EpicLoot attach to items), skill levels, and per-player custom data.
+
+Food, guardian power, known recipes/stations/materials, trophies, map data and spawn points do **not** come across — Enforcer's character store does not model them. In practice players do not notice: ServerCharacters also writes each player's own local character file, so all of that is still on their machine. What the server needs is only enough to recognise their stuff and stop confiscating it.
+
+The exception is a player who has lost their local character file. Under ServerCharacters the server copy was fully authoritative and could restore everything; here they would come back with their items and skills but not their recipes or map. That is a difference between how the two mods store characters, not something the import can fix.
+
+#### Things worth knowing
+
+- Files are found automatically in the game's own character folder, which is where ServerCharacters puts them and which follows Valheim's `-savedir`. Only set `ServerCharactersImportPath` if you moved them somewhere else.
+- Backups are ignored on purpose — the `backups` folder, `.fch.old`, and `*_backup_*` files. A hardcore character that died is left dead.
+- The character name is taken from inside the profile, not the file name. ServerCharacters lowercases the file name, and its own code misreads names containing an underscore.
+- A corrupt or truncated file is skipped and reported rather than half-imported, and a file written by a newer version of Valheim than this build understands is skipped rather than guessed at.
+- If the import cannot read something, the affected player simply joins as if they were new. It never blocks a connection.
 
 ### Server Management
 

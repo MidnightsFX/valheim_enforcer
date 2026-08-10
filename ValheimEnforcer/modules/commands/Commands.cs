@@ -20,6 +20,49 @@ namespace ValheimEnforcer.modules.commands {
             //CommandManager.Instance.AddConsoleCommand(new ListPlayerConfiscatedItems());
             CommandManager.Instance.AddConsoleCommand(new ClearPlayerConfiscatedItems());
             CommandManager.Instance.AddConsoleCommand(new ReturnPlayerConfiscatedItems());
+            CommandManager.Instance.AddConsoleCommand(new ImportServerCharacters());
+        }
+
+        internal class ImportServerCharacters : ConsoleCommand {
+            public override string Name => "Enforcer-Import-ServerCharacters";
+            public override bool IsCheat => true;
+            public override string Help => "Imports character saves left behind by the ServerCharacters mod. Run 'dryrun' first to see what would happen. Characters that already have a save here are skipped unless 'force' is given. Format: Enforcer-Import-ServerCharacters dryrun|import [force]";
+
+            public override void Run(string[] args) {
+                if (args.Length < 1) {
+                    Logger.LogInfo("A mode is required. Format: Enforcer-Import-ServerCharacters dryrun|import [force]");
+                    return;
+                }
+                bool dryRun;
+                if (string.Equals(args[0], "dryrun", StringComparison.OrdinalIgnoreCase)) {
+                    dryRun = true;
+                } else if (string.Equals(args[0], "import", StringComparison.OrdinalIgnoreCase)) {
+                    dryRun = false;
+                } else {
+                    Logger.LogInfo($"Unknown mode '{args[0]}'. Use 'dryrun' or 'import'.");
+                    return;
+                }
+                bool force = args.Length > 1 && string.Equals(args[1], "force", StringComparison.OrdinalIgnoreCase);
+
+                if (ZNet.instance == null) {
+                    Logger.LogInfo("Not in a game. Start or join the server first.");
+                    return;
+                }
+
+                // IsServer rather than IsCurrentServerDedicated, which the older commands use: a client attached
+                // to somebody else's listen host must still forward, or it would import from its OWN character
+                // folder into a save the server never sees.
+                if (!ZNet.instance.IsServer()) {
+                    ZPackage package = new ZPackage();
+                    package.Write(force ? $"{args[0].ToLowerInvariant()} force" : args[0].ToLowerInvariant());
+                    ValConfig.ImportServerCharactersRPC.SendPackage(ZRoutedRpc.instance.GetServerPeerID(), package);
+                    Logger.LogInfo("Requesting the ServerCharacters import from the server...");
+                    return;
+                }
+
+                // This is the local path (listen host or singleplayer) - we are the server.
+                Logger.LogInfo(modules.migration.ServerCharactersImport.Run(dryRun, force).Summary());
+            }
         }
 
         internal class ListPlayers : ConsoleCommand {

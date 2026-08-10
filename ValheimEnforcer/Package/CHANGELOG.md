@@ -1,3 +1,27 @@
+**0.17.0**
+ ---
+ ```
+ - Adds character import from the ServerCharacters mod (ImportServerCharacters, off by default)
+    - Reads the character files ServerCharacters leaves behind and turns them into enforcer saves, so
+      migrating players keep their inventory and skills instead of being confiscated on first join
+    - Item quality, variants, crafter names and mod item data (EpicLoot and friends) come across intact,
+      as do modded skills
+    - Runs once at server start, or on demand with Enforcer-Import-ServerCharacters, which has a dryrun
+    - Existing characters are never overwritten unless 'force' is given
+ ```
+
+**0.16.0**
+ ---
+ ```
+ - Adds an optional one-character-per-account rule (EnforceCharacterLimit, off by default)
+    - An account may only join with a character the server already has a save for, up to
+      MaxCharactersPerAccount; anything else is refused at the connect handshake
+    - Characters that already exist are never affected, so enabling it locks out no current player
+    - Refused players are told which character to rejoin with, instead of a generic connection error
+    - CharacterLimitExemptAccounts allows specific accounts any number of characters, whether or not
+      they are admins; CharacterLimitExemptAdmins extends that to the whole adminlist
+ ```
+
 **0.15.0**
  ---
  ```
