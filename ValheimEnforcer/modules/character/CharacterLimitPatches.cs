@@ -1,5 +1,6 @@
 using HarmonyLib;
 using System;
+using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
 using ValheimEnforcer.common;
@@ -49,7 +50,7 @@ namespace ValheimEnforcer.modules.character {
                 if (reason == null) { return true; }
 
                 Logger.LogWarning($"Refusing '{playerName}' from {hostId}: account character limit reached.");
-                NotifyRejection(playerName, hostId);
+                NotifyRejection(playerName, hostId, reason);
 
                 // Reason first so it is ahead of the error in the send queue, then flush before anything tears
                 // the connection down - same reason FinalSaveRpc flushes.
@@ -103,12 +104,19 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
-        private static void NotifyRejection(string playerName, string hostId) {
+        /// <summary>
+        /// <paramref name="reason"/> is the same sentence the player is shown, naming the character they should
+        /// come back as. No built-in template prints it - keeping the shipped message identical to what this
+        /// mod always sent - but it is offered as {reason} for admins who want the detail in their channel.
+        /// </summary>
+        private static void NotifyRejection(string playerName, string hostId, string reason) {
             if (!ValConfig.DiscordNotifyCharacterRejected.Value) { return; }
-            DiscordEmbed embed = new DiscordEmbed("Connection Rejected: Character Limit", null, Red)
-                .AddField("Character", playerName, true)
-                .AddField("Account", hostId, true);
-            DiscordNotifier.SendAsync(embed.ToMessage());
+            DiscordNotifier.Notify(NotificationEvent.CharacterRejected, new Dictionary<string, string> {
+                { "character", playerName },
+                { "playerId", hostId },
+                { "reason", reason ?? "" },
+                { "maxCharacters", ValConfig.MaxCharactersPerAccount.Value.ToString() },
+            });
         }
 
         // ---- Client ---------------------------------------------------------------------------------------

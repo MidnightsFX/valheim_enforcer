@@ -74,8 +74,14 @@ namespace ValheimEnforcer {
         public static ConfigEntry<int> CheatScanIntervalSeconds;
 
         public static ConfigEntry<string> DiscordWebhookUrl;
+        public static ConfigEntry<string> DiscordWebhookUrlPlayerActivity;
+        public static ConfigEntry<string> DiscordWebhookUrlServerStatus;
+        public static ConfigEntry<string> DiscordWebhookUrlModeration;
+        public static ConfigEntry<string> DiscordWebhookUrlModMismatch;
+        public static ConfigEntry<string> DiscordServerLabel;
         public static ConfigEntry<bool> DiscordNotifyServerStartup;
         public static ConfigEntry<bool> DiscordNotifyServerShutdown;
+        public static ConfigEntry<bool> DiscordNotifyWorldSaved;
         public static ConfigEntry<bool> DiscordNotifyPlayerJoined;
         public static ConfigEntry<bool> DiscordNotifyPlayerLeft;
         public static ConfigEntry<bool> DiscordNotifyWrongMods;
@@ -86,9 +92,11 @@ namespace ValheimEnforcer {
         internal const string ValheimEnforcer = "ValheimEnforcer";
         internal const string CharacterFolder = "Characters";
         internal const string KnownCheatersFileName = "KnownCheaters.yaml";
+        internal const string NotificationsFileName = "Notifications.yaml";
         internal static String ModsConfigFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, ModsFileName);
         internal static String CharacterFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder);
         internal static String KnownCheatersFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, KnownCheatersFileName);
+        internal static String NotificationsFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, NotificationsFileName);
 
         internal static CustomRPC CharacterSaveRPC;
         internal static CustomRPC ReturnConfiscatedItemsRPC;
@@ -98,6 +106,7 @@ namespace ValheimEnforcer {
         internal static CustomRPC ClearConfiscatedRPC;
         internal static CustomRPC FullSyncRequestRPC;
         internal static CustomRPC ImportServerCharactersRPC;
+        internal static CustomRPC TestNotificationRPC;
 
         public ValConfig(ConfigFile cf) {
             // ensure all the config values are created
@@ -116,14 +125,17 @@ namespace ValheimEnforcer {
             ClearConfiscatedRPC = NetworkManager.Instance.AddRPC("VENFORCE_CLEAR_CONFISCATED", OnServerRecieveClearConfiscated, OnClientReceiveClearConfiscated);
             FullSyncRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_FULLSYNC_REQ", OnServerReceiveFullSyncRequest, OnClientReceiveFullSyncRequest);
             ImportServerCharactersRPC = NetworkManager.Instance.AddRPC("VENFORCE_IMPORT_SC", OnServerReceiveImportRequest, OnClientReceiveImportReport);
+            TestNotificationRPC = NetworkManager.Instance.AddRPC("VENFORCE_TEST_NOTIFY", OnServerReceiveTestNotification, OnClientReceiveTestNotificationReport);
 
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
             LoadYamlConfigs(new Dictionary<string, Action<string>>() {
                 { ModsConfigFilePath, CreateModsFile },
-                { KnownCheatersFilePath, CreateKnownCheatersFile }
+                { KnownCheatersFilePath, CreateKnownCheatersFile },
+                { NotificationsFilePath, CreateNotificationsFile }
             });
             KnownCheaterTracker.Initialize();
+            NotificationTemplates.Initialize();
         }
 
         private void CreateConfigValues(ConfigFile Config) {
@@ -189,9 +201,15 @@ namespace ValheimEnforcer {
             CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 30, "Seconds between periodic client scan ticks. The process, module and window scans are staggered across successive ticks so their cost never lands on the same frame, so each individual scan runs every three intervals. ValheimTooler assembly detection is event-driven and not affected by this interval.", false, 5, 300);
 
             // Discord notifications. These are intentionally LOCAL (non-synced) configs: the webhook URL is a secret and must not be synced to clients
-            DiscordWebhookUrl = BindLocalConfig("Discord", "WebhookUrl", "", "Discord webhook URL the server posts notifications to. This is a server-only secret and is never synced to clients. Leave empty to disable. Note: player names are sent to Discord when enabled.");
+            DiscordWebhookUrl = BindLocalConfig("Discord", "WebhookUrl", "", "Discord webhook URL the server posts notifications to. This is a server-only secret and is never synced to clients. Leave empty to disable. Note: player names are sent to Discord when enabled. Every category falls back to this URL unless it has one of its own, so a server that wants everything in one channel only needs this setting.");
+            DiscordWebhookUrlPlayerActivity = BindLocalConfig("Discord", "WebhookUrlPlayerActivity", "", "Webhook URL for player joins and leaves. Leave empty to use WebhookUrl. Set this to keep routine join/leave traffic out of the channel you actually watch - it is by far the noisiest category on a busy server.");
+            DiscordWebhookUrlServerStatus = BindLocalConfig("Discord", "WebhookUrlServerStatus", "", "Webhook URL for server startup, shutdown and world-save messages. Leave empty to use WebhookUrl.");
+            DiscordWebhookUrlModeration = BindLocalConfig("Discord", "WebhookUrlModeration", "", "Webhook URL for cheat bans and character-limit rejections. Leave empty to use WebhookUrl. This is the one worth pointing at a private moderator channel: the messages name the account behind a ban.");
+            DiscordWebhookUrlModMismatch = BindLocalConfig("Discord", "WebhookUrlModMismatch", "", "Webhook URL for connections refused over a mod mismatch. Leave empty to use WebhookUrl. Often worth a support channel of its own, since the message lists exactly which mods the player needs to fix.");
+            DiscordServerLabel = BindLocalConfig("Discord", "ServerLabel", "", "Name for this server in notification messages, available to templates as the {server} placeholder. Empty by default, and no built-in template uses it - set it only if several servers post into the same channel and you need to tell them apart. Deliberately a setting rather than the server's advertised name, so it also works on a player-hosted world.");
             DiscordNotifyServerStartup = BindLocalConfig("Discord", "NotifyServerStartup", true, "Post a message when the server comes online.");
             DiscordNotifyServerShutdown = BindLocalConfig("Discord", "NotifyServerShutdown", true, "Post a message when the server shuts down.");
+            DiscordNotifyWorldSaved = BindLocalConfig("Discord", "NotifyWorldSaved", false, "Post a message every time the world is saved, covering both the periodic autosave and a manual 'save' from the console. Off by default because the autosave fires roughly every twenty minutes, all day, whether or not anyone is playing - on most servers that buries everything else in the channel. Worth turning on temporarily when you are chasing a save problem, or permanently if it has its own channel via WebhookUrlServerStatus.");
             DiscordNotifyPlayerJoined = BindLocalConfig("Discord", "NotifyPlayerJoined", true, "Post a message when a player joins.");
             DiscordNotifyPlayerLeft = BindLocalConfig("Discord", "NotifyPlayerLeft", true, "Post a message when a player leaves, including whether their saved data is up to date.");
             DiscordNotifyWrongMods = BindLocalConfig("Discord", "NotifyWrongMods", true, "Post a message when a player is rejected for a mod mismatch, listing the offending mods.");
@@ -302,6 +320,12 @@ namespace ValheimEnforcer {
                     Logger.LogDebug("Triggering KnownCheaters list update.");
                     KnownCheaterTracker.LoadFromText(filetext);
                     break;
+                case NotificationsFileName:
+                    Logger.LogDebug("Triggering notification template update.");
+                    // Deliberately not persisting the filled-in defaults here, unlike the startup path: an admin
+                    // mid-edit would get their file rewritten under them one poll after every save.
+                    NotificationTemplates.LoadFromText(filetext);
+                    break;
             }
         }
 
@@ -314,6 +338,14 @@ namespace ValheimEnforcer {
                 writetext.WriteLine();
                 writetext.WriteLine(ModManager.GetDefaultConfig());
             }
+        }
+
+        private static void CreateNotificationsFile(string filepath) {
+            Logger.LogDebug("Notification templates file missing, recreating.");
+            // The embedded copy verbatim - banner and templates together, exactly as it sits in the repo. Not
+            // reserialized from the parsed object: the file is hand-authored JSON inside YAML, and a round trip
+            // through the serializer would reflow it into something less pleasant to read than what was written.
+            File.WriteAllText(filepath, NotificationTemplates.GetDefaultConfig());
         }
 
         private static void CreateKnownCheatersFile(string filepath) {
@@ -572,11 +604,13 @@ namespace ValheimEnforcer {
             ZNet.instance.Ban(playerName);
 
             if (ValConfig.DiscordNotifyCheaterBanned.Value) {
-                DiscordEmbed embed = new DiscordEmbed("Cheater Banned", null, Red)
-                    .AddField("Player", playerName, true)
-                    .AddField("Detected", reason, true)
-                    .AddField("Host ID", hostId, false);
-                DiscordNotifier.SendAsync(embed.ToMessage());
+                DiscordNotifier.Notify(NotificationEvent.CheaterBanned, new Dictionary<string, string> {
+                    { "player", playerName },
+                    { "playerId", hostId },
+                    { "reason", reason },
+                    { "detections", DescribeDetectedTools(summary) },
+                    { "action", "Ban" },
+                });
             }
         }
 
@@ -639,6 +673,63 @@ namespace ValheimEnforcer {
             ZPackage reply = new ZPackage();
             reply.Write(summary);
             ValConfig.ImportServerCharactersRPC.SendPackage(sender, reply);
+            yield break;
+        }
+
+        public static IEnumerator OnClientReceiveTestNotificationReport(long sender, ZPackage package) {
+            foreach (string line in package.ReadString().Split('\n')) {
+                Logger.LogInfo(line.TrimEnd());
+            }
+            yield break;
+        }
+
+        /// <summary>
+        /// The last time a test notification was accepted, so a held-down key cannot walk the webhook into
+        /// Discord's rate limiter. Getting a webhook temporarily throttled would silence the real notifications
+        /// too, which is a bad trade for a preview command.
+        /// </summary>
+        private static DateTime lastTestNotification = DateTime.MinValue;
+        private static readonly TimeSpan TestNotificationCooldown = TimeSpan.FromSeconds(3);
+
+        /// <summary>
+        /// Posts one sample notification on behalf of an admin running Enforcer-Test-Notification from a
+        /// connected client, and reports the outcome back to them.
+        ///
+        /// Admin gated on the server, for the same reason the ServerCharacters import is: IsCheat on the console
+        /// command only gates the vanilla client, and this handler makes the server send an outbound HTTP
+        /// request to a webhook URL that clients are deliberately never told. Taking a crafted client's word for
+        /// who is asking would hand every connected player a button that posts into the server's Discord.
+        /// </summary>
+        public static IEnumerator OnServerReceiveTestNotification(long sender, ZPackage package) {
+            ZNetPeer peer = ZNet.instance?.GetPeer(sender);
+            string hostId = peer?.m_socket?.GetHostName();
+            if (string.IsNullOrEmpty(hostId) || !ZNet.instance.IsAdmin(hostId)) {
+                Logger.LogWarning($"Ignoring a test notification request from non-admin {hostId ?? sender.ToString()}.");
+                yield break;
+            }
+
+            string requested = package.ReadString() ?? "";
+            string reply;
+            if (!Enum.TryParse(requested, true, out NotificationEvent evt) || !Enum.IsDefined(typeof(NotificationEvent), evt)) {
+                // IsDefined as well as TryParse: TryParse happily accepts a bare number for any enum, so "99"
+                // would otherwise come through as a NotificationEvent nothing can render.
+                reply = $"Unknown notification event '{requested}'. One of: {string.Join(", ", Enum.GetNames(typeof(NotificationEvent)))}";
+            } else if (DateTime.UtcNow - lastTestNotification < TestNotificationCooldown) {
+                reply = "A test notification was just sent - wait a moment before sending another.";
+            } else if (!DiscordNotifier.IsValidWebhookUrl(DiscordNotifier.ResolveUrl(NotificationTemplates.CategoryOf(evt)))) {
+                reply = $"No usable webhook URL for the {NotificationTemplates.CategoryOf(evt)} category. Set Discord.WebhookUrl on the server, or the URL for that category.";
+            } else {
+                lastTestNotification = DateTime.UtcNow;
+                DiscordNotifier.Notify(evt, NotificationTemplates.SampleTokens());
+                reply = $"Posted a sample {evt} notification to the {NotificationTemplates.CategoryOf(evt)} webhook.";
+                Logger.LogInfo($"{reply} Requested by admin {hostId}.");
+            }
+
+            // Write the text into the package rather than using the ZPackage(string) constructor: that overload
+            // is a base64 decoder (Convert.FromBase64String) and throws on arbitrary text.
+            ZPackage response = new ZPackage();
+            response.Write(reply);
+            ValConfig.TestNotificationRPC.SendPackage(sender, response);
             yield break;
         }
 

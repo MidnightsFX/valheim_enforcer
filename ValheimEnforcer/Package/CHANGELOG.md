@@ -1,3 +1,23 @@
+**0.18.0**
+ ---
+ ```
+ - Discord notifications can now be split across channels
+    - WebhookUrlPlayerActivity, WebhookUrlServerStatus, WebhookUrlModeration and WebhookUrlModMismatch
+      each take a webhook of their own; any left empty falls back to WebhookUrl as before
+ - Every notification is now a template you can edit, in config/ValheimEnforcer/Notifications.yaml
+    - Each entry is the literal message body posted to Discord, anything Discord accepts works, including
+      author/footer/thumbnail/image
+    - Deleting a key deletes that part of the message: drop "timestamp" and no date stamp is sent,
+      drop "embeds" and it becomes a plain text post. Nothing is added back for you
+    - A 'content' line is the only place a mention pings - use it for role alerts
+    - Placeholders like {player}, {playerId}, {reason} and {missingMods}; a mod mismatch also exposes
+      its missing/extra/version/hash lists separately instead of one block of prose
+ - Adds a world save notification (NotifyWorldSaved, off by default - the autosave is every ~20 minutes)
+ - Adds ServerLabel, exposed to templates as {server}, for several servers sharing one channel
+ - Adds Enforcer-Test-Notification, which posts any event with sample data so a template can be
+   previewed without waiting for the real thing
+ ```
+
 **0.17.0**
  ---
  ```

@@ -1,0 +1,154 @@
+#################################################
+# Valheim Enforcer - Notification Templates
+#
+# Each entry below is the EXACT message body posted to Discord. Nothing is added to it and nothing
+# is filled in for you - what you write here is what gets sent, once the {placeholders} have been
+# swapped for real values.
+#
+# Re-read within ConfigPollIntervalSeconds of being saved, so an edit takes effect without a
+# restart. Comments are kept: a note on its own line stays with the entry below it. A comment
+# sharing a line with a value is not kept, because that line gets rewritten.
+#
+# ---------------------------------------------------------------------------------------------
+# REMOVING THINGS
+#
+# Because the body is sent as written, deleting a key deletes that part of the message.
+#
+#   "timestamp"            no date stamp under the embed
+#   "title" / "description"  that line is gone
+#   one entry in "fields"  that row is gone
+#   "fields"               no rows at all
+#   "color"                no coloured stripe down the left edge
+#   "content"              no plain text line above the embed, and no pings
+#   "embeds"               a plain text message and nothing else - needs "content" to survive
+#   the whole event key    the built-in default comes back next start
+#
+# Watch the commas when you delete something: JSON does not allow one before a } or a ]. A broken
+# template is reported in the log with a line and column, and that event falls back to its default
+# until you fix it.
+#
+# To stop an event posting at all, turn off its Notify* setting in the main config file. Emptying
+# its template is not the way - Discord rejects a message with no content and no embeds.
+# ---------------------------------------------------------------------------------------------
+#
+# PLACEHOLDERS, written {likeThis}. Available to every event:
+#   {server}         ServerLabel from the main config, empty unless you set it
+#   {world}          world name
+#   {onlinePlayers}  how many are connected
+#   {timestamp}      current time, in the ISO-8601 form Discord's "timestamp" field wants
+#   {colorGreen} {colorAmber} {colorRed} {colorGrey}   the numbers Discord wants for "color"
+#
+# And per event:
+#   playerJoined       {player} {playerId} {isAdmin}
+#   playerLeft         {player} {playerId} {disconnect} {savedData} {deltaWindow} {statusColor}
+#   cheaterBanned      {player} {playerId} {reason} {detections} {action}
+#   characterRejected  {character} {playerId} {reason} {maxCharacters}
+#   modMismatch        {player} {playerId} {summary} {missingMods} {extraMods}
+#                      {versionMismatches} {adminOnlyMods} {hashMismatches} {unverifiedMods}
+#
+# {statusColor} is green after a clean logout and amber after a crash or timeout.
+# A name that is not a placeholder is left in the message exactly as typed, so a mistyped one
+# shows up in Discord rather than quietly blanking.
+#
+# Values are escaped before they go in, so a player name containing a quote cannot break the
+# document, and are truncated if they are long enough to hit Discord's own limits.
+#
+# MENTIONS ONLY PING FROM "content". Discord never resolves one inside an embed. Use
+# <@&ROLEID> for a role and <@USERID> for a person - and note that @everyone works here too, on
+# every single occurrence of that event.
+#
+# Anything Discord accepts works: author, footer, thumbnail, image, url, several embeds at once.
+# Their reference is https://discord.com/developers/docs/resources/webhook
+#################################################
+
+serverStartup: |
+  {
+    "embeds": [{
+      "title": "Server Online",
+      "description": "The server has started and is accepting connections.",
+      "color": {colorGreen},
+      "timestamp": "{timestamp}"
+    }]
+  }
+serverShutdown: |
+  {
+    "embeds": [{
+      "title": "Server Offline",
+      "description": "The server is shutting down.",
+      "color": {colorGrey},
+      "timestamp": "{timestamp}"
+    }]
+  }
+worldSaved: |
+  {
+    "embeds": [{
+      "title": "World Saved",
+      "color": {colorGrey},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "World", "value": "{world}", "inline": true},
+        {"name": "Players online", "value": "{onlinePlayers}", "inline": true}
+      ]
+    }]
+  }
+playerJoined: |
+  {
+    "embeds": [{
+      "title": "Player Joined",
+      "color": {colorGreen},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "Player", "value": "{player}", "inline": true}
+      ]
+    }]
+  }
+playerLeft: |
+  {
+    "embeds": [{
+      "title": "Player Left",
+      "color": {statusColor},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "Player", "value": "{player}", "inline": true},
+        {"name": "Disconnect", "value": "{disconnect}", "inline": true},
+        {"name": "Saved data", "value": "{savedData}", "inline": false}
+      ]
+    }]
+  }
+cheaterBanned: |
+  {
+    "embeds": [{
+      "title": "Cheater Banned",
+      "color": {colorRed},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "Player", "value": "{player}", "inline": true},
+        {"name": "Detected", "value": "{reason}", "inline": true},
+        {"name": "Host ID", "value": "{playerId}", "inline": false}
+      ]
+    }]
+  }
+characterRejected: |
+  {
+    "embeds": [{
+      "title": "Connection Rejected: Character Limit",
+      "color": {colorRed},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "Character", "value": "{character}", "inline": true},
+        {"name": "Account", "value": "{playerId}", "inline": true}
+      ]
+    }]
+  }
+modMismatch: |
+  {
+    "embeds": [{
+      "title": "Connection Rejected: Mod Mismatch",
+      "description": "{summary}",
+      "color": {colorRed},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "Player", "value": "{player}", "inline": true}
+      ]
+    }]
+  }
