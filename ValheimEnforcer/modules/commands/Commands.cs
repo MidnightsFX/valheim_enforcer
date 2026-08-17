@@ -10,6 +10,7 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 using ValheimEnforcer.common;
+using ValheimEnforcer.modules.notifications;
 using static Mono.Security.X509.X520;
 using static ValheimEnforcer.common.DataObjects;
 
@@ -20,6 +21,114 @@ namespace ValheimEnforcer.modules.commands {
             //CommandManager.Instance.AddConsoleCommand(new ListPlayerConfiscatedItems());
             CommandManager.Instance.AddConsoleCommand(new ClearPlayerConfiscatedItems());
             CommandManager.Instance.AddConsoleCommand(new ReturnPlayerConfiscatedItems());
+            CommandManager.Instance.AddConsoleCommand(new ImportServerCharacters());
+            CommandManager.Instance.AddConsoleCommand(new TestNotification());
+        }
+
+        /// <summary>
+        /// Posts one notification with stand-in data, so an admin editing Notifications.yaml can see the result
+        /// without waiting for the real event. Without it, checking a mod-mismatch template means talking
+        /// somebody into connecting with the wrong mods.
+        ///
+        /// Runs from a connected admin's client as well as the server console, forwarding over an RPC in that
+        /// case. The webhook URL is never synced to clients, so the client cannot decide whether a post is
+        /// possible or send one itself - the server does the work and reports back what happened. The RPC is
+        /// admin gated server side; see ValConfig.OnServerReceiveTestNotification for why that matters.
+        /// </summary>
+        internal class TestNotification : ConsoleCommand {
+            public override string Name => "Enforcer-Test-Notification";
+            public override bool IsCheat => true;
+            public override string Help => "Posts one Discord notification using sample data, to preview a template from Notifications.yaml. Ignores the Notify* on/off settings but still needs a webhook URL. Server admins only. Format: Enforcer-Test-Notification <event>, or 'list' for the event names.";
+
+            public override List<string> CommandOptionList() {
+                return Enum.GetNames(typeof(NotificationEvent)).ToList();
+            }
+
+            public override void Run(string[] args) {
+                if (args.Length < 1) {
+                    Logger.LogInfo($"An event is required. One of: {string.Join(", ", Enum.GetNames(typeof(NotificationEvent)))}");
+                    return;
+                }
+                if (string.Equals(args[0], "list", StringComparison.OrdinalIgnoreCase)) {
+                    Logger.LogInfo($"Notification events: {string.Join(", ", Enum.GetNames(typeof(NotificationEvent)))}");
+                    return;
+                }
+                // Parsed here purely to catch a typo before it costs a round trip; the server parses the name
+                // again rather than trusting this one.
+                if (!Enum.TryParse(args[0], true, out NotificationEvent evt) || !Enum.IsDefined(typeof(NotificationEvent), evt)) {
+                    Logger.LogInfo($"Unknown event '{args[0]}'. One of: {string.Join(", ", Enum.GetNames(typeof(NotificationEvent)))}");
+                    return;
+                }
+
+                if (ZNet.instance == null) {
+                    Logger.LogInfo("Not in a game. Join the server first.");
+                    return;
+                }
+
+                // IsServer rather than IsCurrentServerDedicated, matching Enforcer-Import-ServerCharacters: a
+                // client attached to somebody else's listen host must still forward, because the templates and
+                // the webhook live on that host, not here.
+                if (!ZNet.instance.IsServer()) {
+                    ZPackage package = new ZPackage();
+                    package.Write(evt.ToString());
+                    ValConfig.TestNotificationRPC.SendPackage(ZRoutedRpc.instance.GetServerPeerID(), package);
+                    Logger.LogInfo($"Asking the server to post a sample {evt} notification...");
+                    return;
+                }
+
+                // This is the local path (listen host or singleplayer) - we are the server.
+                if (!DiscordNotifier.IsValidWebhookUrl(DiscordNotifier.ResolveUrl(NotificationTemplates.CategoryOf(evt)))) {
+                    Logger.LogInfo($"No usable webhook URL for the {NotificationTemplates.CategoryOf(evt)} category. Set Discord.WebhookUrl, or the URL for that category.");
+                    return;
+                }
+
+                // The same bag the load-time validity check renders with, so what this previews is exactly what
+                // that check accepted.
+                DiscordNotifier.Notify(evt, NotificationTemplates.SampleTokens());
+                Logger.LogInfo($"Posted a sample {evt} notification to the {NotificationTemplates.CategoryOf(evt)} webhook.");
+            }
+        }
+
+        internal class ImportServerCharacters : ConsoleCommand {
+            public override string Name => "Enforcer-Import-ServerCharacters";
+            public override bool IsCheat => true;
+            public override string Help => "Imports character saves left behind by the ServerCharacters mod. Run 'dryrun' first to see what would happen. Characters that already have a save here are skipped unless 'force' is given. Format: Enforcer-Import-ServerCharacters dryrun|import [force]";
+
+            public override void Run(string[] args) {
+                if (args.Length < 1) {
+                    Logger.LogInfo("A mode is required. Format: Enforcer-Import-ServerCharacters dryrun|import [force]");
+                    return;
+                }
+                bool dryRun;
+                if (string.Equals(args[0], "dryrun", StringComparison.OrdinalIgnoreCase)) {
+                    dryRun = true;
+                } else if (string.Equals(args[0], "import", StringComparison.OrdinalIgnoreCase)) {
+                    dryRun = false;
+                } else {
+                    Logger.LogInfo($"Unknown mode '{args[0]}'. Use 'dryrun' or 'import'.");
+                    return;
+                }
+                bool force = args.Length > 1 && string.Equals(args[1], "force", StringComparison.OrdinalIgnoreCase);
+
+                if (ZNet.instance == null) {
+                    Logger.LogInfo("Not in a game. Start or join the server first.");
+                    return;
+                }
+
+                // IsServer rather than IsCurrentServerDedicated, which the older commands use: a client attached
+                // to somebody else's listen host must still forward, or it would import from its OWN character
+                // folder into a save the server never sees.
+                if (!ZNet.instance.IsServer()) {
+                    ZPackage package = new ZPackage();
+                    package.Write(force ? $"{args[0].ToLowerInvariant()} force" : args[0].ToLowerInvariant());
+                    ValConfig.ImportServerCharactersRPC.SendPackage(ZRoutedRpc.instance.GetServerPeerID(), package);
+                    Logger.LogInfo("Requesting the ServerCharacters import from the server...");
+                    return;
+                }
+
+                // This is the local path (listen host or singleplayer) - we are the server.
+                Logger.LogInfo(modules.migration.ServerCharactersImport.Run(dryRun, force).Summary());
+            }
         }
 
         internal class ListPlayers : ConsoleCommand {

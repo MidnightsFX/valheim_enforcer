@@ -20,15 +20,16 @@ namespace ValheimEnforcer
     [BepInDependency(Jotunn.Main.ModGuid)]
     [NetworkCompatibility(CompatibilityLevel.EveryoneMustHaveMod, VersionStrictness.Minor)]
     [BepInDependency("shudnal.ExtraSlots", BepInDependency.DependencyFlags.SoftDependency)]
+    // ServerCharacters owns character saving the same way this mod does; running both would have them fight
+    // over every profile. BepInEx enforces this by refusing to load US when it is present, so a server with
+    // both installed runs with no enforcement at all - hence the loud ordering note in the README: uninstall
+    // ServerCharacters first, then enable ImportServerCharacters to pick up the files it left behind.
+    [BepInIncompatibility("org.bepinex.plugins.servercharacters")]
     internal class ValheimEnforcer : BaseUnityPlugin
     {
         public const string PluginGUID = "MidnightsFX.ValheimEnforcer";
         public const string PluginName = "ValheimEnforcer";
-        // Minor bump, not a patch, and that matters. New fields on the Mods handshake payload make an older
-        // peer's deserializer throw, which would silently skip its mod validation entirely. VersionStrictness
-        // .Minor on the NetworkCompatibility attribute above is what keeps a mixed-version pair from connecting
-        // in the first place - so this must not be renumbered to 0.14.2.
-        public const string PluginVersion = "0.15.0";
+        public const string PluginVersion = "0.18.0";
 
         internal static ManualLogSource Log;
         internal ValConfig cfg;

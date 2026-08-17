@@ -239,9 +239,31 @@ namespace ValheimEnforcer.modules {
             }
         }
 
-        internal static bool ValidateModlist(Mods CheckingMods, Mods AuthoratativeMods, bool isAdmin, bool adminStatusKnown, out string summay, out string details) {
+        /// <summary>
+        /// Everything the validator worked out, kept apart instead of flattened into the summary string.
+        ///
+        /// The summary is written for a player staring at a connection-failed panel, so it reads as prose. A
+        /// Discord template wants to address the categories individually - ping the mod team only for a hash
+        /// mismatch, list the missing mods and nothing else - which needs the lists before they are joined up.
+        /// </summary>
+        internal class ModMismatchDetail {
+            internal List<string> MissingMods = new List<string>();
+            internal List<string> ExtraMods = new List<string>();
+            internal List<string> VersionMismatches = new List<string>();
+            internal List<string> AdminOnlyMods = new List<string>();
+            internal List<string> HashMismatches = new List<string>();
+            internal List<string> UnverifiedMods = new List<string>();
+
+            /// <summary>Comma-separated, or an empty string so the field carrying it drops out of the message.</summary>
+            internal static string Join(List<string> entries) {
+                return entries == null || entries.Count == 0 ? "" : string.Join(", ", entries);
+            }
+        }
+
+        internal static bool ValidateModlist(Mods CheckingMods, Mods AuthoratativeMods, bool isAdmin, bool adminStatusKnown, out string summay, out string details, out ModMismatchDetail detail) {
             summay = "";
             details = "";
+            detail = new ModMismatchDetail();
             List<string> extraMods = new List<string>();
             List<string> versionMismatch = new List<string>();
             List<string> adminOnlyNotAllowed = new List<string>();
@@ -325,6 +347,17 @@ namespace ValheimEnforcer.modules {
                 }
             }
 
+
+            // The same lists the summary is built from, kept addressable for the Discord template. hashUnverifiable
+            // and hashNotRecorded are merged: both mean "the server could not confirm this file", and the split
+            // between them is a detail of HashEnforcement rather than something a channel message acts on.
+            detail.MissingMods = requiredModsMissing;
+            detail.ExtraMods = extraMods;
+            detail.VersionMismatches = versionMismatch;
+            detail.AdminOnlyMods = adminOnlyNotAllowed;
+            detail.HashMismatches = hashMismatch;
+            detail.UnverifiedMods = new List<string>(hashUnverifiable);
+            detail.UnverifiedMods.AddRange(hashNotRecorded);
 
             if (versionMismatch.Count > 0) {
                 Logger.LogWarning($"Mods version mismatch with the server found:");
@@ -536,7 +569,9 @@ namespace ValheimEnforcer.modules {
                 // Client cannot trust its admin status during the handshake: Jotunn syncs it only
                 // after login (post-RPC_PeerInfo) and PlayerIsAdmin defaults to true. Pass it as
                 // unknown so admin-only mods are surfaced as a neutral note rather than a false pass.
-                bool modsvalid = ValidateModlist(ModSettings, serverMods, isAdmin: false, adminStatusKnown: false, out string summary, out string details);
+                // The structured detail is server-side notification material; the client only needs the text it
+                // puts in the connection-failed panel.
+                bool modsvalid = ValidateModlist(ModSettings, serverMods, isAdmin: false, adminStatusKnown: false, out string summary, out string details, out _);
 
                 // Always update so a clean run clears any note left over from a previous attempt.
                 DetailsUpdater?.UpdateErrorText(summary, details);
@@ -550,13 +585,22 @@ namespace ValheimEnforcer.modules {
                 Mods clientMods = new Mods().FromZPackage(data);
                 bool isadmin = ZNet.instance.IsAdmin(sender.m_socket.GetHostName());
                 Logger.LogDebug($"Server received server mod data from {peerAddress} Admin?{isadmin}: Required: {clientMods.RequiredMods.Count}, Optional: {clientMods.OptionalMods.Count}, AdminOnly: {clientMods.AdminOnlyMods.Count} mods");;
-                bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, adminStatusKnown: true, out string summary, out string details);
+                bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, adminStatusKnown: true, out string summary, out string details, out ModMismatchDetail detail);
                 if (modsvalid == false) {
                     Logger.LogWarning($"Mod compatibility check failed for client at {peerAddress}\n{summary}");
                     if (ValConfig.DiscordNotifyWrongMods.Value) {
                         string playerName = ResolvePeerName(sender) ?? peerAddress;
-                        DiscordEmbed embed = new DiscordEmbed("Connection Rejected: Mod Mismatch", summary.Trim(), Red).AddField("Player", playerName, true);
-                        DiscordNotifier.SendAsync(embed.ToMessage());
+                        DiscordNotifier.Notify(NotificationEvent.ModMismatch, new Dictionary<string, string> {
+                            { "player", playerName },
+                            { "playerId", sender.m_socket?.GetHostName() ?? "" },
+                            { "summary", summary.Trim() },
+                            { "missingMods", ModMismatchDetail.Join(detail.MissingMods) },
+                            { "extraMods", ModMismatchDetail.Join(detail.ExtraMods) },
+                            { "versionMismatches", ModMismatchDetail.Join(detail.VersionMismatches) },
+                            { "adminOnlyMods", ModMismatchDetail.Join(detail.AdminOnlyMods) },
+                            { "hashMismatches", ModMismatchDetail.Join(detail.HashMismatches) },
+                            { "unverifiedMods", ModMismatchDetail.Join(detail.UnverifiedMods) },
+                        });
                     }
                     RejectPeer(sender);
                 }
