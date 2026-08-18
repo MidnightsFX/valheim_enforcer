@@ -6,6 +6,8 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
     internal enum MatchMode { Exact, Prefix, Contains }
 
+    internal enum WindowMatch { None, Weak, Strong }
+
     /// <summary>
     /// One cheat tool and the fingerprints that identify it. A tool may be detectable through any
     /// combination of vectors; process names alone are trivially defeated by renaming the executable,
@@ -21,6 +23,12 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         public string[] ModuleNames = Empty;
         /// <summary>Prefix-matched against top-level window class names.</summary>
         public string[] WindowClasses = Empty;
+        /// <summary>
+        /// Exact-matched window class names that are too generic to convict on their own (framework
+        /// defaults shared by legitimate software). A weak match is reported and logged server-side
+        /// but never kicked or banned without a strong detection.
+        /// </summary>
+        public string[] WeakWindowClasses = Empty;
         /// <summary>Matched against top-level window titles.</summary>
         public string[] WindowTitles = Empty;
         /// <summary>
@@ -119,13 +127,15 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 ProcessNames = new[] { "wand", "infinity" }, ProcessMatch = MatchMode.Exact,
                 WindowTitles = new[] { "Wand" }, WindowTitleMatch = MatchMode.Exact
             },
-            // TfrmMain/TfrmMemView survive renaming the executable. The title check is a bare
-            // "Cheat Engine" prefix because 7.6 dropped the version number from the caption.
+            // TfrmMain/TfrmMemView survive renaming the executable, but they are Delphi's default
+            // class names for forms called frmMain/frmMemView - any Delphi/Lazarus app can carry
+            // them (Wondershare Helper does), so they are weak: logged, never enforced. The title
+            // check is a bare "Cheat Engine" prefix because 7.6 dropped the version from the caption.
             new CheatToolSignature {
                 Tool = "CheatEngine",
                 ProcessNames = new[] { "cheatengine", "cheat engine", "magic-engine" }, ProcessMatch = MatchMode.Prefix,
                 ModuleNames = new[] { "speedhack-", "dbk32", "dbk64", "vehdebug" },
-                WindowClasses = new[] { "TfrmMain", "TfrmMemView" },
+                WeakWindowClasses = new[] { "TfrmMain", "TfrmMemView" },
                 WindowTitles = new[] { "Cheat Engine" }
             },
             // Contains-matching covers "ArtMoney SE", "ArtMoney Pro" and "ArtMoneyProPortable".
@@ -235,6 +245,49 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 ignoreListRaw = raw;
             }
             return ignoreListParsed;
+        }
+
+        // Window classes whose captions show content being VIEWED rather than software being RUN:
+        // browsers and Electron/CEF apps put page and video titles there, File Explorer shows folder
+        // names, terminals show paths and running commands. A YouTube tab called "cheat engine
+        // tutorial" is not Cheat Engine, so title matching is skipped for these windows - which also
+        // keeps browsing activity out of the detection report entirely. Class matching still applies;
+        // no cheat tool ships under a browser's window class. Known cost: Electron-based tools
+        // (WeMod's desktop app) lose their title vector, but keep their process and module vectors.
+        private static readonly string[] ContentHostWindowClasses = {
+            "Chrome_WidgetWin_",            // Chrome, Edge, Brave, Opera, Electron (Discord, WeMod), CEF
+            "Mozilla",                      // Firefox (MozillaWindowClass and dialog variants)
+            "ApplicationFrameWindow",       // UWP host frames
+            "IEFrame",                      // Internet Explorer / legacy Edge
+            "CabinetWClass",                // File Explorer - a folder named after a tool is not the tool
+            "ExploreWClass",                // File Explorer, legacy class
+            "ConsoleWindowClass",           // conhost terminals
+            "CASCADIA_HOSTING_WINDOW_CLASS" // Windows Terminal
+        };
+
+        internal static bool IsContentHostWindow(string windowClass) {
+            return Matches(windowClass, ContentHostWindowClasses, MatchMode.Prefix);
+        }
+
+        /// <summary>
+        /// Classifies one window against one signature. Strong matches are enforceable; weak ones
+        /// (generic class names) only ever produce a server log line. Weak classes match exactly:
+        /// they are framework defaults, and a prefix would only widen an already-weak signal.
+        /// Titles are ignored on content-host windows (browsers, Explorer, terminals), whose
+        /// captions describe what the user is looking at, not what they are running.
+        /// </summary>
+        internal static WindowMatch MatchWindow(string windowClass, string windowTitle, CheatToolSignature sig) {
+            if (Matches(windowClass, sig.WindowClasses, MatchMode.Prefix)) {
+                return WindowMatch.Strong;
+            }
+            if (!IsContentHostWindow(windowClass) &&
+                Matches(windowTitle, sig.WindowTitles, sig.WindowTitleMatch)) {
+                return WindowMatch.Strong;
+            }
+            if (Matches(windowClass, sig.WeakWindowClasses, MatchMode.Exact)) {
+                return WindowMatch.Weak;
+            }
+            return WindowMatch.None;
         }
 
         internal static bool Matches(string candidate, string[] needles, MatchMode mode) {

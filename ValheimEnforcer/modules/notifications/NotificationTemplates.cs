@@ -325,7 +325,7 @@ namespace ValheimEnforcer.modules.notifications {
                 { "summary", "This is a sample mod mismatch. Nobody was actually rejected." },
                 { "missingMods", "com.example.SampleMod" },
                 { "extraMods", "com.example.NotAllowed" },
-                { "versionMismatches", "com.example.WrongVersion" },
+                { "versionMismatches", "com.example.WrongVersion (needs 1.4.2, has 1.3.0)" },
                 { "adminOnlyMods", "com.example.AdminTool" },
                 { "hashMismatches", "com.example.Recompiled" },
                 { "unverifiedMods", "com.example.Unpinned" },

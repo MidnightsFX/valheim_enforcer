@@ -190,14 +190,14 @@ namespace ValheimEnforcer {
             EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Master switch for client-side cheat scanning. When enabled the client checks running processes, the DLLs loaded into the game, and open window titles against a catalog of known cheat tools. Only matched entries are reported to the server - the player's full process list is never transmitted.");
             DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Detect ValheimTooler by the namespace of the types it loads (rename-proof), including assemblies injected mid-session. A confirmed detection is always auto-banned regardless of ActionOnDetection. High confidence, very low cost.");
             DetectCheatTools = BindServerConfig("Anti-Cheat", "DetectCheatTools", true, "Scan for the built-in catalog of known cheat tools: WeMod/Wand, ArtMoney, PLITCH, Speed Gear, Squalr, WPE Pro, and the injectors/loaders used to deliver Valheim cheats (SharpMonoInjector, Xenos, Extreme Injector, ValheimTooler launcher, ValHack, Valheim Mod Menu). Tools with no legitimate purpose are auto-banned; the rest follow ActionOnDetection.");
-            DetectCheatEngine = BindServerConfig("Anti-Cheat", "DetectCheatEngine", true, "Include Cheat Engine in the catalog scan (process names, TfrmMain/TfrmMemView windows, and injected speedhack/DBK modules). Note: Cheat Engine has legitimate uses — prefer Log action over Kick/Ban. Requires DetectCheatTools.");
+            DetectCheatEngine = BindServerConfig("Anti-Cheat", "DetectCheatEngine", true, "Include Cheat Engine in the catalog scan (process names, window titles, and injected speedhack/DBK modules). Its TfrmMain/TfrmMemView window classes are generic Delphi names shared by legitimate software, so a class-only sighting is logged but never kicked or banned. Note: Cheat Engine has legitimate uses — prefer Log action over Kick/Ban. Requires DetectCheatTools.");
             DetectGenericTrainers = BindServerConfig("Anti-Cheat", "DetectGenericTrainers", true, "Flag any running process whose executable name contains the word 'trainer' (e.g. 'Valheim Trainer.exe', 'Hitman 3 Trainer - FLiNG.exe'). Catches FLiNG, MrAntiFun and Cheat Happens trainers without listing each one. Follows ActionOnDetection.");
             ScanLoadedModules = BindServerConfig("Anti-Cheat", "ScanLoadedModules", true, "Scan the native DLLs loaded into the game process itself. This is the only way to see a cheat that has already injected and then closed its launcher, and it survives renaming the tool's executable. Cheap - the module list is local to our own process.");
-            ScanWindowTitles = BindServerConfig("Anti-Cheat", "ScanWindowTitles", true, "Scan open window classes and titles. Catches tools that have been renamed to evade the process-name check, most notably Cheat Engine (window class TfrmMain is not affected by renaming the exe).");
+            ScanWindowTitles = BindServerConfig("Anti-Cheat", "ScanWindowTitles", true, "Scan open window classes and titles. Catches tools that have been renamed to evade the process-name check, most notably Cheat Engine. Generic framework window classes (e.g. Delphi's TfrmMain) are treated as low confidence: the server logs the sighting but takes no action on it alone.");
             AdditionalCheatProcesses = BindServerConfig("Anti-Cheat", "AdditionalCheatProcesses", "", "Comma-separated list of extra process names to treat as cheat tools, without the '.exe' suffix, matched exactly and case-insensitively. Empty by default. Suggested opt-in values for strict servers: x64dbg, x32dbg, x96dbg, ProcessHacker, SystemInformer, HxD, ReClass.NET, ollydbg, Scylla_x64, frida, Fiddler, Charles. WARNING: every one of those is a standard developer tool with heavy legitimate use by modders and streamers, which is why none of them ship enabled. Deliberately excluded from the built-in catalog and NOT recommended here: Aurora (collides with Aurora RGB lighting software), Process Lasso (a CPU priority optimiser, not a speedhack), AutoHotkey (compiled scripts take arbitrary names, so the check is worthless, and it is widely used for accessibility and key remapping), and MSI Afterburner/RivaTuner/OBS (their overlay DLLs look injector-shaped).");
             IgnoredCheatProcesses = BindServerConfig("Anti-Cheat", "IgnoredCheatProcesses", "", "Comma-separated allowlist of process, module or window names to never flag, matched as a case-insensitive substring. Applied last, so it overrides the built-in catalog and AdditionalCheatProcesses. Use this to keep playing when a legitimate program trips a signature.");
             //DetectSpeedhack = BindServerConfig("Anti-Cheat", "DetectSpeedhack", true, "Detect speedhack via Unity time vs. wall-clock drift.");
-            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a cheat tool is reported. Note that dedicated game-cheating tools (injectors, ValheimTooler, ValHack, Valheim Mod Menu) are always auto-banned regardless of this setting.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
+            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a cheat tool is reported. Note that dedicated game-cheating tools (injectors, ValheimTooler, ValHack, Valheim Mod Menu) are always auto-banned regardless of this setting, and low-confidence sightings (generic window classes) are always logged only, regardless of this setting.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
             CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 30, "Seconds between periodic client scan ticks. The process, module and window scans are staggered across successive ticks so their cost never lands on the same frame, so each individual scan runs every three intervals. ValheimTooler assembly detection is event-driven and not affected by this interval.", false, 5, 300);
 
             // Discord notifications. These are intentionally LOCAL (non-synced) configs: the webhook URL is a secret and must not be synced to clients
@@ -554,6 +554,10 @@ namespace ValheimEnforcer {
                 yield break;
             }
 
+            // Enforcement targets the reporting peer's socket host id (SteamID/PlatformUserID),
+            // never the client-supplied character name: names are spoofable and collide, so a
+            // crafted report could otherwise kick or ban a different online player.
+            string hostId = peer.m_socket.GetHostName();
             string endpoint = peer.m_socket.GetEndPointString();
             Logger.LogWarning($"Cheat detection from {playerName} ({endpoint}): valheim-tooler: {summary.ValheimToolerStatus} tools: {DescribeDetectedTools(summary)}");
 
@@ -564,17 +568,30 @@ namespace ValheimEnforcer {
                 yield break;
             }
 
+            // Weak sightings (generic window classes shared by legitimate software) are visibility
+            // only. The flag is only ever trusted downward: a tampered client marking a tool weak
+            // gains nothing over not reporting it at all.
+            List<DataObjects.CheatToolDetection> enforceable = new List<DataObjects.CheatToolDetection>();
+            if (summary.DetectedTools != null) {
+                foreach (DataObjects.CheatToolDetection detection in summary.DetectedTools) {
+                    if (!detection.Weak) { enforceable.Add(detection); }
+                }
+            }
+
             // Tools with no purpose other than cheating also ban on sight. AutoBan is resolved from
             // the server's own catalog by label, never taken from the payload, so a tampered client
             // cannot escalate a report into a ban.
-            if (summary.DetectedTools != null) {
-                foreach (DataObjects.CheatToolDetection detection in summary.DetectedTools) {
-                    if (CheatToolCatalog.IsAutoBan(detection.Tool)) {
-                        Logger.LogWarning($"Banning {playerName} for {detection.Tool} usage.");
-                        BanCheater(peer, playerName, summary);
-                        yield break;
-                    }
+            foreach (DataObjects.CheatToolDetection detection in enforceable) {
+                if (CheatToolCatalog.IsAutoBan(detection.Tool)) {
+                    Logger.LogWarning($"Banning {playerName} for {detection.Tool} usage.");
+                    BanCheater(peer, playerName, summary);
+                    yield break;
                 }
+            }
+
+            if (enforceable.Count == 0) {
+                Logger.LogWarning($"Low-confidence sighting from {playerName} ({endpoint}), logged without action: {DescribeDetectedTools(summary)}");
+                yield break;
             }
 
             // Everything else honors the configured action.
@@ -582,7 +599,7 @@ namespace ValheimEnforcer {
             switch (action) {
                 case "Kick":
                     Logger.LogWarning($"Kicking {playerName} for cheat usage.");
-                    ZNet.instance.Kick(playerName);
+                    ZNet.instance.Kick(hostId);
                     break;
                 case "Ban":
                     Logger.LogWarning($"Banning {playerName} for cheat usage.");
@@ -601,7 +618,9 @@ namespace ValheimEnforcer {
             string hostId = peer.m_socket.GetHostName();
             string reason = BuildCheatReason(summary);
             KnownCheaterTracker.AddCheater(hostId, reason);
-            ZNet.instance.Ban(playerName);
+            // Ban by host id: vanilla InternalBan only uses a name to look up the host id of an
+            // online peer, so passing the id directly bans the reporter and only the reporter.
+            ZNet.instance.Ban(hostId);
 
             if (ValConfig.DiscordNotifyCheaterBanned.Value) {
                 DiscordNotifier.Notify(NotificationEvent.CheaterBanned, new Dictionary<string, string> {
@@ -619,7 +638,7 @@ namespace ValheimEnforcer {
             if (summary.ValheimToolerStatus) { detections.Add("ValheimTooler"); }
             if (summary.DetectedTools != null) {
                 foreach (CheatToolDetection detection in summary.DetectedTools) {
-                    detections.Add($"{detection.Tool} ({detection.Vector}: {detection.Detail})");
+                    detections.Add($"{detection.Tool} ({detection.Vector}: {detection.Detail}){(detection.Weak ? " (weak)" : "")}");
                 }
             }
             string detail = detections.Count > 0 ? string.Join(", ", detections) : "cheat detected";
@@ -629,7 +648,7 @@ namespace ValheimEnforcer {
         // Compact one-line rendering of the reported tools for the server log.
         private static string DescribeDetectedTools(DataObjects.CheatSummaryReport summary) {
             if (summary.DetectedTools == null || summary.DetectedTools.Count == 0) { return "none"; }
-            return string.Join(", ", summary.DetectedTools.Select(d => $"{d.Tool} [{d.Vector}: {d.Detail}]"));
+            return string.Join(", ", summary.DetectedTools.Select(d => $"{d.Tool} [{d.Vector}: {d.Detail}]{(d.Weak ? " (weak)" : "")}"));
         }
 
         public static IEnumerator OnClientReceiveCheatReport(long sender, ZPackage package) {

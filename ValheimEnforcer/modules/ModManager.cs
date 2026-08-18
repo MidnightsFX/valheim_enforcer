@@ -272,6 +272,9 @@ namespace ValheimEnforcer.modules {
             List<string> hashUnverifiable = new List<string>(); // the server has a record but no usable hash was reported
             List<string> hashNotRecorded = new List<string>();  // Strict only: enforced mod the server never pinned
             List<string> requiredModsMissing = AuthoratativeMods.RequiredMods.Keys.Distinct().ToList();
+            // At least one version mismatch was found by the file check rather than by enforceVersion, so the
+            // list gets the extra line saying why a version the server never marked as enforced still matters.
+            bool versionPinnedByHash = false;
 
             Logger.LogDebug($"Validating modlist of {CheckingMods.ActiveMods.Count} mods isAdmin? {isAdmin}");
 
@@ -288,14 +291,16 @@ namespace ValheimEnforcer.modules {
                 // and a non-allowed mod.
                 DataObjects.Mod authoritative = null;
                 bool requiredOrAdmin = false;
+                // Whether this client's copy of this mod is actually version-checked. Not simply
+                // EnforceVersion: a non-admin carrying an admin-only mod is rejected for that and never gets
+                // as far as its version, and neither does a client whose admin status has not synced yet.
+                bool versionEnforced = false;
 
                 // Compare required mods
                 if (AuthoratativeMods.RequiredMods.ContainsKey(mod.Key)) {
                     authoritative = AuthoratativeMods.RequiredMods[mod.Key];
                     requiredOrAdmin = true;
-                    if (authoritative.EnforceVersion && authoritative.Version != mod.Value.Version) {
-                        versionMismatch.Add(mod.Key);
-                    }
+                    versionEnforced = authoritative.EnforceVersion;
                 }
                 // Compare admin mods - prevent non-admin clients from joining with admin only mods.
                 // Non-admins carrying one are rejected; admins are version-enforced when EnforceVersion is set.
@@ -308,9 +313,7 @@ namespace ValheimEnforcer.modules {
                         // neutral note instead of guessing.
                         adminOnlyInfo.Add(mod.Key);
                     } else if (isAdmin) {
-                        if (authoritative.EnforceVersion && authoritative.Version != mod.Value.Version) {
-                            versionMismatch.Add(mod.Key);
-                        }
+                        versionEnforced = authoritative.EnforceVersion;
                     } else {
                         adminOnlyNotAllowed.Add(mod.Key);
                     }
@@ -318,9 +321,7 @@ namespace ValheimEnforcer.modules {
                 // Compare optional mods
                 else if (AuthoratativeMods.OptionalMods.ContainsKey(mod.Key)) {
                     authoritative = AuthoratativeMods.OptionalMods[mod.Key];
-                    if (authoritative.EnforceVersion && authoritative.Version != mod.Value.Version) {
-                        versionMismatch.Add(mod.Key);
-                    }
+                    versionEnforced = authoritative.EnforceVersion;
                 }
                 // ServerOnlyMods stays the skip button: a client carrying one is still an extra mod, exactly as
                 // before, so it is deliberately not matched here.
@@ -331,9 +332,31 @@ namespace ValheimEnforcer.modules {
                     continue;
                 }
 
+                bool versionDiffers = authoritative.Version != mod.Value.Version;
+
+                if (versionEnforced && versionDiffers) {
+                    versionMismatch.Add(DescribeVersions(mod.Key, authoritative.Version, mod.Value.Version));
+                    // A different build of a mod is a different file, so its hash will not match either. The
+                    // version difference already rejects this client and it is the one thing they can act on,
+                    // so the file check is skipped rather than telling them, on the same screen, to reinstall
+                    // the version they are being rejected for having.
+                    continue;
+                }
+
                 switch (HashPolicy.Evaluate(authoritative, mod.Value, requiredOrAdmin)) {
                     case HashVerdict.Mismatch:
-                        hashMismatch.Add(mod.Key);
+                        // Same reasoning as above for the case where enforceVersion is off: the versions
+                        // differ, which is why the files do, so the player is told to match the version
+                        // rather than accused of running a modified DLL. The rejection itself stands - a
+                        // client does not get to talk its way out of a hash check by declaring a version it
+                        // is not running - because a recorded hash pins the version whether or not
+                        // enforceVersion says so, which is what the note under the list explains.
+                        if (versionDiffers && !string.IsNullOrEmpty(authoritative.Version)) {
+                            versionMismatch.Add(DescribeVersions(mod.Key, authoritative.Version, mod.Value.Version));
+                            versionPinnedByHash = true;
+                        } else {
+                            hashMismatch.Add(mod.Key);
+                        }
                         break;
                     case HashVerdict.Unverifiable:
                         hashUnverifiable.Add($"{mod.Key} ({mod.Value.HashStatus ?? "no hash reported"})");
@@ -360,8 +383,9 @@ namespace ValheimEnforcer.modules {
             detail.UnverifiedMods.AddRange(hashNotRecorded);
 
             if (versionMismatch.Count > 0) {
-                Logger.LogWarning($"Mods version mismatch with the server found:");
-                summay = "A Mod mismatch was detected. Ensure you have the correct versions and are only using allowed mods.";
+                string wrongVersions = $"\nMod versions that do not match the server: {string.Join(", ", versionMismatch)}";
+                summay += wrongVersions;
+                Logger.LogWarning(wrongVersions);
             }
             if (requiredModsMissing.Count > 0) {
                 string requiredMissing = $"\nMissing required mods: {string.Join(", ", requiredModsMissing)}";
@@ -406,8 +430,10 @@ namespace ValheimEnforcer.modules {
 
                 if (versionMismatch.Count > 0) {
                     errorBuilder.AppendLine("\n<b>Version Mismatches:</b>");
-                    foreach (var modKey in versionMismatch) {
-                        errorBuilder.AppendLine($"  • {modKey}");
+                    AppendBullets(errorBuilder, versionMismatch);
+                    errorBuilder.AppendLine("  Install the version listed for each of these - not a newer one.");
+                    if (versionPinnedByHash) {
+                        errorBuilder.AppendLine("  This server verifies mod files, so only the exact build it has on record is accepted.");
                     }
                 }
 
@@ -464,6 +490,16 @@ namespace ValheimEnforcer.modules {
             }
             Logger.LogInfo("Client mod list validated successfully.");
             return true;
+        }
+
+        /// <summary>
+        /// One version-mismatch entry: the mod plus both versions, so the player is told which build to install
+        /// rather than only which mod is unhappy. Degrades to the bare key when the server's record carries no
+        /// version - a hand-written entry can leave it out - because "needs (blank)" helps nobody.
+        /// </summary>
+        private static string DescribeVersions(string key, string expected, string reported) {
+            if (string.IsNullOrEmpty(expected)) { return key; }
+            return $"{key} (needs {expected}, has {(string.IsNullOrEmpty(reported) ? "unknown" : reported)})";
         }
 
         /// <summary>

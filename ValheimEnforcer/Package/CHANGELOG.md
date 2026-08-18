@@ -1,3 +1,18 @@
+**0.19.0**
+ ---
+ ```
+ - Reduces false positive kicks for having applications which could be cheat-engines running
+    - Generic window classes are now a low-confidence signal: the sighting is still reported and
+      logged on the server
+ - Kicks and bans from cheat reports now target the reporting connection's platform ID instead of
+   the player name it self-reported, so a crafted report cannot hit another player and duplicate
+   character names cannot misfire
+ - A wrong mod version is now reported as a version mismatch instead of a modified file
+    - This covers the case where enforceVersion is off and the recorded hash is what caught it
+    - Version mismatches now name both versions - "com.example.Mod (needs 1.4.2, has 1.3.0)" - on the
+      disconnect screen, in the server log and in the Discord {versionMismatches} field
+ ```
+
 **0.18.0**
  ---
  ```

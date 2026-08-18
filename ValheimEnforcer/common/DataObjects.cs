@@ -209,6 +209,9 @@ namespace ValheimEnforcer.common {
             public string Vector { get; set; }
             /// <summary>The matched process name, module name, or window class/title.</summary>
             public string Detail { get; set; }
+            /// <summary>Low-confidence sighting (generic window class); the server logs it but never enforces on it.</summary>
+            [DefaultValue(false)]
+            public bool Weak { get; set; }
         }
 
         public class CheatSummaryReport {

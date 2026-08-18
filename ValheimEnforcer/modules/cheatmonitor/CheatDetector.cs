@@ -139,9 +139,10 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
         /// <summary>
         /// Enumerates top-level windows and matches their class and title. Catches tools renamed to
-        /// evade the process check - Cheat Engine's TfrmMain window class in particular survives an
-        /// executable rename. MainWindowTitle is deliberately not used: it is slow and comes back
-        /// empty for windowless and elevated processes.
+        /// evade the process check. Generic framework classes (Cheat Engine's TfrmMain, shared by
+        /// every Delphi app with a form named frmMain) only produce weak detections, which the
+        /// server logs but never enforces. MainWindowTitle is deliberately not used: it is slow and
+        /// comes back empty for windowless and elevated processes.
         /// </summary>
         internal static List<CheatToolDetection> ScanWindows(List<CheatToolSignature> signatures) {
             List<CheatToolDetection> found = new List<CheatToolDetection>();
@@ -149,7 +150,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 return found;
             }
             List<CheatToolSignature> windowed = signatures
-                .Where(s => s.WindowClasses.Length > 0 || s.WindowTitles.Length > 0).ToList();
+                .Where(s => s.WindowClasses.Length > 0 || s.WeakWindowClasses.Length > 0 || s.WindowTitles.Length > 0).ToList();
             if (windowed.Count == 0) { return found; }
 
             try {
@@ -165,9 +166,9 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                     if (CheatToolCatalog.IsIgnored(c) || CheatToolCatalog.IsIgnored(t)) { return true; }
 
                     foreach (CheatToolSignature sig in windowed) {
-                        if (CheatToolCatalog.Matches(c, sig.WindowClasses, MatchMode.Prefix) ||
-                            CheatToolCatalog.Matches(t, sig.WindowTitles, sig.WindowTitleMatch)) {
-                            Add(found, sig.Tool, "window", $"class={c}|title={t}");
+                        WindowMatch match = CheatToolCatalog.MatchWindow(c, t, sig);
+                        if (match != WindowMatch.None) {
+                            Add(found, sig.Tool, "window", $"class={c}|title={t}", match == WindowMatch.Weak);
                         }
                     }
                     // Keep enumerating so every distinct tool on screen is reported, not just the first.
@@ -180,12 +181,20 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             return found;
         }
 
-        // One entry per tool per scan; the first sighting carries the detail.
-        private static void Add(List<CheatToolDetection> found, string tool, string vector, string detail) {
+        // One entry per tool per scan; the first sighting carries the detail, except that a strong
+        // sighting replaces a weak one so enumeration order cannot hide enforceable evidence.
+        private static void Add(List<CheatToolDetection> found, string tool, string vector, string detail, bool weak = false) {
             foreach (CheatToolDetection existing in found) {
-                if (existing.Tool == tool) { return; }
+                if (existing.Tool == tool) {
+                    if (existing.Weak && !weak) {
+                        existing.Weak = false;
+                        existing.Vector = vector;
+                        existing.Detail = detail;
+                    }
+                    return;
+                }
             }
-            found.Add(new CheatToolDetection { Tool = tool, Vector = vector, Detail = detail });
+            found.Add(new CheatToolDetection { Tool = tool, Vector = vector, Detail = detail, Weak = weak });
         }
 
         //internal static bool DebuggerAttached(out string detail) {
@@ -388,14 +397,21 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 ReportNewDetections(detections);
             }
 
-            // Sends only tools not already reported this session, in a single report.
+            // Sends only tools not already reported this session, in a single report. Weak and
+            // strong sightings latch under separate keys so an early weak sighting (a generic
+            // window class) cannot suppress a later enforceable detection of the same tool.
             private void ReportNewDetections(List<CheatToolDetection> detections) {
                 List<CheatToolDetection> fresh = null;
                 foreach (CheatToolDetection d in detections) {
-                    if (!reportedTools.Add(d.Tool)) { continue; }
+                    if (d.Weak && reportedTools.Contains(d.Tool)) { continue; }
+                    if (!reportedTools.Add(d.Weak ? d.Tool + "|weak" : d.Tool)) { continue; }
                     if (fresh == null) { fresh = new List<CheatToolDetection>(); }
                     fresh.Add(d);
-                    Logger.LogWarning($"Cheat tool detected: {d.Tool} ({d.Vector}: {d.Detail}).");
+                    if (d.Weak) {
+                        Logger.LogWarning($"Possible cheat tool, low confidence (server will log only): {d.Tool} ({d.Vector}: {d.Detail}).");
+                    } else {
+                        Logger.LogWarning($"Cheat tool detected: {d.Tool} ({d.Vector}: {d.Detail}).");
+                    }
                 }
                 if (fresh == null) { return; }
 
