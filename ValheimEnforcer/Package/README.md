@@ -236,7 +236,7 @@ Valheim gives the server nothing to work with here. There is no "place piece" me
 
 **Repairing is never flagged.** Valheim has no invulnerability flag; an unbreakable piece is just an absurd number in the health field. The ceiling is the prefab's own maximum, including any increase from a world modifier, and a full repair writes exactly that.
 
-**Nobody is blamed for somebody else's structure.** Ownership of an object moves to whichever player is nearest, every couple of seconds. Health that was already too high before a client wrote to it is attributed to no one, so walking past a cheated structure — or hitting it — cannot get an innocent player reported. `Enforcer-Scan-Structures` is how those get found.
+**Nobody is blamed for somebody else's structure.** Ownership of an object moves to whichever player is nearest, every couple of seconds. Health that was already too high before a client wrote to it is attributed to no one, so walking past a cheated structure — or hitting it — cannot get an innocent player reported. `enforcer-structures-scan` is how those get found.
 
 `DetectNonBuildableStructures` also closes a second door: `SpawnObject`, a message nothing in the game ever sends, which asks the server to create any prefab by name. It is refused for the same prefabs, and the attempt is logged.
 
@@ -259,12 +259,12 @@ Valheim gives the server nothing to work with here. There is no "place piece" me
 
 #### Finding what is already there
 
-The live check only sees a structure as it arrives, which is no help to a server that was hit last month. `Enforcer-Scan-Structures` walks every object in the world and reports the ones that look placed rather than generated — prefab, coordinates, health and crafter — grouped by prefab so the shape of it is visible at a glance.
+The live check only sees a structure as it arrives, which is no help to a server that was hit last month. `enforcer-structures-scan` walks every object in the world and reports the ones that look placed rather than generated — prefab, coordinates, health and crafter — grouped by prefab so the shape of it is visible at a glance.
 
 ```
-Enforcer-Scan-Structures scan
-Enforcer-Scan-Structures scan dvergrtown
-Enforcer-Scan-Structures remove confirm dvergrtown
+enforcer-structures-scan scan
+enforcer-structures-scan scan dvergrtown
+enforcer-structures-scan remove confirm dvergrtown
 ```
 
 `scan` changes nothing. Removal needs the word `confirm` typed out, because it is the one thing here that cannot be undone. Both forms take an optional prefab filter, matched as a substring, which is how you act on one finding out of a long report. It runs from the server console or from a connected **admin's** client, and non-admins are refused server side.
@@ -286,7 +286,7 @@ Removal also refuses to delete more than 500 objects at once without a prefab fi
 
 Off by default. Set `EnforceCharacterLimit` to `true` and an account may only join with a character this server already has a save for — anyone else is turned away at the connect handshake and told which character to come back as. Nothing about this is retroactive punishment: **every character an account already has stays playable**, so switching it on locks nobody out. It only stops the *next* new character.
 
-There is no separate list to maintain. The characters an account "has" are exactly the saves under `BepInEx/config/ValheimEnforcer/Characters/<PlatformID>/`, which the mod already writes on the first join. So a brand new player joins normally, that character becomes theirs, and a second one is refused. Run `enforcer-list-players` to see who has what.
+There is no separate list to maintain. The characters an account "has" are exactly the saves under `BepInEx/config/ValheimEnforcer/Characters/<PlatformID>/`, which the mod already writes on the first join. So a brand new player joins normally, that character becomes theirs, and a second one is refused. Run `enforcer-player-list` to see who has what.
 
 **Giving someone a fresh start** is deleting their character's `.yaml` from that folder while they are offline. The slot frees itself; the next character they connect with takes it.
 
@@ -454,7 +454,7 @@ Then per event:
 
 On `structureFlagged`, one message covers the whole batch — a cheat tool drops a village in a second, and a post per piece would walk the webhook into Discord's rate limiter. `{count}` is how many objects were involved and `{prefab}`, `{position}`, `{health}` and `{creator}` describe the first of them; the server log has the rest.
 
-Run `enforcer-test-notification playerJoined` to post any event with stand-in data and see the result. It works from the server console or from a connected **admin's** client — in that case the server does the posting and reports back into your console, since the webhook URL is never sent to clients. It ignores the `Notify*` switches but still needs a webhook. `enforcer-test-notification list` names the events.
+Run `enforcer-notify-test playerJoined` to post any event with stand-in data and see the result. It works from the server console or from a connected **admin's** client — in that case the server does the posting and reports back into your console, since the webhook URL is never sent to clients. It ignores the `Notify*` switches but still needs a webhook. `enforcer-notify-test list` names the events.
 
 Non-admins are refused server side, so the command is not a way for a player to make your server post to Discord. There is a short cooldown between tests, which keeps a stuck key from walking the webhook into Discord's rate limiter and silencing the real notifications along with it.
 
@@ -483,7 +483,7 @@ Coming from [ServerCharacters](https://thunderstore.io/c/valheim/p/Smoothbrain/S
 4. Start the server and read the log. It reports how many characters were imported, skipped or unreadable.
 5. Optionally set it back to `false`. Leaving it on is harmless — characters that already have a save are skipped, so the pass does nothing on later starts.
 
-Want to look before you leap? With the server running, an admin can use `Enforcer-Import-ServerCharacters dryrun`, which reports exactly what it would do and writes nothing. `Enforcer-Import-ServerCharacters import` runs it on demand, and adding `force` overwrites saves that already exist (normally they are left alone).
+Want to look before you leap? With the server running, an admin can use `enforcer-characters-import dryrun`, which reports exactly what it would do and writes nothing. `enforcer-characters-import import` runs it on demand, and adding `force` overwrites saves that already exist (normally they are left alone).
 
 The importer only ever **reads** ServerCharacters' files. Nothing is moved, renamed or deleted, so your old setup stays intact if you want to go back.
 
@@ -507,16 +507,38 @@ The exception is a player who has lost their local character file. Under ServerC
 
 Add the mod to your server and to your clients — both sides must run it. Setting up the mod lists is optional; every mod the server loads is required automatically. See [Mod List](#mod-list) for the file itself, the other three lists, and what is kept up to date for you.
 
+#### Console Commands
+
+Type `enforcer-help` for the list, or `enforcer-help items` for one area of it. Every command names what it did when it finishes — how many characters it found, how many items it moved, how many objects it deleted — so you never have to go and read a log to find out whether it worked.
+
+| Command | What it does |
+| --- | --- |
+| `enforcer-help` | Lists the commands, grouped by area |
+| `enforcer-player-list` | Every account with a save, and the characters under it |
+| `enforcer-items-list` | What has been confiscated from one character |
+| `enforcer-items-return` | Gives confiscated items back |
+| `enforcer-items-clear` | Deletes confiscated items for good |
+| `enforcer-characters-import` | Imports saves from ServerCharacters ([details](#migrating-from-servercharacters)) |
+| `enforcer-notify-test` | Previews a Discord message ([details](#discord-notifications)) |
+| `enforcer-structures-scan` | Finds cheat-placed structures ([details](#structure-validation)) |
+
+Everything except `enforcer-help` needs `devcommands`, which means being an admin on the server.
+
+They run from the server console and from a connected admin's client alike. From a client, the server does the work and its output comes back into the console you typed in — so a dedicated server, which has no console of its own, is administered entirely from in-game. The server checks admin status itself on arrival, so a client that lies about being one is refused and told so.
+
+Tab completion works past the first argument: tab through the account ids the server actually has, then through that account's characters. `EnableTerminalColors` (on) colours the output by severity and is a local setting, so it is yours rather than the server's.
+
+Older command names — `Enforcer-List-Players`, `Enforcer-Return-Confiscated` and the rest — still work and are listed beside their replacement in `enforcer-help`.
+
 #### Restoring user Items
 Someone brought on their priceless Epicloot Askavin cloak? Some Prestine +InfinitePower Jewels? You can restore confiscated items!
 
-Note: All commands require `devcommands` as such they require admin on the server.
-
 There are two ways to do so. 
 1. In-Game commands
-	- Run `enforcer-list-players` to get the player's account ID and character name	
-	- Run `enforcer-return-confiscated AcountID999999 CharacterName prefabName` (just want it all back? use 'all' as the prefab). This command will automatically give the player the items, along with update their remote save (incase they are not online).
+	- Run `enforcer-player-list` to get the player's account ID and character name	
+	- Run `enforcer-items-list AcountID999999 CharacterName` to see what they lost
+	- Run `enforcer-items-return AcountID999999 CharacterName prefabName` (just want it all back? use 'all' as the prefab). If they are online the items go straight into their hands; if they are not, they go into their save and are handed over on their next join. Either way the command tells you which of those happened.
 1. Manual config file edits.
 	- Ensure the player is offline (server can be running) 
-	- If you are unsure about the player's account ID, run `enforcer-list-players` in-game to get the player's account ID and character name
+	- If you are unsure about the player's account ID, run `enforcer-player-list` in-game to get the player's account ID and character name
 	- Move any item listed under `confiscatedItems` to the `playerItems` list in the player's save file. Player save files are located in `BepInEx\config\ValheimEnforcer\Characters\<PlatformID>\playername.yaml` on the server.

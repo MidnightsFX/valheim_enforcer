@@ -1,7 +1,6 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Text;
 using UnityEngine;
 using ValheimEnforcer.common;
 
@@ -54,10 +53,11 @@ namespace ValheimEnforcer.modules.worldintegrity {
         internal static bool Running { get { return host != null; } }
 
         /// <summary>
-        /// Kicks off a scan. <paramref name="replyTo"/> is the peer to send the report back to, or 0 when the
-        /// command was run on the server itself. Returns false with a reason when it cannot start.
+        /// Kicks off a scan, writing its progress and result to <paramref name="output"/> - which is either
+        /// the server console or a relay back to the admin who asked. Returns false with a reason when it
+        /// cannot start, so the caller always has something to say.
         /// </summary>
-        internal static bool Start(long replyTo, bool remove, string filter, out string problem) {
+        internal static bool Start(TerminalOutput output, bool remove, string filter, out string problem) {
             problem = null;
             if (ZNet.instance == null || !ZNet.instance.IsServer()) {
                 problem = "A structure scan only runs on the server.";
@@ -68,7 +68,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
                 return false;
             }
             if (Running) {
-                problem = "A structure scan is already running.";
+                problem = "A structure scan is already running. Wait for it to report before starting another.";
                 return false;
             }
             if (!StructureIndex.EnsureBuilt()) {
@@ -80,7 +80,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
             UnityEngine.Object.DontDestroyOnLoad(host);
             host.hideFlags = HideFlags.HideAndDontSave;
             SweepBehaviour behaviour = host.AddComponent<SweepBehaviour>();
-            behaviour.ReplyTo = replyTo;
+            behaviour.Output = output;
             behaviour.Remove = remove;
             behaviour.Filter = string.IsNullOrEmpty(filter) ? null : filter;
             return true;
@@ -137,7 +137,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
         }
 
         private class SweepBehaviour : MonoBehaviour {
-            internal long ReplyTo;
+            internal TerminalOutput Output;
             internal bool Remove;
             internal string Filter;
 
@@ -160,14 +160,13 @@ namespace ValheimEnforcer.modules.worldintegrity {
                     readError = e.Message;
                 }
                 if (snapshot == null) {
-                    Report($"Structure scan could not read the world's objects: {readError}");
+                    Output.Error($"Structure scan could not read the world's objects: {readError}");
+                    Output.Flush();
                     Finished();
                     yield break;
                 }
 
-                Logger.LogInfo($"Structure scan started over {snapshot.Count} object(s)" +
-                               $"{(Remove ? ", removal requested" : "")}" +
-                               $"{(Filter != null ? $", filtered to '{Filter}'" : "")}.");
+                Output.Detail($"Checking {snapshot.Count} object(s)...");
 
                 List<Hit> hits = new List<Hit>();
                 int checkedCount = 0;
@@ -192,7 +191,8 @@ namespace ValheimEnforcer.modules.worldintegrity {
                         refusal = $"Refusing to remove {hits.Count} objects at once without a prefab filter - more than {UnfilteredRemoveCap} " +
                                   "usually means this server's content classifies differently from vanilla's rather than that somebody placed them all. " +
                                   "Re-run with a prefab name from the list above.";
-                    } else {
+                    } else if (hits.Count > 0) {
+                        Output.Detail($"Removing {hits.Count} object(s)...");
                         removed = 0;
                         for (int i = 0; i < hits.Count; i++) {
                             if (StructureValidator.Remove(hits[i].Id)) {
@@ -201,10 +201,13 @@ namespace ValheimEnforcer.modules.worldintegrity {
                             }
                             if (i % RemoveChunkSize == RemoveChunkSize - 1) { yield return null; }
                         }
+                    } else {
+                        removed = 0;
                     }
                 }
 
-                Report(Compose(checkedCount, hits, excludedAsGenerated, removed, refusal));
+                Report(checkedCount, hits, removed, refusal);
+                Output.Flush();
                 Finished();
             }
 
@@ -222,7 +225,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
                 string name = StructureIndex.NameOf(prefabHash);
                 if (Filter != null && name.IndexOf(Filter, StringComparison.OrdinalIgnoreCase) < 0) { return null; }
 
-                string reason = null;
+                string reason;
                 float health = float.NaN;
 
                 if (StructureIndex.IsNonBuildableStructure(prefabHash)) {
@@ -256,16 +259,16 @@ namespace ValheimEnforcer.modules.worldintegrity {
                 return $"{pos.x:F0}, {pos.y:F0}, {pos.z:F0}";
             }
 
-            private string Compose(int checkedCount, List<Hit> hits, int excludedAsGenerated, int removed, string refusal) {
-                StringBuilder sb = new StringBuilder();
-                sb.Append($"Structure scan complete: {checkedCount} object(s) checked, {hits.Count} flagged");
-                if (Filter != null) { sb.Append($" (filtered to '{Filter}')"); }
-                sb.Append($". {excludedAsGenerated} non-buildable object(s) skipped as generated world content.");
-
+            private void Report(int checkedCount, List<Hit> hits, int removed, string refusal) {
+                string scope = Filter != null ? $" (filtered to '{Filter}')" : "";
                 if (hits.Count == 0) {
-                    sb.Append("\nNothing in this world looks placed by a cheat.");
-                    return sb.ToString();
+                    Output.Info($"Structure scan complete: {checkedCount} object(s) checked{scope}, nothing looks placed by a cheat. " +
+                                $"{excludedAsGenerated} non-buildable object(s) skipped as generated world content.");
+                    return;
                 }
+
+                Output.Warning($"Structure scan complete: {checkedCount} object(s) checked{scope}, {hits.Count} flagged. " +
+                               $"{excludedAsGenerated} non-buildable object(s) skipped as generated world content.");
 
                 Dictionary<string, int> counts = new Dictionary<string, int>(StringComparer.Ordinal);
                 foreach (Hit hit in hits) {
@@ -274,36 +277,34 @@ namespace ValheimEnforcer.modules.worldintegrity {
                     counts[hit.PrefabName] = seen + 1;
                 }
 
-                sb.Append("\nBy prefab:");
+                Output.Info("By prefab:", log: false);
                 foreach (KeyValuePair<string, int> entry in counts) {
-                    sb.Append($"\n  {entry.Key} x{entry.Value}");
+                    Output.Detail($"  {entry.Key} x{entry.Value}", log: false);
                 }
 
                 int shown = Math.Min(hits.Count, DetailCap);
-                sb.Append($"\nObjects ({shown} of {hits.Count} listed):");
+                Output.Info($"Objects ({shown} of {hits.Count} listed):", log: false);
                 for (int i = 0; i < shown; i++) {
                     Hit hit = hits[i];
-                    sb.Append($"\n  {hit.PrefabName} at ({Where(hit.Position)}) - {hit.Reason}");
-                    if (!float.IsNaN(hit.Health)) { sb.Append($", health {StructureValidator.Describe(hit.Health)}"); }
-                    sb.Append(hit.Creator == 0L ? ", no creator" : $", creator {hit.Creator}");
+                    string health = float.IsNaN(hit.Health) ? "" : $", health {StructureValidator.Describe(hit.Health)}";
+                    string creator = hit.Creator == 0L ? ", no creator" : $", creator {hit.Creator}";
+                    Output.Detail($"  {hit.PrefabName} at ({Where(hit.Position)}) - {hit.Reason}{health}{creator}", log: false);
                 }
                 if (hits.Count > shown) {
-                    sb.Append($"\n  ... {hits.Count - shown} more not listed. Narrow the scan with a prefab filter to see them.");
+                    Output.Detail($"  ... {hits.Count - shown} more not listed. Narrow the scan with a prefab filter to see them.", log: false);
                 }
 
                 if (refusal != null) {
-                    sb.Append("\n").Append(refusal);
+                    Output.Error(refusal);
                 } else if (removed >= 0) {
-                    sb.Append($"\nRemoved {removed} of {hits.Count} flagged object(s).");
+                    if (removed == hits.Count) {
+                        Output.Info($"Removed all {removed} flagged object(s). They are gone from the world and cannot come back.");
+                    } else {
+                        Output.Warning($"Removed {removed} of {hits.Count} flagged object(s); the rest could not be claimed and are still there. Re-run to try them again.");
+                    }
                 } else {
-                    sb.Append("\nNothing was changed. Re-run with 'remove confirm' to delete these.");
+                    Output.Info("Nothing was changed. Re-run with 'remove confirm' to delete these.");
                 }
-                return sb.ToString();
-            }
-
-            private void Report(string text) {
-                foreach (string line in text.Split('\n')) { Logger.LogInfo(line); }
-                if (ReplyTo != 0L) { ValConfig.SendStructureScanReport(ReplyTo, text); }
             }
         }
     }

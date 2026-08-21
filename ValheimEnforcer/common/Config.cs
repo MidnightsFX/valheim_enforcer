@@ -13,7 +13,6 @@ using ValheimEnforcer.common;
 using ValheimEnforcer.modules;
 using ValheimEnforcer.modules.character;
 using ValheimEnforcer.modules.cheatmonitor;
-using ValheimEnforcer.modules.commands;
 using ValheimEnforcer.modules.notifications;
 using ValheimEnforcer.modules.worldintegrity;
 using static ValheimEnforcer.common.DataObjects;
@@ -22,6 +21,7 @@ namespace ValheimEnforcer {
     internal class ValConfig {
         public static ConfigFile cfg;
         public static ConfigEntry<bool> EnableDebugMode;
+        public static ConfigEntry<bool> EnableTerminalColors;
         public static ConfigEntry<bool> UpdateLoadedModsOnStartup;
         public static ConfigEntry<bool> AutoAddModsToRequired;
         public static ConfigEntry<string> HashEnforcement;
@@ -112,15 +112,20 @@ namespace ValheimEnforcer {
         internal static String NotificationsFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, NotificationsFileName);
 
         internal static CustomRPC CharacterSaveRPC;
-        internal static CustomRPC ReturnConfiscatedItemsRPC;
         internal static CustomRPC CheatDetectionRPC;
         internal static CustomRPC ItemDeltaUpdateRPC;
-        internal static CustomRPC ListPlayerRPC;
-        internal static CustomRPC ClearConfiscatedRPC;
         internal static CustomRPC FullSyncRequestRPC;
-        internal static CustomRPC ImportServerCharactersRPC;
-        internal static CustomRPC TestNotificationRPC;
-        internal static CustomRPC StructureScanRPC;
+
+        // Server to the affected client only. Both used to double as the admin's request channel as well;
+        // that half now goes through ClientCommandRequestRPC, leaving these to do one thing each.
+        internal static CustomRPC ReturnConfiscatedItemsRPC;
+        internal static CustomRPC ClearConfiscatedRPC;
+
+        // One pair for every console command: the request going up, the output coming back. Replaces the
+        // four per-command RPCs, each of which had to re-implement the admin check and invent its own reply
+        // format - and two of which had no reply at all, so the admin saw nothing either way.
+        internal static CustomRPC ClientCommandRequestRPC;
+        internal static CustomRPC CommandOutputRPC;
 
         public ValConfig(ConfigFile cf) {
             // ensure all the config values are created
@@ -132,15 +137,13 @@ namespace ValheimEnforcer {
             SetupMainFileWatcher();
 
             CharacterSaveRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHAR", OnServerRecieveCharacter, OnClientReceiveCharacter);
-            ReturnConfiscatedItemsRPC = NetworkManager.Instance.AddRPC("VENFORCE_RETURN_CONFISCATED", OnServerReturnConfiscatedReceive, OnClientReceiveConfiscatedItems);
+            ReturnConfiscatedItemsRPC = NetworkManager.Instance.AddRPC("VENFORCE_RETURN_CONFISCATED", NoServerHandler, OnClientReceiveConfiscatedItems);
             CheatDetectionRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHEAT", OnServerReceiveCheatReport, OnClientReceiveCheatReport);
             ItemDeltaUpdateRPC = NetworkManager.Instance.AddRPC("VENFORCE_ITEMDELTA", OnServerRecieveDeltaItemUpdate, OnClientReceiveDeltaItemUpdate);
-            ListPlayerRPC = NetworkManager.Instance.AddRPC("VENFORCE_LIST_PLAYER", OnServerReceiveListPlayer, OnClientReceiveListPlayer);
-            ClearConfiscatedRPC = NetworkManager.Instance.AddRPC("VENFORCE_CLEAR_CONFISCATED", OnServerRecieveClearConfiscated, OnClientReceiveClearConfiscated);
+            ClearConfiscatedRPC = NetworkManager.Instance.AddRPC("VENFORCE_CLEAR_CONFISCATED", NoServerHandler, OnClientReceiveClearConfiscated);
             FullSyncRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_FULLSYNC_REQ", OnServerReceiveFullSyncRequest, OnClientReceiveFullSyncRequest);
-            ImportServerCharactersRPC = NetworkManager.Instance.AddRPC("VENFORCE_IMPORT_SC", OnServerReceiveImportRequest, OnClientReceiveImportReport);
-            TestNotificationRPC = NetworkManager.Instance.AddRPC("VENFORCE_TEST_NOTIFY", OnServerReceiveTestNotification, OnClientReceiveTestNotificationReport);
-            StructureScanRPC = NetworkManager.Instance.AddRPC("VENFORCE_STRUCT_SCAN", OnServerReceiveStructureScan, OnClientReceiveStructureScanReport);
+            ClientCommandRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_CMD_REQ", OnServerReceiveCommandRequest, NoClientHandler);
+            CommandOutputRPC = NetworkManager.Instance.AddRPC("VENFORCE_CMD_OUT", NoServerHandler, OnClientReceiveCommandOutput);
 
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
@@ -161,6 +164,11 @@ namespace ValheimEnforcer {
                 new ConfigurationManagerAttributes { IsAdvanced = true }));
             EnableDebugMode.SettingChanged += Logger.EnableDebugLogging;
             Logger.CheckEnableDebugLogging();
+
+            // Local rather than synced: this is how console output looks on the machine reading it, so each
+            // person decides for themselves rather than inheriting the server's preference.
+            EnableTerminalColors = BindLocalConfig("Client config", "EnableTerminalColors", true,
+                "Colour the output of this mod's console commands by severity - green for a result, blue for detail lines, amber for a warning, red for a failure. Turn it off if your console theme makes the colours hard to read, or if you are copying output somewhere that would show the markup.");
 
             UpdateLoadedModsOnStartup = BindServerConfig("Mods", "UpdateLoadedModsOnStartup", true, "Whether or not the mod configuration file will update its loaded mods once they are detected.");
             AutoAddModsToRequired = BindServerConfig("Mods", "AutoAddModsToRequired", true, "If true, automatically adds mods not found in the optional, admin, or server-only mod lists.");
@@ -472,93 +480,21 @@ namespace ValheimEnforcer {
             modules.character.CharacterStore.SubmitFullSave(yaml);
         }
 
-        public static IEnumerator OnServerRecieveClearConfiscated(long sender, ZPackage package) {
-            RPCServerUpdateData data = DataObjects.yamldeserializer.Deserialize<DataObjects.RPCServerUpdateData>(package.ReadString());
-
-            ZNetPeer zpeer = GetPeerByPlatformID(data.PlatformID);
-            if (zpeer == null) {
-                Logger.LogWarning($"Could not find peer with PlatformID {data.PlatformID} to clear confiscated items.");
-                yield break;
-            }
-            CommandHelpers.ClearSpecifiedPlayerConfiscatedItems(data.PlatformID, data.PlayerName, data.ItemPrefabFilter);
-            ValConfig.ClearConfiscatedRPC.SendPackage(zpeer.m_uid, package);
-
-            yield break;
-        }
-
+        // Client handler: an admin cleared confiscated entries for this player. The character save on the
+        // server is already authoritative; this drops the same entries from the copy this session is
+        // tracking, which is what would otherwise re-append them on the next full push.
         public static IEnumerator OnClientReceiveClearConfiscated(long sender, ZPackage package) {
-            RPCServerUpdateData data = DataObjects.yamldeserializer.Deserialize<DataObjects.RPCServerUpdateData>(package.ReadString());
-
-            CommandHelpers.ClearSpecifiedPlayerConfiscatedItems(data.PlatformID, data.PlayerName, data.ItemPrefabFilter);
-            // The call above only touches a copy loaded from disk. The in-memory character is what gets pushed
-            // back to the server, so it has to be cleared too - otherwise the entries the admin just removed are
-            // still held here and would be re-appended by confiscationId on this session's next full push.
-            ClearInMemoryConfiscatedItems(data.ItemPrefabFilter);
+            string filter = package.ReadString();
+            int cleared = modules.character.ConfiscatedItems.ClearTrackedLocally(
+                modules.character.ConfiscatedItems.ParseFilter(filter));
+            Logger.LogDebug($"Cleared {cleared} tracked confiscated item(s) locally for filter '{filter}'.");
             yield break;
-        }
-
-        // Client side: drop confiscated entries matching an admin's /clear filter from the tracked character.
-        // Mirrors the filter handling in CommandHelpers.ClearSpecifiedPlayerConfiscatedItems.
-        private static void ClearInMemoryConfiscatedItems(string prefabFilter) {
-            DataObjects.Character tracked = CharacterManager.PlayerCharacter;
-            if (tracked?.ConfiscatedItems == null || tracked.ConfiscatedItems.Count == 0) { return; }
-
-            int before = tracked.ConfiscatedItems.Count;
-            if (string.Compare(prefabFilter, "all", true) == 0) {
-                tracked.ConfiscatedItems.Clear();
-            } else {
-                List<string> targets = prefabFilter.Split(',').Select(s => s.Trim()).ToList();
-                tracked.ConfiscatedItems.RemoveAll(i => i != null && targets.Contains(i.prefabName));
-            }
-            Logger.LogDebug($"Cleared {before - tracked.ConfiscatedItems.Count} tracked confiscated item(s) locally.");
         }
 
         public static IEnumerator OnClientReceiveCharacter(long sender, ZPackage package) {
             DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(package.ReadString());
             Logger.LogDebug("Recieved Player character data from server.");
             CharacterManager.SetPlayerCharacter(chara);
-            yield break;
-        }
-
-        public static IEnumerator OnServerReturnConfiscatedReceive(long sender, ZPackage package) {
-            // Parse the target and the prefab filter
-            DataObjects.RPCServerUpdateData returnAct = DataObjects.yamldeserializer.Deserialize<DataObjects.RPCServerUpdateData>(package.ReadString());
-
-            List<PackedItem> itemsToReturn = CommandHelpers.LoadCharacterAndFindItemsToReturn(returnAct.PlatformID, returnAct.PlayerName, returnAct.ItemPrefabFilter);
-            DataObjects.Character character = ValConfig.LoadCharacterFromSave(returnAct.PlatformID, returnAct.PlayerName);
-
-            // Find the target peer by account ID and character name
-            ZNetPeer targetPeer = ValConfig.GetPeerByPlatformID(returnAct.PlatformID);
-
-            if (targetPeer == null) {
-                Logger.LogInfo($"Player {returnAct.PlayerName} is not currently connected. Moving items to player inventory save so they are restored on next login.");
-                foreach (DataObjects.PackedItem item in itemsToReturn) {
-                    character.PlayerItems.Add(item);
-                }
-                ValConfig.WritePlayerCharacterToSave(returnAct.PlatformID, character);
-                if (ValConfig.InternalStorageMode.Value) {
-                    Logger.LogInfo("Also updating character data in internal storage.");
-                    InternalDataStore.SaveAccountCharacter(character);
-                }
-                yield break;
-            }
-            Logger.LogInfo($"Sending {itemsToReturn.Count} confiscated item(s) to player {returnAct.PlayerName}.");
-            // Update the character data on the server
-            ValConfig.WritePlayerCharacterToSave(returnAct.PlatformID, character);
-            // This write bypasses the async store, so drop any cached copy the store holds for this player;
-            // the next access reloads the freshly written save instead of overwriting it with stale state.
-            modules.character.CharacterStore.Invalidate(returnAct.PlatformID, returnAct.PlayerName);
-            if (ValConfig.InternalStorageMode.Value) {
-                Logger.LogInfo("Also updating character data in internal storage.");
-                InternalDataStore.SaveAccountCharacter(character);
-            }
-            ZPackage returnableItems = new ZPackage();
-            returnableItems.Write(DataObjects.yamlserializer.Serialize(itemsToReturn));
-            ValConfig.ReturnConfiscatedItemsRPC.SendPackage(targetPeer.m_uid, returnableItems);
-            // Send the updated player character to the client so that their client-side data is also updated with
-            // the returned items. Stripped of the confiscated list like every other client-bound character send -
-            // which also resets the client's in-memory copy, so it cannot re-report the entries we just returned.
-            ValConfig.CharacterSaveRPC.SendPackage(targetPeer.m_uid, ValConfig.SendCharacterToClientAsZpackage(character));
             yield break;
         }
 
@@ -691,185 +627,69 @@ namespace ValheimEnforcer {
             yield break;
         }
 
-        public static IEnumerator OnClientReceiveImportReport(long sender, ZPackage package) {
-            foreach (string line in package.ReadString().Split('\n')) {
-                Logger.LogInfo(line.TrimEnd());
-            }
-            yield break;
-        }
-
-        public static IEnumerator OnServerReceiveImportRequest(long sender, ZPackage package) {
-            // Unlike the older command RPCs this one is admin gated on the server. IsCheat on the console
-            // command only gates the vanilla client; this handler can write character saves (and overwrite them
-            // outright with 'force'), so it must not take a crafted client's word for who is asking.
-            ZNetPeer peer = ZNet.instance?.GetPeer(sender);
-            string hostId = peer?.m_socket?.GetHostName();
-            if (string.IsNullOrEmpty(hostId) || !ZNet.instance.IsAdmin(hostId)) {
-                Logger.LogWarning($"Ignoring a ServerCharacters import request from non-admin {hostId ?? sender.ToString()}.");
-                yield break;
-            }
-
-            // Anything unrecognised falls through to a dry run - the safe reading of a malformed request.
-            string mode = package.ReadString() ?? "";
-            bool force = mode.IndexOf("force", StringComparison.OrdinalIgnoreCase) >= 0;
-            bool dryRun = mode.IndexOf("import", StringComparison.OrdinalIgnoreCase) < 0;
-
-            string summary;
-            try {
-                summary = modules.migration.ServerCharactersImport.Run(dryRun, force).Summary();
-            } catch (Exception e) {
-                summary = $"ServerCharacters import failed: {e.Message}";
-                Logger.LogError($"ServerCharacters import failed: {e}");
-            }
-            Logger.LogInfo(summary);
-            // Write the text into the package rather than using the ZPackage(string) constructor: that overload
-            // is a base64 decoder (Convert.FromBase64String) and throws on arbitrary text.
-            ZPackage reply = new ZPackage();
-            reply.Write(summary);
-            ValConfig.ImportServerCharactersRPC.SendPackage(sender, reply);
-            yield break;
-        }
-
-        public static IEnumerator OnClientReceiveTestNotificationReport(long sender, ZPackage package) {
-            foreach (string line in package.ReadString().Split('\n')) {
-                Logger.LogInfo(line.TrimEnd());
-            }
-            yield break;
-        }
+        // A Jotunn CustomRPC needs a handler for both directions even when only one is ever used. These two
+        // are the unused halves: a command request only ever travels client to server, and its output only
+        // ever travels back.
+        private static IEnumerator NoServerHandler(long sender, ZPackage package) { yield break; }
+        private static IEnumerator NoClientHandler(long sender, ZPackage package) { yield break; }
 
         /// <summary>
-        /// The last time a test notification was accepted, so a held-down key cannot walk the webhook into
-        /// Discord's rate limiter. Getting a webhook temporarily throttled would silence the real notifications
-        /// too, which is a bad trade for a preview command.
-        /// </summary>
-        private static DateTime lastTestNotification = DateTime.MinValue;
-        private static readonly TimeSpan TestNotificationCooldown = TimeSpan.FromSeconds(3);
-
-        /// <summary>
-        /// Posts one sample notification on behalf of an admin running Enforcer-Test-Notification from a
-        /// connected client, and reports the outcome back to them.
+        /// Server handler: an admin's client asked to run a server-authoritative console command.
         ///
-        /// Admin gated on the server, for the same reason the ServerCharacters import is: IsCheat on the console
-        /// command only gates the vanilla client, and this handler makes the server send an outbound HTTP
-        /// request to a webhook URL that clients are deliberately never told. Taking a crafted client's word for
-        /// who is asking would hand every connected player a button that posts into the server's Discord.
+        /// Every one of these commands reads or writes something only the server has - character saves, the
+        /// webhook URL, the world's objects - and a dedicated server has no console to type them into, so the
+        /// request is routed here. Gate on admin because any peer could craft this RPC; the client-side check
+        /// exists only to give a clearer message.
         /// </summary>
-        public static IEnumerator OnServerReceiveTestNotification(long sender, ZPackage package) {
-            ZNetPeer peer = ZNet.instance?.GetPeer(sender);
-            string hostId = peer?.m_socket?.GetHostName();
-            if (string.IsNullOrEmpty(hostId) || !ZNet.instance.IsAdmin(hostId)) {
-                Logger.LogWarning($"Ignoring a test notification request from non-admin {hostId ?? sender.ToString()}.");
+        public static IEnumerator OnServerReceiveCommandRequest(long sender, ZPackage package) {
+            if (ZNet.instance == null || ZNet.instance.IsServer() == false) { yield break; }
+
+            string command = package.ReadString();
+            if (SenderIsAdmin(sender) == false) {
+                Logger.LogWarning($"Rejecting '{command}' from non-admin peer {sender}.");
+                // Answer rather than going quiet, so the sender sees a refusal instead of nothing at all.
+                TerminalOutput refusal = TerminalOutput.Remote(sender);
+                refusal.Error($"Only server admins can run {command}.", log: false);
+                refusal.Flush();
                 yield break;
             }
 
-            string requested = package.ReadString() ?? "";
-            string reply;
-            if (!Enum.TryParse(requested, true, out NotificationEvent evt) || !Enum.IsDefined(typeof(NotificationEvent), evt)) {
-                // IsDefined as well as TryParse: TryParse happily accepts a bare number for any enum, so "99"
-                // would otherwise come through as a NotificationEvent nothing can render.
-                reply = $"Unknown notification event '{requested}'. One of: {string.Join(", ", Enum.GetNames(typeof(NotificationEvent)))}";
-            } else if (DateTime.UtcNow - lastTestNotification < TestNotificationCooldown) {
-                reply = "A test notification was just sent - wait a moment before sending another.";
-            } else if (!DiscordNotifier.IsValidWebhookUrl(DiscordNotifier.ResolveUrl(NotificationTemplates.CategoryOf(evt)))) {
-                reply = $"No usable webhook URL for the {NotificationTemplates.CategoryOf(evt)} category. Set Discord.WebhookUrl on the server, or the URL for that category.";
-            } else {
-                lastTestNotification = DateTime.UtcNow;
-                DiscordNotifier.Notify(evt, NotificationTemplates.SampleTokens());
-                reply = $"Posted a sample {evt} notification to the {NotificationTemplates.CategoryOf(evt)} webhook.";
-                Logger.LogInfo($"{reply} Requested by admin {hostId}.");
-            }
+            int argCount = package.ReadInt();
+            string[] args = new string[argCount];
+            for (int i = 0; i < argCount; i++) { args[i] = package.ReadString(); }
 
-            // Write the text into the package rather than using the ZPackage(string) constructor: that overload
-            // is a base64 decoder (Convert.FromBase64String) and throws on arbitrary text.
-            ZPackage response = new ZPackage();
-            response.Write(reply);
-            ValConfig.TestNotificationRPC.SendPackage(sender, response);
-            yield break;
-        }
-
-        public static IEnumerator OnClientReceiveStructureScanReport(long sender, ZPackage package) {
-            foreach (string line in package.ReadString().Split('\n')) {
-                Logger.LogInfo(line.TrimEnd());
-            }
+            Logger.LogInfo($"Running '{command}' for admin {PeerHostId(sender)}.");
+            TerminalManager.ExecuteFromNetwork(command, args, TerminalOutput.Remote(sender));
             yield break;
         }
 
         /// <summary>
-        /// Runs Enforcer-Scan-Structures on behalf of an admin who typed it on a connected client.
-        ///
-        /// Admin gated on the server for the same reason the test notification is: IsCheat on the console
-        /// command only gates the vanilla client, and the 'remove' form of this deletes objects out of the
-        /// world. Taking a crafted client's word for who is asking would hand every connected player a way to
-        /// delete things.
+        /// Client handler: a batch of output lines from a command this client asked the server to run.
+        /// Severity travels as a byte and the colour is applied here, so the server's log never contains
+        /// markup and each client honours its own EnableTerminalColors setting.
         /// </summary>
-        public static IEnumerator OnServerReceiveStructureScan(long sender, ZPackage package) {
+        public static IEnumerator OnClientReceiveCommandOutput(long sender, ZPackage package) {
+            int count = package.ReadInt();
+            for (int i = 0; i < count; i++) {
+                OutputLevel level = (OutputLevel)package.ReadByte();
+                TerminalManager.PrintResponse(level, package.ReadString());
+            }
+            yield break;
+        }
+
+        private static string PeerHostId(long sender) {
             ZNetPeer peer = ZNet.instance?.GetPeer(sender);
-            string hostId = peer?.m_socket?.GetHostName();
-            if (string.IsNullOrEmpty(hostId) || !ZNet.instance.IsAdmin(hostId)) {
-                Logger.LogWarning($"Ignoring a structure scan request from non-admin {hostId ?? sender.ToString()}.");
-                yield break;
-            }
-
-            bool remove = package.ReadBool();
-            string filter = package.ReadString();
-            Logger.LogInfo($"Structure scan requested by admin {hostId}{(remove ? ", with removal" : "")}{(string.IsNullOrEmpty(filter) ? "" : $", filtered to '{filter}'")}.");
-
-            string problem;
-            if (!StructureSweep.Start(sender, remove, filter, out problem)) {
-                Logger.LogInfo(problem);
-                // Write the text into the package rather than using the ZPackage(string) constructor: that
-                // overload is a base64 decoder and throws on arbitrary text.
-                ZPackage reply = new ZPackage();
-                reply.Write(problem);
-                StructureScanRPC.SendPackage(sender, reply);
-            }
-            yield break;
+            return peer?.m_socket?.GetHostName() ?? sender.ToString();
         }
 
-        /// <summary>Delivers a finished scan report back to the admin who asked for it.</summary>
-        internal static void SendStructureScanReport(long replyTo, string text) {
-            if (replyTo == 0L || StructureScanRPC == null) { return; }
-            ZPackage reply = new ZPackage();
-            reply.Write(text);
-            StructureScanRPC.SendPackage(replyTo, reply);
-        }
-
-        public static IEnumerator OnClientReceiveListPlayer(long sender, ZPackage package) {
-            Dictionary<string, List<string>> accountNameMap = DataObjects.yamldeserializer.Deserialize<Dictionary<string, List<string>>>(package.ReadString());
-            foreach(var kvp in accountNameMap) {
-                Logger.LogInfo($"AccountID: {kvp.Key}");
-                foreach (string chara in kvp.Value) {
-                    Logger.LogInfo($"    Character: {chara}");
-                }
-            }
-            yield break;
-        }
-
-        public static IEnumerator OnServerReceiveListPlayer(long sender, ZPackage package) {
-            // AccountNameMap
-            Dictionary<string, List<string>> accountNameMap = new Dictionary<string, List<string>>();
-
-            if (ValConfig.InternalStorageMode.Value) {
-                accountNameMap = InternalDataStore.GetAccountRegistry();
-                ValConfig.ListPlayerRPC.SendPackage(sender, new ZPackage(DataObjects.yamlserializer.Serialize(accountNameMap)));
-                // Send the RPC
-                yield break;
-            }
-
-            List<string> storedAccounts = Directory.GetFiles(Path.Combine(Paths.ConfigPath, ValConfig.ValheimEnforcer, ValConfig.CharacterFolder)).ToList();
-            foreach (string account in storedAccounts) {
-                List<string> characters = Directory.GetFiles(account).ToList();
-                string accountID = account.Split('/').Last();
-                List<string> accountCharacters = new List<string>();
-                foreach (string characterFile in characters) {
-                    accountCharacters.Add(characterFile.Split('/').Last());
-                }
-                accountNameMap.Add(accountID, accountCharacters);
-            }
-            ValConfig.ListPlayerRPC.SendPackage(sender, new ZPackage(DataObjects.yamlserializer.Serialize(accountNameMap)));
-
-            // Returns an RPC to the client that will send all of the account ID player maps
-            yield break;
+        /// <summary>
+        /// True when the given peer uid belongs to a connected admin. The single gate for every client-issued
+        /// server-side command; the integrated host never routes through an RPC so is not considered here.
+        /// </summary>
+        private static bool SenderIsAdmin(long sender) {
+            ZNetPeer peer = ZNet.instance?.GetPeer(sender);
+            if (peer == null || peer.m_socket == null) { return false; }
+            return ZNet.instance.IsAdmin(peer.m_socket.GetHostName());
         }
 
         public static IEnumerator OnClientReceiveConfiscatedItems(long sender, ZPackage package) {

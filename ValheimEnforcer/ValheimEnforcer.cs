@@ -8,10 +8,10 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using UnityEngine;
+using ValheimEnforcer.common;
 using ValheimEnforcer.modules;
 using ValheimEnforcer.modules.character;
 using ValheimEnforcer.modules.cheatmonitor;
-using ValheimEnforcer.modules.commands;
 using ValheimEnforcer.modules.compat;
 
 namespace ValheimEnforcer
@@ -50,7 +50,7 @@ namespace ValheimEnforcer
             PrefabManager.OnVanillaPrefabsAvailable += ModManager.SetModsActive;
             GUIManager.OnCustomGUIAvailable += ModManager.AddErrorMessageDetailsForMenu;
             InternalDataStore.RegisterMetadataHolder();
-            TerminalCommands.AddCommands();
+            TerminalManager.Init();
             MinimapManager.OnVanillaMapDataLoaded += CheatDetector.Initialize;
             MinimapManager.OnVanillaMapDataLoaded += CharacterDeltaTracker.Initialize;
 

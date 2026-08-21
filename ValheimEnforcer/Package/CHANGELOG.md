@@ -10,6 +10,19 @@
    any client have the server instantiate any prefab by hash
  - Adds Enforcer-Scan-Structures, which allows finding existing structures like this
  - Adds a structureFlagged Discord notification, routed to the moderation webhook
+ - Console commands improvements
+    - Commands now provide a summary back of what their action taken or result was
+    - Output goes to the console you typed in, including when the server ran the command for you.
+    - Renamed to enforcer-<area>-<verb>: enforcer-player-list, enforcer-items-list/-return/-clear,
+      enforcer-characters-import, enforcer-notify-test, enforcer-structures-scan. Every old name still
+      works and is shown beside its replacement in the new enforcer-help
+    - Adds enforcer-help, and enforcer-items-list
+    - Tab completion now works past the first argument, and offers the account ids and character names
+      the server actually has
+    - Adds EnableTerminalColors (on, local) to colour command output by severity
+ - Fixes clearing confiscated items doing nothing at all when the player was offline
+ - Naming a character the server has no save for now says so, instead of failing with a null reference
+   or reporting "no confiscated items"
  ```
 
 **0.19.0**

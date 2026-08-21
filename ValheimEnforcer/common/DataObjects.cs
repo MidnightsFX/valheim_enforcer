@@ -52,12 +52,6 @@ namespace ValheimEnforcer.common {
             DirtyDisconnect
         }
 
-        public class RPCServerUpdateData {
-            public string PlatformID { get; set; }
-            public string PlayerName { get; set; }
-            public string ItemPrefabFilter { get; set; } = "All";
-        }
-
         public class Mod {
             public string PluginID { get; set; }
             public string Version { get; set; }
@@ -340,7 +334,8 @@ namespace ValheimEnforcer.common {
         // inventory on join, respawn, clean logout and every FullSyncScheduler pull.
         //
         // NOTE for ConfiscatedItems: two confiscated entries that differ only in reason/timestamp/id compare equal.
-        // Nothing calls Remove/Contains on that list today (CommandHelpers filters by prefab), and the server-side
+        // Nothing calls Remove/Contains on that list today (ConfiscatedItems partitions it by prefab in one pass
+        // for exactly this reason, rather than removing by value), and the server-side
         // append merge keys on confiscationId rather than Equals precisely because of this.
         [Serializable]
         public class PackedItem : IEquatable<PackedItem> {
