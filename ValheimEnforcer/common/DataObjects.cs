@@ -690,6 +690,8 @@ namespace ValheimEnforcer.common {
             public string CharacterRejected { get; set; }
             [YamlMember(ScalarStyle = ScalarStyle.Literal)]
             public string ModMismatch { get; set; }
+            [YamlMember(ScalarStyle = ScalarStyle.Literal)]
+            public string StructureFlagged { get; set; }
         }
     }
 }

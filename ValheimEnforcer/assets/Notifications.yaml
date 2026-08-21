@@ -45,6 +45,8 @@
 #   characterRejected  {character} {playerId} {reason} {maxCharacters}
 #   modMismatch        {player} {playerId} {summary} {missingMods} {extraMods}
 #                      {versionMismatches} {adminOnlyMods} {hashMismatches} {unverifiedMods}
+#   structureFlagged   {player} {playerId} {prefab} {position} {reason} {creator} {health}
+#                      {count} {action}
 #
 # {statusColor} is green after a clean logout and amber after a crash or timeout.
 # A name that is not a placeholder is left in the message exactly as typed, so a mistyped one
@@ -149,6 +151,23 @@ modMismatch: |
       "timestamp": "{timestamp}",
       "fields": [
         {"name": "Player", "value": "{player}", "inline": true}
+      ]
+    }]
+  }
+structureFlagged: |
+  {
+    "embeds": [{
+      "title": "Invalid Structure Placed",
+      "description": "{reason}",
+      "color": {colorRed},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "Player", "value": "{player}", "inline": true},
+        {"name": "Prefab", "value": "{prefab}", "inline": true},
+        {"name": "Objects", "value": "{count}", "inline": true},
+        {"name": "Position", "value": "{position}", "inline": true},
+        {"name": "Action", "value": "{action}", "inline": true},
+        {"name": "Host ID", "value": "{playerId}", "inline": false}
       ]
     }]
   }

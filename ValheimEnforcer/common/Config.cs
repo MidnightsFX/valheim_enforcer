@@ -15,6 +15,7 @@ using ValheimEnforcer.modules.character;
 using ValheimEnforcer.modules.cheatmonitor;
 using ValheimEnforcer.modules.commands;
 using ValheimEnforcer.modules.notifications;
+using ValheimEnforcer.modules.worldintegrity;
 using static ValheimEnforcer.common.DataObjects;
 
 namespace ValheimEnforcer {
@@ -73,6 +74,17 @@ namespace ValheimEnforcer {
         public static ConfigEntry<string> CheatDetectionAction;
         public static ConfigEntry<int> CheatScanIntervalSeconds;
 
+        public static ConfigEntry<bool> EnableStructureValidation;
+        public static ConfigEntry<bool> DetectNonBuildableStructures;
+        public static ConfigEntry<bool> DetectExcessiveStructureHealth;
+        public static ConfigEntry<float> StructureHealthAllowedMultiplier;
+        public static ConfigEntry<string> StructureValidationAction;
+        public static ConfigEntry<bool> RemoveDetectedStructures;
+        public static ConfigEntry<bool> StructureValidationExemptAdmins;
+        // Comma-separated rather than List<string>: BepInEx's config system only supports primitives,
+        // string and enums, so binding a List<string> throws at startup.
+        public static ConfigEntry<string> IgnoredStructurePrefabs;
+
         public static ConfigEntry<string> DiscordWebhookUrl;
         public static ConfigEntry<string> DiscordWebhookUrlPlayerActivity;
         public static ConfigEntry<string> DiscordWebhookUrlServerStatus;
@@ -87,6 +99,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> DiscordNotifyWrongMods;
         public static ConfigEntry<bool> DiscordNotifyCheaterBanned;
         public static ConfigEntry<bool> DiscordNotifyCharacterRejected;
+        public static ConfigEntry<bool> DiscordNotifyStructureFlagged;
 
         internal const string ModsFileName = "Mods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
@@ -107,6 +120,7 @@ namespace ValheimEnforcer {
         internal static CustomRPC FullSyncRequestRPC;
         internal static CustomRPC ImportServerCharactersRPC;
         internal static CustomRPC TestNotificationRPC;
+        internal static CustomRPC StructureScanRPC;
 
         public ValConfig(ConfigFile cf) {
             // ensure all the config values are created
@@ -126,6 +140,7 @@ namespace ValheimEnforcer {
             FullSyncRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_FULLSYNC_REQ", OnServerReceiveFullSyncRequest, OnClientReceiveFullSyncRequest);
             ImportServerCharactersRPC = NetworkManager.Instance.AddRPC("VENFORCE_IMPORT_SC", OnServerReceiveImportRequest, OnClientReceiveImportReport);
             TestNotificationRPC = NetworkManager.Instance.AddRPC("VENFORCE_TEST_NOTIFY", OnServerReceiveTestNotification, OnClientReceiveTestNotificationReport);
+            StructureScanRPC = NetworkManager.Instance.AddRPC("VENFORCE_STRUCT_SCAN", OnServerReceiveStructureScan, OnClientReceiveStructureScanReport);
 
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
@@ -200,6 +215,15 @@ namespace ValheimEnforcer {
             CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a cheat tool is reported. Note that dedicated game-cheating tools (injectors, ValheimTooler, ValHack, Valheim Mod Menu) are always auto-banned regardless of this setting, and low-confidence sightings (generic window classes) are always logged only, regardless of this setting.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
             CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 30, "Seconds between periodic client scan ticks. The process, module and window scans are staggered across successive ticks so their cost never lands on the same frame, so each individual scan runs every three intervals. ValheimTooler assembly detection is event-driven and not affected by this interval.", false, 5, 300);
 
+            EnableStructureValidation = BindServerConfig("World Integrity", "EnableStructureValidation", false, "Master switch for server-side validation of the structures clients place. When enabled, the server inspects the objects arriving from each client and reports the ones no legitimate client can produce: geometry that is not in any build menu, and pieces whose health is above what the prefab was designed to hold. This is the check for somebody spawning dungeon rooms, dvergr towns and ruins into a world - the structures that show a nameplate with no crafter on it, cannot be destroyed, and flatten the ground where they land. Off by default; every part of the feature is inert until this is on.");
+            DetectNonBuildableStructures = BindServerConfig("World Integrity", "DetectNonBuildableStructures", true, "Flag a client that creates a structure which is in no build menu. Membership of a piece table is what makes a prefab placeable at all - by the hammer, the hoe, the cultivator, and by every blueprint or bulk-building mod, which all place out of those same tables - so a mod's own pieces are covered automatically and a large blueprint cannot trip this. Also blocks ZNetScene's SpawnObject RPC, an unused routed call that otherwise lets any client have the server instantiate any prefab by hash.");
+            DetectExcessiveStructureHealth = BindServerConfig("World Integrity", "DetectExcessiveStructureHealth", true, "Flag a client that writes a piece's health above the maximum its prefab allows, which is how an indestructible structure is actually made - there is no separate invulnerability flag in Valheim, just an absurd number in the health field. The ceiling accounts for world modifiers that raise building health, and repairing a piece to full is never flagged. Health that was already too high before the client touched it is attributed to nobody, so walking past a cheated structure cannot get an innocent player reported; use Enforcer-Scan-Structures to find those.");
+            StructureHealthAllowedMultiplier = BindServerConfig("World Integrity", "StructureHealthAllowedMultiplier", 1f, "Headroom on the health ceiling, for servers running a mod that raises piece health at runtime rather than on the prefab (a building-strength skill, for example). 1 means the prefab's own maximum, which is correct for vanilla and for mods that edit the prefab. Raise it only if legitimate pieces are being flagged, and prefer IgnoredStructurePrefabs if only a few prefabs are affected.", advanced: true, valmin: 1f, valmax: 1000f);
+            StructureValidationAction = BindServerConfig("World Integrity", "StructureValidationAction", "Log", "Server-side action taken against a player caught placing invalid structures. Detections are always written to the server log and posted to Discord regardless of this setting; this only controls what happens to the player. Defaults to Log so a server can watch the detector for a while before letting it remove anybody.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
+            RemoveDetectedStructures = BindServerConfig("World Integrity", "RemoveDetectedStructures", false, "Destroy a flagged structure instead of only reporting it. Deliberately separate from the action above, and off by default, because a false positive here deletes something rather than merely naming it - run with this off first and read the log. Note this removes the structure, not the terrain flattening that came with it; that arrives as separate objects and still needs re-terraforming by hand.");
+            StructureValidationExemptAdmins = BindServerConfig("World Integrity", "StructureValidationExemptAdmins", true, "Whether anyone on the server's adminlist is exempt from structure validation. On by default, unlike the other admin exemptions in this mod: spawning a non-buildable prefab is an ordinary thing to do with devcommands, and an admin building with them should not have to notice this feature exists. Turn it off to hold admins to the same rules as everyone else.");
+            IgnoredStructurePrefabs = BindServerConfig("World Integrity", "IgnoredStructurePrefabs", "", "Comma-separated allowlist of prefab names never flagged, matched as a case-insensitive substring so one entry can cover a family of prefabs (e.g. 'dvergrprops_' covers all of them). Applied last, so it overrides every check above. This is the escape hatch when a mod on your server legitimately creates an object this detector does not recognise - reach for it rather than turning the whole feature off, and reach for it before enabling RemoveDetectedStructures.");
+
             // Discord notifications. These are intentionally LOCAL (non-synced) configs: the webhook URL is a secret and must not be synced to clients
             DiscordWebhookUrl = BindLocalConfig("Discord", "WebhookUrl", "", "Discord webhook URL the server posts notifications to. This is a server-only secret and is never synced to clients. Leave empty to disable. Note: player names are sent to Discord when enabled. Every category falls back to this URL unless it has one of its own, so a server that wants everything in one channel only needs this setting.");
             DiscordWebhookUrlPlayerActivity = BindLocalConfig("Discord", "WebhookUrlPlayerActivity", "", "Webhook URL for player joins and leaves. Leave empty to use WebhookUrl. Set this to keep routine join/leave traffic out of the channel you actually watch - it is by far the noisiest category on a busy server.");
@@ -215,6 +239,7 @@ namespace ValheimEnforcer {
             DiscordNotifyWrongMods = BindLocalConfig("Discord", "NotifyWrongMods", true, "Post a message when a player is rejected for a mod mismatch, listing the offending mods.");
             DiscordNotifyCheaterBanned = BindLocalConfig("Discord", "NotifyCheaterBanned", true, "Post a message when a player is banned for cheat usage, including the detected cheat(s).");
             DiscordNotifyCharacterRejected = BindLocalConfig("Discord", "NotifyCharacterRejected", true, "Post a message when a connection is refused by EnforceCharacterLimit, naming the character that was turned away.");
+            DiscordNotifyStructureFlagged = BindLocalConfig("Discord", "NotifyStructureFlagged", true, "Post a message when structure validation catches a player placing something no legitimate client can place, naming the prefab and where it landed. Inert unless EnableStructureValidation is on. One post per player per minute at most, however many objects were involved - a cheat tool drops a whole village at once, and a message per piece would walk the webhook straight into Discord's rate limiter.");
         }
 
         // routine: set for the recurring background baseline write driven by CharacterDeltaTracker, which happens
@@ -614,13 +639,23 @@ namespace ValheimEnforcer {
 
         // Persists the ban to the KnownCheaters list (the durable rejoin barrier), applies the
         // vanilla ban, and posts a Discord notification when enabled.
+        /// <summary>
+        /// Persists a ban to the KnownCheaters list (the durable rejoin barrier) and applies the vanilla one.
+        ///
+        /// Ban by host id: vanilla InternalBan only uses a name to look up the host id of an online peer, so
+        /// passing the id directly bans that account and only that account. The notification is deliberately
+        /// left to the caller, since what gets posted depends on what triggered the ban.
+        /// </summary>
+        internal static void BanHost(string hostId, string reason) {
+            if (string.IsNullOrEmpty(hostId)) { return; }
+            KnownCheaterTracker.AddCheater(hostId, reason);
+            ZNet.instance.Ban(hostId);
+        }
+
         private static void BanCheater(ZNetPeer peer, string playerName, DataObjects.CheatSummaryReport summary) {
             string hostId = peer.m_socket.GetHostName();
             string reason = BuildCheatReason(summary);
-            KnownCheaterTracker.AddCheater(hostId, reason);
-            // Ban by host id: vanilla InternalBan only uses a name to look up the host id of an
-            // online peer, so passing the id directly bans the reporter and only the reporter.
-            ZNet.instance.Ban(hostId);
+            BanHost(hostId, reason);
 
             if (ValConfig.DiscordNotifyCheaterBanned.Value) {
                 DiscordNotifier.Notify(NotificationEvent.CheaterBanned, new Dictionary<string, string> {
@@ -750,6 +785,53 @@ namespace ValheimEnforcer {
             response.Write(reply);
             ValConfig.TestNotificationRPC.SendPackage(sender, response);
             yield break;
+        }
+
+        public static IEnumerator OnClientReceiveStructureScanReport(long sender, ZPackage package) {
+            foreach (string line in package.ReadString().Split('\n')) {
+                Logger.LogInfo(line.TrimEnd());
+            }
+            yield break;
+        }
+
+        /// <summary>
+        /// Runs Enforcer-Scan-Structures on behalf of an admin who typed it on a connected client.
+        ///
+        /// Admin gated on the server for the same reason the test notification is: IsCheat on the console
+        /// command only gates the vanilla client, and the 'remove' form of this deletes objects out of the
+        /// world. Taking a crafted client's word for who is asking would hand every connected player a way to
+        /// delete things.
+        /// </summary>
+        public static IEnumerator OnServerReceiveStructureScan(long sender, ZPackage package) {
+            ZNetPeer peer = ZNet.instance?.GetPeer(sender);
+            string hostId = peer?.m_socket?.GetHostName();
+            if (string.IsNullOrEmpty(hostId) || !ZNet.instance.IsAdmin(hostId)) {
+                Logger.LogWarning($"Ignoring a structure scan request from non-admin {hostId ?? sender.ToString()}.");
+                yield break;
+            }
+
+            bool remove = package.ReadBool();
+            string filter = package.ReadString();
+            Logger.LogInfo($"Structure scan requested by admin {hostId}{(remove ? ", with removal" : "")}{(string.IsNullOrEmpty(filter) ? "" : $", filtered to '{filter}'")}.");
+
+            string problem;
+            if (!StructureSweep.Start(sender, remove, filter, out problem)) {
+                Logger.LogInfo(problem);
+                // Write the text into the package rather than using the ZPackage(string) constructor: that
+                // overload is a base64 decoder and throws on arbitrary text.
+                ZPackage reply = new ZPackage();
+                reply.Write(problem);
+                StructureScanRPC.SendPackage(sender, reply);
+            }
+            yield break;
+        }
+
+        /// <summary>Delivers a finished scan report back to the admin who asked for it.</summary>
+        internal static void SendStructureScanReport(long replyTo, string text) {
+            if (replyTo == 0L || StructureScanRPC == null) { return; }
+            ZPackage reply = new ZPackage();
+            reply.Write(text);
+            StructureScanRPC.SendPackage(replyTo, reply);
         }
 
         public static IEnumerator OnClientReceiveListPlayer(long sender, ZPackage package) {

@@ -1,3 +1,17 @@
+**0.20.0**
+ ---
+ ```
+ - Adds structure validation: server-side detection of clients placing structures no build tool can
+   place, and of pieces whose health is above what their prefab allows
+    - Configurable EnableStructureValidation (off by default) to enable this functionality
+    - StructureValidationAction determines the automated response to a player triggering this
+    - Admins are exempt by default
+ - Blocks ZNetScene's SpawnObject RPC for those prefabs, an unused routed call that otherwise lets
+   any client have the server instantiate any prefab by hash
+ - Adds Enforcer-Scan-Structures, which allows finding existing structures like this
+ - Adds a structureFlagged Discord notification, routed to the moderation webhook
+ ```
+
 **0.19.0**
  ---
  ```

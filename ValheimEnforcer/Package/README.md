@@ -185,6 +185,11 @@ requiredMods:
 - Under `Strict`, enforcement is deferred for mods whose `thunderstorePackage` has not resolved yet, but only until the first resolve pass after server start finishes. That window is bounded and logged; it exists so a restart does not lock everyone out for the few seconds the downloads take.
 - BepInEx *patchers* (`BepInEx/patchers/`) are not plugins and are not covered by any of this.
 
+Structure validation. Off by default, server authoritative.
+- Catches a client spawning world-generation geometry — dungeon rooms, dvergr towns, ruins — instead of building
+- Catches a piece whose health has been set above what its prefab allows, which is how an indestructible structure is made
+- Blueprint and bulk-building mods cannot trip it, by design ([Structure Validation](#structure-validation))
+
 Cheat detection (enabled by default, configurable).
 - Automatic log, kick or ban for common cheating utilities
 - ValheimTooler is detected even when injected mid-session (after mod validation) and is always auto-banned
@@ -211,6 +216,71 @@ Window *titles* are ignored on windows that display content rather than run it �
 **False positives:** generic framework window classes are logged but never enforced, and browser/Explorer/terminal titles are not matched at all (see above), so neither a Delphi utility in the tray nor a YouTube tab about a cheat tool can get anyone kicked. Developer tools that also read game memory — x64dbg, Process Hacker / System Informer, HxD, ReClass.NET, Frida, Fiddler — are deliberately **not** detected by default, because modders and streamers use them routinely. Add them to `AdditionalCheatProcesses` if your server wants them treated as cheats. `Aurora`, `Process Lasso`, `AutoHotkey`, and overlay tools like MSI Afterburner and OBS are excluded on purpose and are not recommended additions; see the config file comments for the reasoning. If something legitimate trips a detection, add it to `IgnoredCheatProcesses`, which overrides everything else.
 
 *Disclaimer: Valheim is client authoratative and without extremely invasive measures, cheating cannot be fully prevented. Process-name detection in particular is a speed bump rather than a wall — renaming Cheat Engine is a documented feature of the tool, and trainer executables are renameable by design. The module and window-title checks exist because they survive a rename, but a client that can cheat can also lie about what it is running. The same applies to mod file verification: the hash is computed and reported by the client, so it stops a recompiled mod, not a patched enforcer. What it changes is the cost — from "edit one file and rebuild" to "reverse engineer and patch the anti-cheat", which is a real barrier to the people who actually do the former and none at all to the people who can do the latter.*
+
+### Structure Validation
+
+Off by default. Set `EnableStructureValidation` to `true` and the server starts checking the objects clients create, instead of taking every one of them on trust.
+
+It is the answer to a specific report: large structures appearing on a server that show no "Crafted by" on hover, cannot be destroyed, and flattened the terrain where they landed. All three are the same thing — somebody spawning **world-generation geometry**. A dvergr archway, a crypt room and a stone ruin are ordinary prefabs with ordinary health; what they are not is anything a player can build. There is no craftsman on them because nobody crafted them.
+
+Valheim gives the server nothing to work with here. There is no "place piece" message — a client instantiates the object locally and its data arrives in the same stream as everything else, which the game accepts without checking the prefab, the position, or a single value in it. So this checks it.
+
+#### The two checks
+
+| Check | What it looks at | Setting |
+| --- | --- | --- |
+| Non-buildable structure | A client creates something that is in no build menu | `DetectNonBuildableStructures` |
+| Excessive health | A client sets a piece's health above what its prefab allows | `DetectExcessiveStructureHealth` |
+
+**Blueprint mods are safe, and not because of an allowlist.** What makes a prefab placeable is being in a piece table, and *every* build path uses those tables — the hammer, the hoe, the cultivator, and every blueprint, bulk-build or planned-piece mod, because they all place out of the same menus. Mods register their own pieces into those tables too, so a server's custom content is covered without anybody listing it. A prefab with no table entry is one no build tool can reach.
+
+**Repairing is never flagged.** Valheim has no invulnerability flag; an unbreakable piece is just an absurd number in the health field. The ceiling is the prefab's own maximum, including any increase from a world modifier, and a full repair writes exactly that.
+
+**Nobody is blamed for somebody else's structure.** Ownership of an object moves to whichever player is nearest, every couple of seconds. Health that was already too high before a client wrote to it is attributed to no one, so walking past a cheated structure — or hitting it — cannot get an innocent player reported. `Enforcer-Scan-Structures` is how those get found.
+
+`DetectNonBuildableStructures` also closes a second door: `SpawnObject`, a message nothing in the game ever sends, which asks the server to create any prefab by name. It is refused for the same prefabs, and the attempt is logged.
+
+#### Settings
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `EnableStructureValidation` | `false` | Master switch. Everything below is inert until this is on |
+| `DetectNonBuildableStructures` | `true` | The build-menu check, and the `SpawnObject` block |
+| `DetectExcessiveStructureHealth` | `true` | The health-ceiling check |
+| `StructureValidationAction` | `Log` | What happens to the player: `Log`, `Kick` or `Ban`. Detections are logged and posted to Discord regardless |
+| `RemoveDetectedStructures` | `false` | Whether the structure itself is deleted |
+| `StructureValidationExemptAdmins` | `true` | Whether the adminlist is exempt |
+| `StructureHealthAllowedMultiplier` | `1` | Headroom on the health ceiling, for mods that raise piece health at runtime rather than on the prefab |
+| `IgnoredStructurePrefabs` | *(empty)* | Prefab names never flagged, matched as a substring |
+
+`RemoveDetectedStructures` is deliberately a separate switch from the action, and starts off. Run with it off first and read the log for a few days: a wrong detection that only writes a line costs you nothing, and a wrong detection that deletes something costs a player their build. `IgnoredStructurePrefabs` is the fix when you find one — reach for it rather than turning the whole feature off.
+
+**Admins are exempt by default**, unlike every other exemption in this mod. Spawning a non-buildable prefab is what `devcommands` is *for*, and an admin decorating with it should not have to know this feature exists. Set it to `false` to hold admins to the same rule as everyone else.
+
+#### Finding what is already there
+
+The live check only sees a structure as it arrives, which is no help to a server that was hit last month. `Enforcer-Scan-Structures` walks every object in the world and reports the ones that look placed rather than generated — prefab, coordinates, health and crafter — grouped by prefab so the shape of it is visible at a glance.
+
+```
+Enforcer-Scan-Structures scan
+Enforcer-Scan-Structures scan dvergrtown
+Enforcer-Scan-Structures remove confirm dvergrtown
+```
+
+`scan` changes nothing. Removal needs the word `confirm` typed out, because it is the one thing here that cannot be undone. Both forms take an optional prefab filter, matched as a substring, which is how you act on one finding out of a long report. It runs from the server console or from a connected **admin's** client, and non-admins are refused server side.
+
+The scan runs both checks whatever your `Detect*` settings say — you asked for a picture of the world, so you get the whole picture. It works in slices across frames, so a large world does not stall the server while it runs.
+
+**It never touches generated content.** Real dungeons and ruins are non-buildable structures too, so anything inside a zone the world generated a location into is excluded, and the report says how many were skipped that way. The cost is stated plainly: a structure spawned right next to real ruins is excluded along with them. Missing one is recoverable and deleting a dungeon is not — and the live check catches that case anyway, wherever it happens.
+
+Removal also refuses to delete more than 500 objects at once without a prefab filter. A number that large means this server's content classifies differently from vanilla's, not that somebody placed five hundred structures by hand.
+
+#### Things worth knowing
+
+- **The terrain is not put back.** The flattening arrives as separate objects from the structure, so removing the structure leaves the ground as the cheat left it. Re-terraforming is still yours to do.
+- **What is detected is a *structure*.** Something with no piece component at all — scenery, a plant, a creature — is outside the first check on purpose. Requiring one is what keeps tombstones, dropped items, arrows and animals out of a detector that can delete things.
+- **Detections name the connection, not the character.** A character name is whatever a client says it is, and the crafter field on a cheated piece is empty by definition. Structures found by a scan are reported with no player at all, because nothing durable records who created an object.
+- **A world-generated piece can be damaged.** Locations spawn with their pieces pre-damaged, which is below the ceiling and never flagged.
 
 ### One Character Per Account
 
@@ -255,7 +325,7 @@ Every category falls back to `WebhookUrl`, so a category URL is only worth setti
 | `WebhookUrl` | Everything, unless a category below overrides it |
 | `WebhookUrlPlayerActivity` | Joins and leaves |
 | `WebhookUrlServerStatus` | Startup, shutdown, world saves |
-| `WebhookUrlModeration` | Cheat bans, character-limit rejections |
+| `WebhookUrlModeration` | Cheat bans, character-limit rejections, structure detections |
 | `WebhookUrlModMismatch` | Connections refused over mods |
 
 The usual split is join/leave into a busy activity channel, moderation into somewhere only staff can read — those messages name the account behind a ban — and mod mismatches into wherever players ask for help, since the message already lists what they need to fix.
@@ -277,6 +347,7 @@ Leaving `WebhookUrl` empty and setting only one category is fine: that category 
 | `NotifyWrongMods` | `true` | Connection refused over a mod mismatch |
 | `NotifyCheaterBanned` | `true` | Player banned for cheat usage |
 | `NotifyCharacterRejected` | `true` | Connection refused by `EnforceCharacterLimit` |
+| `NotifyStructureFlagged` | `true` | Structure validation caught a player placing something invalid. At most one post per player per minute, however many objects were involved |
 
 These are deliberately **not** synced to clients — a webhook URL is a password in URL form, and syncing it would hand it to everyone who connects. Edit them in the config file or in Configuration Manager on the server.
 
@@ -375,10 +446,13 @@ Then per event:
 | `cheaterBanned` | `{player}` `{playerId}` `{reason}` `{detections}` `{action}` |
 | `characterRejected` | `{character}` `{playerId}` `{reason}` `{maxCharacters}` |
 | `modMismatch` | `{player}` `{playerId}` `{summary}` `{missingMods}` `{extraMods}` `{versionMismatches}` `{adminOnlyMods}` `{hashMismatches}` `{unverifiedMods}` |
+| `structureFlagged` | `{player}` `{playerId}` `{prefab}` `{position}` `{reason}` `{creator}` `{health}` `{count}` `{action}` |
 
 `{summary}` on a mod mismatch is the whole rejection written out as prose, which is what the default shows. The lists beside it are the same information split up, for when you want to say something specific — ping the mod team only when `{hashMismatches}` is involved, or post nothing but `{missingMods}` in a support channel. `{versionMismatches}` names both versions per mod — `com.example.Mod (needs 1.4.2, has 1.3.0)` — and a wrong version lands there even when the file check is what caught it, so `{hashMismatches}` only ever holds a file that fails at the version the server expects.
 
 `{statusColor}` is green after a clean logout and amber after a crash or timeout. The default `playerLeft` uses it as its colour, which is how one template covers both.
+
+On `structureFlagged`, one message covers the whole batch — a cheat tool drops a village in a second, and a post per piece would walk the webhook into Discord's rate limiter. `{count}` is how many objects were involved and `{prefab}`, `{position}`, `{health}` and `{creator}` describe the first of them; the server log has the rest.
 
 Run `enforcer-test-notification playerJoined` to post any event with stand-in data and see the result. It works from the server console or from a connected **admin's** client — in that case the server does the posting and reports back into your console, since the webhook URL is never sent to clients. It ignores the `Notify*` switches but still needs a webhook. `enforcer-test-notification list` names the events.
 

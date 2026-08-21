@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using UnityEngine;
 using ValheimEnforcer.common;
 using ValheimEnforcer.modules.notifications;
+using ValheimEnforcer.modules.worldintegrity;
 using static Mono.Security.X509.X520;
 using static ValheimEnforcer.common.DataObjects;
 
@@ -23,6 +24,74 @@ namespace ValheimEnforcer.modules.commands {
             CommandManager.Instance.AddConsoleCommand(new ReturnPlayerConfiscatedItems());
             CommandManager.Instance.AddConsoleCommand(new ImportServerCharacters());
             CommandManager.Instance.AddConsoleCommand(new TestNotification());
+            CommandManager.Instance.AddConsoleCommand(new ScanStructures());
+        }
+
+        /// <summary>
+        /// Finds structures already in the world that look placed by a cheat rather than generated, and
+        /// optionally deletes them.
+        ///
+        /// The live detector only sees a structure as it arrives, so a server that was hit before this feature
+        /// existed has no way to find the damage. This is that way. It is deliberately two steps: 'scan'
+        /// changes nothing and prints coordinates, and removal needs the word 'confirm' typed out, because the
+        /// only mistake this command can make is an unrecoverable one.
+        ///
+        /// Runs from a connected admin's client as well as the server console; in that case the server does
+        /// the work, re-checks admin status itself, and reports back into your console. Non-admins are refused
+        /// server side - see ValConfig.OnServerReceiveStructureScan.
+        /// </summary>
+        internal class ScanStructures : ConsoleCommand {
+            public override string Name => "Enforcer-Scan-Structures";
+            public override bool IsCheat => true;
+            public override string Help => "Reports structures in the world that no build tool can place, or whose health is above what their prefab allows. Server admins only. Format: Enforcer-Scan-Structures scan [prefabFilter], or Enforcer-Scan-Structures remove confirm [prefabFilter] to delete what it finds. Runs both checks whatever the World Integrity settings are, and never touches anything inside a generated location.";
+
+            public override List<string> CommandOptionList() {
+                return new List<string> { "scan", "remove" };
+            }
+
+            public override void Run(string[] args) {
+                bool remove = args.Length > 0 && string.Equals(args[0], "remove", StringComparison.OrdinalIgnoreCase);
+                if (args.Length > 0 && !remove && !string.Equals(args[0], "scan", StringComparison.OrdinalIgnoreCase)) {
+                    Logger.LogInfo($"Unknown mode '{args[0]}'. Use 'scan' or 'remove confirm'.");
+                    return;
+                }
+
+                // The confirm word sits between the mode and the filter so a filter cannot be mistaken for it.
+                string filter = null;
+                if (remove) {
+                    if (args.Length < 2 || !string.Equals(args[1], "confirm", StringComparison.OrdinalIgnoreCase)) {
+                        Logger.LogInfo("Removal deletes objects out of the world and cannot be undone. Run Enforcer-Scan-Structures scan first, read the list, then Enforcer-Scan-Structures remove confirm.");
+                        return;
+                    }
+                    if (args.Length > 2) { filter = args[2]; }
+                } else if (args.Length > 1) {
+                    filter = args[1];
+                }
+
+                if (ZNet.instance == null) {
+                    Logger.LogInfo("Not in a game. Join the server first.");
+                    return;
+                }
+
+                // IsServer rather than IsCurrentServerDedicated, matching Enforcer-Test-Notification: a client
+                // attached to somebody else's listen host must still forward, because the world lives there.
+                if (!ZNet.instance.IsServer()) {
+                    ZPackage package = new ZPackage();
+                    package.Write(remove);
+                    package.Write(filter ?? "");
+                    ValConfig.StructureScanRPC.SendPackage(ZRoutedRpc.instance.GetServerPeerID(), package);
+                    Logger.LogInfo("Requesting a structure scan from the server...");
+                    return;
+                }
+
+                // Local path - we are the server, so the report goes straight to this console.
+                string problem;
+                if (!StructureSweep.Start(0L, remove, filter, out problem)) {
+                    Logger.LogInfo(problem);
+                    return;
+                }
+                Logger.LogInfo("Structure scan started. Results follow when it finishes.");
+            }
         }
 
         /// <summary>

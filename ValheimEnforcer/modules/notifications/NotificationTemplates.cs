@@ -19,6 +19,7 @@ namespace ValheimEnforcer.modules.notifications {
         CheaterBanned,
         CharacterRejected,
         ModMismatch,
+        StructureFlagged,
     }
 
     /// <summary>
@@ -155,6 +156,7 @@ namespace ValheimEnforcer.modules.notifications {
                     return NotificationCategory.PlayerActivity;
                 case NotificationEvent.CheaterBanned:
                 case NotificationEvent.CharacterRejected:
+                case NotificationEvent.StructureFlagged:
                     return NotificationCategory.Moderation;
                 case NotificationEvent.ModMismatch:
                     return NotificationCategory.ModMismatch;
@@ -182,6 +184,7 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.CheaterBanned: return set.CheaterBanned;
                 case NotificationEvent.CharacterRejected: return set.CharacterRejected;
                 case NotificationEvent.ModMismatch: return set.ModMismatch;
+                case NotificationEvent.StructureFlagged: return set.StructureFlagged;
                 default: return null;
             }
         }
@@ -196,6 +199,7 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.CheaterBanned: set.CheaterBanned = template; break;
                 case NotificationEvent.CharacterRejected: set.CharacterRejected = template; break;
                 case NotificationEvent.ModMismatch: set.ModMismatch = template; break;
+                case NotificationEvent.StructureFlagged: set.StructureFlagged = template; break;
             }
         }
 
@@ -329,6 +333,11 @@ namespace ValheimEnforcer.modules.notifications {
                 { "adminOnlyMods", "com.example.AdminTool" },
                 { "hashMismatches", "com.example.Recompiled" },
                 { "unverifiedMods", "com.example.Unpinned" },
+                { "prefab", "dvergrtown_arch" },
+                { "position", "1420, 31, -880" },
+                { "creator", "none" },
+                { "health", "1.00000E+30" },
+                { "count", "24" },
             };
         }
 
