@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using ValheimEnforcer.common;
 
@@ -76,34 +75,11 @@ namespace ValheimEnforcer.modules.character {
         /// differently, since only the first is a real answer.
         /// </summary>
         internal static List<string> GetKnownCharacterNames(string accountId) {
-            try {
-                if (ValConfig.InternalStorageMode.Value) {
-                    List<string> registered = new List<string>();
-                    foreach (KeyValuePair<string, List<string>> account in InternalDataStore.GetAccountRegistry()) {
-                        if (!PlatformIds.Matches(account.Key, accountId)) { continue; }
-                        if (account.Value != null) { registered.AddRange(account.Value); }
-                    }
-                    return Dedupe(registered);
-                }
-
-                string root = ValConfig.CharacterFilePath;
-                if (!Directory.Exists(root)) { return new List<string>(); }
-
-                // Union across every matching folder rather than taking the first: the id a save was written
-                // under has come from a couple of different sources over time, so one account can legitimately
-                // own both a "7656..." and a "Steam_7656..." folder.
-                List<string> found = new List<string>();
-                foreach (string accountFolder in Directory.GetDirectories(root)) {
-                    if (!PlatformIds.Matches(Path.GetFileName(accountFolder), accountId)) { continue; }
-                    foreach (string characterFile in Directory.GetFiles(accountFolder, "*.yaml")) {
-                        found.Add(Path.GetFileNameWithoutExtension(characterFile));
-                    }
-                }
-                return Dedupe(found);
-            } catch (Exception e) {
-                Logger.LogWarning($"Character limit: could not read stored characters for {accountId} ({e.Message}). Allowing the connection.");
-                return null;
+            List<string> known = CharacterSaves.NamesForAccount(accountId);
+            if (known == null) {
+                Logger.LogWarning($"Character limit: could not read stored characters for {accountId}. Allowing the connection.");
             }
+            return known;
         }
 
         private static string BuildRejectionMessage(List<string> known, int limit) {
@@ -132,10 +108,6 @@ namespace ValheimEnforcer.modules.character {
                 exemptRaw = raw;
             }
             return exemptParsed;
-        }
-
-        private static List<string> Dedupe(List<string> names) {
-            return names.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         }
     }
 }

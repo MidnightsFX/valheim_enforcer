@@ -360,7 +360,7 @@ namespace ValheimEnforcer.common {
             // Stable per-confiscation identity, assigned once in Character.AddConfiscatedItem. The server uses it to
             // append a client's newly confiscated items idempotently (MergeConfiscatedItems) - re-sending the same
             // entry on a later full push must not duplicate it. confiscatedTime cannot serve this purpose:
-            // ConfiscateUntrackedItems confiscates in a tight loop and DateTime.UtcNow has ~15ms resolution on
+            // ReconcilePlayerToCharacter confiscates in a tight loop and DateTime.UtcNow has ~15ms resolution on
             // Windows, so a batch routinely shares one timestamp. Null on every non-confiscated item, and on
             // confiscated entries written before this field existed.
             [DefaultValue(null)]
@@ -372,6 +372,74 @@ namespace ValheimEnforcer.common {
             // OmitDefaults serialization shape does not change.
             internal static Dictionary<string, string> CopyCustomData(Dictionary<string, string> source) {
                 return source == null ? null : new Dictionary<string, string>(source);
+            }
+
+            /// <summary>
+            /// A detached copy of a player's custom data, for the paths that must end up holding a dictionary
+            /// rather than possibly-null.
+            ///
+            /// Player custom data used to be passed around by reference in both directions, which quietly made
+            /// the tracked character and the live player share one dictionary - and a shared dictionary is why
+            /// DeltaChangeTracker could never detect a custom data change: it was diffing a dictionary against
+            /// itself. Always copy.
+            /// </summary>
+            internal static Dictionary<string, string> SnapshotCustomData(Dictionary<string, string> source) {
+                return source == null ? new Dictionary<string, string>() : new Dictionary<string, string>(source);
+            }
+
+            /// <summary>
+            /// An item's identity, as everything on both sides of the wire understands it: the name of its
+            /// ItemDrop prefab.
+            ///
+            /// m_dropPrefab is null for any item whose prefab did not resolve on this machine - a modded item the
+            /// ObjectDB lookup missed, or an inventory entry another mod synthesised. Every site that used to read
+            /// m_dropPrefab.name straight threw a NullReferenceException on such an item and took the whole join
+            /// validation pass down with it. Returning false instead lets each caller decide, and there is
+            /// deliberately no fallback to m_shared.m_name: that is a localization token ("$item_bow"), not a
+            /// prefab name, so writing it into a save would produce an entry AddToInventory can never resolve.
+            /// </summary>
+            internal static bool TryPrefabName(ItemDrop.ItemData item, out string prefabName) {
+                prefabName = item?.m_dropPrefab?.name;
+                return !string.IsNullOrEmpty(prefabName);
+            }
+
+            /// <summary>Human-readable identification for logs and confiscation reasons. Never throws and never
+            /// returns null, so it is safe on the paths that exist to report a problem with the item.</summary>
+            internal static string Describe(ItemDrop.ItemData item) {
+                if (item == null) { return "<null item>"; }
+                if (item.m_dropPrefab != null && !string.IsNullOrEmpty(item.m_dropPrefab.name)) { return item.m_dropPrefab.name; }
+                string shared = item.m_shared?.m_name;
+                return string.IsNullOrEmpty(shared) ? "<unidentifiable item>" : $"<unidentifiable item {shared}>";
+            }
+
+            /// <summary>
+            /// Packs a live inventory item, or returns null when the item has no resolvable prefab name and
+            /// therefore cannot be tracked, matched or restored.
+            ///
+            /// clampDurability mirrors the difference between the existing capture sites: the tracked-item paths
+            /// clamp to the item's real maximum (a save must never claim more durability than the item can hold),
+            /// while a confiscation record keeps the raw value it was taken with.
+            /// </summary>
+            internal static PackedItem From(ItemDrop.ItemData item, bool clampDurability = true) {
+                if (!TryPrefabName(item, out string prefabName)) { return null; }
+                float durability = item.m_durability;
+                if (clampDurability) {
+                    durability = Mathf.Clamp(item.m_durability, 0,
+                        item.m_shared.m_maxDurability + (item.m_shared.m_durabilityPerLevel * Mathf.Max(item.m_quality, 1)));
+                }
+                return new PackedItem() {
+                    prefabName = prefabName,
+                    m_stack = item.m_stack,
+                    m_durability = durability,
+                    m_quality = item.m_quality,
+                    m_variant = item.m_variant,
+                    m_worldlevel = item.m_worldLevel,
+                    m_crafterID = item.m_crafterID,
+                    m_crafterName = item.m_crafterName,
+                    m_customdata = CopyCustomData(item.m_customData),
+                    m_equipped = item.m_equipped,
+                    m_gridpos = item.m_gridPos
+                };
             }
 
             // Quality 0 means "unset" in older saves and is treated as 1 everywhere else (see AddToInventory and
@@ -576,42 +644,39 @@ namespace ValheimEnforcer.common {
                 return removed;
             }
 
-            public void AddItemToPlayerItems(ItemDrop.ItemData item) {
+            /// <summary>Tracks a live item. Returns false when the item has no resolvable prefab name: such an
+            /// entry could never be matched against a later snapshot or handed back by AddToInventory, and a list
+            /// of them would fuzzy-match each other in RemoveFromPlayerItems, so it is skipped rather than
+            /// recorded.</summary>
+            public bool AddItemToPlayerItems(ItemDrop.ItemData item) {
                 if (PlayerItems == null) { PlayerItems = new List<PackedItem>(); }
 
-                Logger.LogDebug($"Adding saved item {item.m_dropPrefab.name} with quality - {item.m_quality}");
+                PackedItem packed = PackedItem.From(item);
+                if (packed == null) {
+                    Logger.LogWarning($"Not tracking {PackedItem.Describe(item)} for {Name}: it has no ItemDrop prefab, so it cannot be saved or restored.");
+                    return false;
+                }
 
-                PlayerItems.Add(new PackedItem() {
-                    prefabName = item.m_dropPrefab.name,
-                    m_stack = item.m_stack,
-                    m_durability = Mathf.Clamp(item.m_durability, 0, item.m_shared.m_maxDurability + (item.m_shared.m_durabilityPerLevel * Mathf.Max(item.m_quality, 1))),
-                    m_quality = item.m_quality,
-                    m_variant = item.m_variant,
-                    m_worldlevel = item.m_worldLevel,
-                    m_crafterID = item.m_crafterID,
-                    m_crafterName = item.m_crafterName,
-                    m_customdata = PackedItem.CopyCustomData(item.m_customData),
-                    m_equipped = item.m_equipped,
-                    m_gridpos = item.m_gridPos
-                });
+                Logger.LogDebug($"Adding saved item {packed.prefabName} with quality - {packed.m_quality}");
+                PlayerItems.Add(packed);
+                return true;
             }
 
-            public void AddConfiscatedItem(ItemDrop.ItemData item, string reason = "") {
-                if (ConfiscatedItems == null) { ConfiscatedItems = new List<PackedItem>(); }
+            public bool AddConfiscatedItem(ItemDrop.ItemData item, string reason = "") {
+                PackedItem packedItem = PackedItem.From(item, clampDurability: false);
+                if (packedItem == null) {
+                    Logger.LogWarning($"Cannot record a confiscation of {PackedItem.Describe(item)} for {Name}: it has no ItemDrop prefab, so it could never be returned.");
+                    return false;
+                }
+                AddConfiscatedItem(packedItem, reason);
+                return true;
+            }
 
-                PackedItem packedItem = new PackedItem() {
-                    prefabName = item.m_dropPrefab.name,
-                    m_stack = item.m_stack,
-                    m_durability = item.m_durability,
-                    m_quality = item.m_quality,
-                    m_variant = item.m_variant,
-                    m_worldlevel = item.m_worldLevel,
-                    m_crafterID = item.m_crafterID,
-                    m_crafterName = item.m_crafterName,
-                    m_customdata = PackedItem.CopyCustomData(item.m_customData),
-                    m_equipped = item.m_equipped,
-                    m_gridpos = item.m_gridPos
-                };
+            /// <summary>Records an already-packed item as confiscated. This is the overload the server-side paths
+            /// use: they hold a Character parsed from YAML and no live Player at all.</summary>
+            public void AddConfiscatedItem(PackedItem packedItem, string reason = "") {
+                if (packedItem == null) { return; }
+                if (ConfiscatedItems == null) { ConfiscatedItems = new List<PackedItem>(); }
 
                 if (string.IsNullOrEmpty(reason) == false) {
                     packedItem.confiscatedReason = reason;
@@ -625,7 +690,7 @@ namespace ValheimEnforcer.common {
             /// Server side: fold a client's reported confiscations into this (authoritative) character's list.
             ///
             /// Append only - the client's copy is never allowed to replace ours. Confiscation happens client side
-            /// (CharacterManager.ConfiscateUntrackedItems at join) but the list is owned by the server, because
+            /// (CharacterManager.ReconcilePlayerToCharacter at join) but the list is owned by the server, because
             /// admin commands (/clear, /return) mutate it while the player is connected. A wholesale overwrite
             /// from a client's later full push would resurrect entries an admin had just cleared or handed back.
             ///

@@ -40,8 +40,9 @@ namespace ValheimEnforcer.modules.character {
             if (host == null) { return; }
             UnityEngine.Object.Destroy(host); // also stops the running pull coroutine
             host = null;
-            // Nothing is left to drain the queue, and every peer it referenced is going away with the server.
+            // Nothing is left to drain the queues, and every peer they referenced is going away with the server.
             CharacterStore.ClearDriftResyncs();
+            CharacterStore.ClearSanitizedPushes();
         }
 
         // Spawn the scheduler only on the server, once ZNet is up.
@@ -82,10 +83,23 @@ namespace ValheimEnforcer.modules.character {
             // behaviour is already a server-only main-thread tick. Independent of the pull cycle below, so a
             // repair is not delayed by a wave that happens to be in flight.
             DrainDriftResyncs();
+            DrainSanitizedPushes();
 
             if (cycleRunning) { return; }
             if (Time.unscaledTime < nextCycle) { return; }
             StartCoroutine(RunPullCycle());
+        }
+
+        // Pushes queued by the CharacterStore worker after it held a first save to the new-character rules.
+        // Same reason as the drift resyncs: the worker thread must not touch ZNet, and this is already a
+        // server-only main-thread tick. Kept separate from the pull cycle so a push is not delayed behind a
+        // wave that happens to be in flight - the player is standing there holding items the server has
+        // already taken off their record.
+        private static void DrainSanitizedPushes() {
+            CharacterStore.SanitizedPush push;
+            while ((push = CharacterStore.TryDequeueSanitizedPush()) != null) {
+                ValConfig.SendSanitizedCharacterToClient(push.Sender, push.HostID, push.Name);
+            }
         }
 
         private static void DrainDriftResyncs() {

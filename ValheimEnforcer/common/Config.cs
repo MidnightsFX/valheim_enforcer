@@ -35,6 +35,12 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> NewCharactersRemoveExtraItems;
         public static ConfigEntry<bool> NewCharacterSetSkillsToZero;
         public static ConfigEntry<bool> newCharacterClearCustomData;
+        // Comma-separated rather than List<string>: BepInEx's config system only supports primitives,
+        // string and enums, so binding a List<string> throws at startup.
+        public static ConfigEntry<string> NewCharacterStartingItems;
+        public static ConfigEntry<bool> ServerSideNewCharacterEnforcement;
+        public static ConfigEntry<bool> ConfiscateUnidentifiableItems;
+        public static ConfigEntry<int> InitialCharacterSyncWaitSeconds;
         public static ConfigEntry<bool> PreventExternalCustomDataChanges;
         public static ConfigEntry<bool> ValidateItemCustomData;
         public static ConfigEntry<bool> ValidateItemDurability;
@@ -182,6 +188,10 @@ namespace ValheimEnforcer {
             NewCharacterSetSkillsToZero = BindServerConfig("Player Sync", "NewCharacterSetSkillsToZero", false, "If enabled, new characters will have their skills set to zero. Prevents players from raising skills before connecting.");
             PreventExternalCustomDataChanges = BindServerConfig("Player Sync", "PreventExternalCustomDataChanges", true, "If enabled, tracks player custom data. Warning: custom data can be large and can impact how other mods function.");
             newCharacterClearCustomData = BindServerConfig("Player Sync", "newCharacterClearCustomData", true, "If enabled, new characters will have their custom data cleared.");
+            NewCharacterStartingItems = BindServerConfig("Player Sync", "NewCharacterStartingItems", "ArmorRagsChest,ArmorRagsLegs,Torch", "Comma separated prefab names a brand new character is allowed to arrive holding when NewCharactersRemoveExtraItems is enabled. Anything else in their inventory on their first join is confiscated, as is any item above quality 1. Names are matched exactly (case insensitively), not as substrings, so 'Torch' does not also permit 'TorchMist'. Change this if your modpack starts players with different gear; leave it empty to allow no starting items at all.");
+            ServerSideNewCharacterEnforcement = BindServerConfig("Player Sync", "ServerSideNewCharacterEnforcement", true, "If enabled, the server applies the NewCharacter* rules itself to the first character save it ever stores for a player, instead of trusting the client to have done it. The client does this too, but a client is what you are defending against - this is the copy of the check that a modified client cannot skip. Inert unless at least one of NewCharactersRemoveExtraItems, NewCharacterSetSkillsToZero or newCharacterClearCustomData is on.");
+            ConfiscateUnidentifiableItems = BindServerConfig("Player Sync", "ConfiscateUnidentifiableItems", false, "Controls what happens to an inventory item whose ItemDrop prefab does not resolve on the client - usually a modded item, or an entry another mod created directly. These cannot be tracked, matched or handed back, so by default they are left alone and logged. Enable to confiscate them instead; note that a confiscated item with no prefab name can never be returned with the confiscation commands.", null, true);
+            InitialCharacterSyncWaitSeconds = BindServerConfig("Player Sync", "InitialCharacterSyncWaitSeconds", 10, "How long a joining client waits for the server's answer about its stored character before giving up and treating the character as new. The answer normally arrives during the connection handshake, well before the world finishes loading, so this only matters if that is delayed. Set to 0 to never wait. Either way the character is treated as NEW when no answer arrives - the local save file on the joining machine is never used as the baseline for a server.", true, 0, 60);
             ValidateItemCustomData = BindServerConfig("Player Sync", "ValidateItemCustomData", true, "If enabled, custom data on items will be validated.");
             ValidateItemDurability = BindServerConfig("Player Sync", "ValidateItemDurability", true, "If enabled, item durability will be validated");
             ItemValidationDurabilityAllowedVariance = BindServerConfig("Player Sync", "ItemValidationDurabilityAllowedVariance", 10f, "Allowed variance for item durability validation.", true, 0, 100f);
@@ -395,16 +405,45 @@ namespace ValheimEnforcer {
             }
         }
 
+        /// <summary>
+        /// Server side, once per connect: hand the joining player the character we hold for them, or tell them
+        /// plainly that we hold none.
+        ///
+        /// This is also where the server records its own verdict for FirstSaveEnforcement. It has to be here:
+        /// this is the moment the server does the lookup itself, against the peer that is connecting, before
+        /// that peer has said anything. Deciding "is this character new" any later means deciding it from data
+        /// the client supplied, which a modified client chooses.
+        /// </summary>
         internal static ZPackage SendSavedCharacter(ZNetPeer peer) {
             string id = peer.m_socket.GetEndPointString();
             Logger.LogInfo($"Sending saved character data to player {peer.m_playerName} with ID: {id}");
-            ZPackage package = new ZPackage();
+
+            // The id a save was filed under is not always spelled the way the socket spells it (see
+            // PlatformIds), so resolve before concluding anything. Getting this wrong used to mean "we sent you
+            // nothing" - now it would mean "you are new here", and a new character gets stripped, so a lookup
+            // that cannot answer must never be read as an answer.
+            bool resolved = modules.character.CharacterSaves.TryResolveSave(
+                id, peer.m_playerName, out string saveId, out string saveName, out bool lookupFailed);
+            if (lookupFailed) {
+                Logger.LogWarning($"Could not read the character store while {peer.m_playerName} ({id}) was connecting. Treating them as a returning player so nothing is confiscated on a store error.");
+                modules.character.FirstSaveEnforcement.ClearForPeer(peer);
+                return CharacterPayload("", CharPayloadNone);
+            }
+            if (!resolved) {
+                Logger.LogInfo($"No stored character named '{peer.m_playerName}' for account {id}; this is a new character on this server.");
+                modules.character.FirstSaveEnforcement.MarkNoSaveOnConnect(peer, id, peer.m_playerName);
+                return CharacterPayload("", CharPayloadNone);
+            }
+            modules.character.FirstSaveEnforcement.ClearForPeer(peer);
+
             if (ValConfig.InternalStorageMode.Value) {
                 Logger.LogInfo("Using internal storage mode to send character data.");
-                DataObjects.Character chara = InternalDataStore.GetAccountCharacter(id, peer.m_playerName);
+                DataObjects.Character chara = InternalDataStore.GetAccountCharacter(saveId, saveName);
                 if (chara == null) {
-                    Logger.LogInfo($"No character data found for player {peer.m_playerName} with ID: {id}, no character data will be sent.");
-                    return new ZPackage();
+                    // The registry listed it a moment ago and now cannot produce it. That is a store problem,
+                    // not a new character, so say "none" without arming the first-save enforcement.
+                    Logger.LogWarning($"Internal storage listed a character '{saveName}' for {saveId} but could not load it; sending no character data.");
+                    return CharacterPayload("", CharPayloadNone);
                 }
                 return SendCharacterToClientAsZpackage(chara);
             }
@@ -414,8 +453,8 @@ namespace ValheimEnforcer {
             // first deltas can be applied without re-reading the file. If the on-disk file has been edited
             // out-of-band (e.g. an admin edited the save while the player was offline) since we cached it, the
             // store reports a miss so the edited file is re-read and re-seeded below.
-            var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, $"{id}");
-            string fullpath = Path.Combine(charFile, $"{peer.m_playerName}.yaml");
+            var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, $"{saveId}");
+            string fullpath = Path.Combine(charFile, $"{saveName}.yaml");
             bool exists = File.Exists(fullpath);
             DateTime diskMtime = exists ? File.GetLastWriteTimeUtc(fullpath) : DateTime.MinValue;
 
@@ -425,22 +464,22 @@ namespace ValheimEnforcer {
             // the save-burst path the async store exists to protect, and the disk branch already does file I/O.
             // If connect latency ever becomes a concern, cache the stripped form on CharacterStore.Entry and have
             // the worker thread produce it.
-            string cached = modules.character.CharacterStore.GetYamlIfCurrent(id, peer.m_playerName, diskMtime);
+            string cached = modules.character.CharacterStore.GetYamlIfCurrent(saveId, saveName, diskMtime);
             if (cached != null) {
-                package.Write(StripConfiscatedItemsFromYaml(cached));
-                return package;
+                return CharacterPayload(StripConfiscatedItemsFromYaml(cached), CharPayloadCharacter);
             }
 
             if (!exists) {
-                Logger.LogInfo($"path: {fullpath} does not exist, no character data will be sent.");
-                return new ZPackage();
+                // TryResolveSave said the save was there, so this is a race with a delete rather than a new
+                // character. Do not arm first-save enforcement on it.
+                Logger.LogWarning($"path: {fullpath} vanished between lookup and read, no character data will be sent.");
+                return CharacterPayload("", CharPayloadNone);
             }
             string filecontents = File.ReadAllText(fullpath);
             // Seed the store with the FULL save - it is the server's authoritative copy. Only the outbound
             // payload is stripped.
-            modules.character.CharacterStore.Seed(id, peer.m_playerName, filecontents, diskMtime);
-            package.Write(StripConfiscatedItemsFromYaml(filecontents));
-            return package;
+            modules.character.CharacterStore.Seed(saveId, saveName, filecontents, diskMtime);
+            return CharacterPayload(StripConfiscatedItemsFromYaml(filecontents), CharPayloadCharacter);
         }
 
         public static IEnumerator OnServerRecieveCharacter(long sender, ZPackage package) {
@@ -453,11 +492,30 @@ namespace ValheimEnforcer {
         // Jotunn CharacterSaveRPC handler (OnServerRecieveCharacter) and the synchronous end-of-session
         // FinalSaveRpc. The ZPackage must already be consumed on the main thread before calling this.
         internal static void PersistReceivedCharacterYaml(long sender, string yaml) {
+            // Resolved here, on the main thread, for two reasons: FirstSaveEnforcement's verdict comes from the
+            // server's own connect-time lookup (so it must be read where that lookup's bookkeeping lives), and
+            // the policy snapshot has to be taken off the config before it is handed to the worker thread,
+            // which must never read a ConfigEntry itself.
+            NewCharacterRules.Policy newCharacterPolicy = null;
+            if (modules.character.FirstSaveEnforcement.ShouldSanitize(sender, out _)) {
+                NewCharacterRules.Policy candidate = NewCharacterRules.Current();
+                if (candidate.AnyEnabled) { newCharacterPolicy = candidate; }
+            }
+
+            // Who the server says this peer is. The payload names its own HostID and Name, but those are
+            // written by the client: without an independent identity a client can file its save under another
+            // account's character - overwriting that character, and skipping the first-save check at the same
+            // time, because the check asks "does a save already exist?" about the name the payload supplied.
+            ZNetPeer senderPeer = ZNet.instance?.GetPeer(sender);
+            string senderAccountId = senderPeer?.m_socket?.GetEndPointString();
+            string senderCharacterName = senderPeer?.m_playerName;
+
             if (ValConfig.InternalStorageMode.Value) {
                 // Internal storage writes touch a registry ZDO and must stay on the main thread.
                 try {
                     DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(yaml);
                     Logger.LogInfo($"Recieved Player data update for {sender} - {chara.Name}|{chara.HostID}");
+                    if (!SaveBelongsToSender(chara, sender, senderAccountId, senderCharacterName)) { return; }
                     // The client's confiscated list is a report of what it confiscated this session, never a
                     // replacement for ours - see Character.MergeConfiscatedItems.
                     DataObjects.Character existing = InternalDataStore.GetAccountCharacter(chara.HostID, chara.Name);
@@ -466,6 +524,20 @@ namespace ValheimEnforcer {
                     int appended = chara.MergeConfiscatedItems(reported);
                     if (appended > 0) {
                         Logger.LogInfo($"Recorded {appended} newly confiscated item(s) for {chara.Name}.");
+                    }
+
+                    // Both stores have to be empty before this counts as a first save. WritePlayerCharacterToSave
+                    // deliberately double-writes (registry AND disk) so that switching storage modes does not
+                    // lose data, which means a character can be absent from one and present in the other.
+                    if (newCharacterPolicy != null && existing == null && !modules.character.CharacterSaves.ExistsOnDisk(chara.HostID, chara.Name)) {
+                        NewCharacterRules.Result sanitized = NewCharacterRules.Apply(chara, newCharacterPolicy, recordConfiscation: true);
+                        if (sanitized.Changed) {
+                            Logger.LogWarning($"First save for {chara.Name} ({chara.HostID}) held to the new-character rules: {sanitized.Describe()}");
+                            WritePlayerCharacterToSave(chara.HostID, chara);
+                            // Already on the main thread here, so no queue hop is needed.
+                            SendSanitizedCharacterToClient(sender, chara);
+                            return;
+                        }
                     }
                     WritePlayerCharacterToSave(chara.HostID, chara);
                 } catch (Exception e) {
@@ -477,7 +549,80 @@ namespace ValheimEnforcer {
             // Disk mode: hand the raw YAML to the background store. All parsing, serialization and disk I/O
             // happen off the main thread, so a burst of saves (e.g. every client saving at once on a
             // "save player profiles" broadcast) cannot stall the server and time peers out.
-            modules.character.CharacterStore.SubmitFullSave(yaml);
+            modules.character.CharacterStore.SubmitFullSave(yaml, sender, senderAccountId, senderCharacterName, newCharacterPolicy);
+        }
+
+        /// <summary>
+        /// Whether an uploaded character actually belongs to the peer that uploaded it.
+        ///
+        /// Account ids are compared with <see cref="PlatformIds.Matches"/> because one account legitimately
+        /// reaches us under more than one spelling; the character name must be the one the peer connected as.
+        /// When the server could not resolve an identity for the sender at all the save is accepted rather
+        /// than refused - an unrecognised socket type must not stop every save on the server from being
+        /// written.
+        /// </summary>
+        private static bool SaveBelongsToSender(DataObjects.Character chara, long sender, string senderAccountId, string senderCharacterName) {
+            if (chara == null) { return false; }
+            if (string.IsNullOrEmpty(senderAccountId) || string.IsNullOrEmpty(senderCharacterName)) {
+                Logger.LogDebug($"No resolved identity for sender {sender}; accepting the save for {chara.Name} unchecked.");
+                return true;
+            }
+            if (!PlatformIds.Matches(senderAccountId, chara.HostID)) {
+                Logger.LogWarning($"Refusing a character save from {senderCharacterName} ({senderAccountId}): it claims to belong to account {chara.HostID}.");
+                return false;
+            }
+            if (!string.Equals(senderCharacterName, chara.Name, StringComparison.OrdinalIgnoreCase)) {
+                Logger.LogWarning($"Refusing a character save from {senderAccountId}: they connected as '{senderCharacterName}' but uploaded a save for '{chara.Name}'.");
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Server -> client, main thread: here is the character as the server now holds it, reconcile yourself
+        /// to it.
+        ///
+        /// Sanitizing the stored save is only half a fix on its own - the player is still standing there
+        /// holding the items. Without this the client's next delta or full save would simply put them back.
+        /// </summary>
+        internal static void SendSanitizedCharacterToClient(long sender, DataObjects.Character chara) {
+            if (chara == null) { return; }
+            // Same withholding as every other server -> client character payload, but tagged SANITIZED so the
+            // client reconciles its live inventory rather than just adopting the record.
+            List<PackedItem> held = chara.ConfiscatedItems;
+            ZPackage payload;
+            try {
+                chara.ConfiscatedItems = null;
+                payload = CharacterPayload(DataObjects.yamlserializer.Serialize(chara), CharPayloadSanitized);
+            } finally {
+                // The caller's object is server-side authoritative state; never leave it stripped.
+                chara.ConfiscatedItems = held;
+            }
+            SendSanitizedPayload(sender, chara.Name, payload);
+        }
+
+        /// <summary>Overload for the async store, which holds the authoritative copy as YAML rather than as a
+        /// parsed object.</summary>
+        internal static void SendSanitizedCharacterToClient(long sender, string hostId, string name) {
+            string yaml = modules.character.CharacterStore.GetYaml(hostId, name);
+            if (string.IsNullOrEmpty(yaml)) {
+                Logger.LogWarning($"Sanitized character for {name} ({hostId}) is no longer cached; the client will pick it up on its next connect instead.");
+                return;
+            }
+            SendSanitizedPayload(sender, name, CharacterPayload(StripConfiscatedItemsFromYaml(yaml), CharPayloadSanitized));
+        }
+
+        private static void SendSanitizedPayload(long sender, string name, ZPackage payload) {
+            // The peer may be gone: a first save can arrive over the end-of-session FinalSaveRpc, in which case
+            // the connection is already tearing down. The stored save is correct either way, and the next join
+            // validates against it.
+            ZNetPeer peer = ZNet.instance?.GetPeer(sender);
+            if (peer == null) {
+                Logger.LogInfo($"Not pushing the sanitized character for {name}: that peer has already disconnected.");
+                return;
+            }
+            Logger.LogInfo($"Pushing the sanitized character back to {name} so their inventory matches the server.");
+            CharacterSaveRPC.SendPackage(sender, payload);
         }
 
         // Client handler: an admin cleared confiscated entries for this player. The character save on the
@@ -492,10 +637,92 @@ namespace ValheimEnforcer {
         }
 
         public static IEnumerator OnClientReceiveCharacter(long sender, ZPackage package) {
-            DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(package.ReadString());
-            Logger.LogDebug("Recieved Player character data from server.");
-            CharacterManager.SetPlayerCharacter(chara);
-            yield break;
+            IncomingCharacter incoming = ReadIncomingCharacter(package);
+
+            switch (incoming.Outcome) {
+                // The server explicitly said it holds no character. This is the definite answer that used to be
+                // missing: without it the client stayed in "haven't heard yet" and went off to read its own
+                // local save file, which on a first join is whatever the player did in a solo world.
+                case CharacterPayloadOutcome.NoCharacter:
+                    CharacterManager.SetServerHasNoCharacter();
+                    yield break;
+
+                // The server sent a character and we could not read it. Emphatically NOT the same answer: this
+                // player is a returning one, so treating it as "no character" would confiscate their entire
+                // inventory because a save on the server went bad.
+                case CharacterPayloadOutcome.Unreadable:
+                    CharacterManager.SetServerCharacterUnreadable();
+                    yield break;
+
+                case CharacterPayloadOutcome.Sanitized:
+                    CharacterManager.ApplyServerSanitizedCharacter(incoming.Character);
+                    yield break;
+
+                default:
+                    Logger.LogDebug("Recieved Player character data from server.");
+                    CharacterManager.SetPlayerCharacter(incoming.Character);
+                    yield break;
+            }
+        }
+
+        private enum CharacterPayloadOutcome {
+            /// <summary>A stored character arrived intact.</summary>
+            Character,
+            /// <summary>A stored character arrived that the server had just sanitized; the live player has to
+            /// be reconciled to it, not merely told about it.</summary>
+            Sanitized,
+            /// <summary>The server holds nothing for this account and character name.</summary>
+            NoCharacter,
+            /// <summary>The server holds something and we could not read it.</summary>
+            Unreadable,
+        }
+
+        private struct IncomingCharacter {
+            internal CharacterPayloadOutcome Outcome;
+            internal DataObjects.Character Character;
+        }
+
+        // Split out of the handler because a C# iterator cannot yield out of a try/catch, and this read has to
+        // be inside one: the payload arrives over the network and a malformed one must not throw out of the
+        // Jotunn coroutine.
+        private static IncomingCharacter ReadIncomingCharacter(ZPackage package) {
+            // An empty package is how a server running an older build says "I have nothing for you" - it
+            // predates the explicit NONE tag. Read it as that answer, not as a damaged payload.
+            if (package == null || package.Size() == 0) {
+                return new IncomingCharacter { Outcome = CharacterPayloadOutcome.NoCharacter };
+            }
+
+            string yaml;
+            string kind = CharPayloadCharacter;
+            try {
+                yaml = package.ReadString();
+                // Older servers send the YAML with no tag after it.
+                if (package.GetPos() < package.Size()) {
+                    kind = package.ReadString();
+                }
+            } catch (Exception e) {
+                Logger.LogWarning($"Could not read the character payload from the server: {e.Message}");
+                return new IncomingCharacter { Outcome = CharacterPayloadOutcome.Unreadable };
+            }
+
+            if (kind == CharPayloadNone || string.IsNullOrWhiteSpace(yaml)) {
+                return new IncomingCharacter { Outcome = CharacterPayloadOutcome.NoCharacter };
+            }
+
+            try {
+                DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(yaml);
+                if (chara == null) {
+                    Logger.LogWarning("The server sent a character payload that deserialized to nothing.");
+                    return new IncomingCharacter { Outcome = CharacterPayloadOutcome.Unreadable };
+                }
+                return new IncomingCharacter {
+                    Outcome = kind == CharPayloadSanitized ? CharacterPayloadOutcome.Sanitized : CharacterPayloadOutcome.Character,
+                    Character = chara,
+                };
+            } catch (Exception e) {
+                Logger.LogWarning($"Could not parse the character the server sent: {e.Message}");
+                return new IncomingCharacter { Outcome = CharacterPayloadOutcome.Unreadable };
+            }
         }
 
         public static IEnumerator OnServerReceiveCheatReport(long sender, ZPackage package) {
@@ -893,6 +1120,32 @@ namespace ValheimEnforcer {
             return package;
         }
 
+        // What a VENFORCE_CHAR payload from the server means. Previously the server said "I have no character
+        // for you" by sending an empty ZPackage - which is to say, by saying nothing the client could act on:
+        // OnClientReceiveCharacter read straight past the end of it, and SetPlayerCharacter dropped the null.
+        // The client could not tell "the server has nothing" from "the answer has not arrived", so it fell back
+        // to its own local save file, which on a first join is whatever the player did in a solo world. Naming
+        // the three cases explicitly is what makes that distinction expressible.
+        internal const string CharPayloadCharacter = "CHAR";
+        internal const string CharPayloadNone = "NONE";
+        internal const string CharPayloadSanitized = "SANITIZED";
+
+        /// <summary>
+        /// Builds a tagged server -> client character payload.
+        ///
+        /// The YAML goes first and the tag last, on purpose: a client running an older build reads only the
+        /// first string and gets exactly what it used to get (a character, or "" which deserializes to null and
+        /// leaves it behaving as before), while a new client talking to an older server finds no tag and
+        /// defaults to CHAR. Neither combination breaks, which matters because the payload rides the connect
+        /// handshake.
+        /// </summary>
+        internal static ZPackage CharacterPayload(string yaml, string kind) {
+            ZPackage package = new ZPackage();
+            package.Write(yaml ?? "");
+            package.Write(kind);
+            return package;
+        }
+
         /// <summary>
         /// Server -> client character payload, with ConfiscatedItems withheld.
         ///
@@ -911,7 +1164,10 @@ namespace ValheimEnforcer {
             List<PackedItem> held = chara.ConfiscatedItems;
             try {
                 chara.ConfiscatedItems = null;
-                return SendCharacterAsZpackage(chara);
+                // Tagged so every server -> client character payload carries its kind explicitly. Not tagging
+                // would still work (the client defaults an untagged payload to CHAR, for older servers), but
+                // leaving one path implicit is how the "silence means no character" ambiguity started.
+                return CharacterPayload(DataObjects.yamlserializer.Serialize(chara), CharPayloadCharacter);
             } finally {
                 // The caller's object is server-side authoritative state; never leave it stripped.
                 chara.ConfiscatedItems = held;

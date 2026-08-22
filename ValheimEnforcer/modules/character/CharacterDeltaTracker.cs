@@ -59,20 +59,11 @@ namespace ValheimEnforcer.modules.character {
             BaselineDirty = false;
         }
 
+        // Null when the item has no resolvable ItemDrop prefab; callers skip those, exactly as
+        // Character.AddItemToPlayerItems does, so the delta stream and the tracked baseline stay describing the
+        // same set of items.
         internal static PackedItem BuildPackedItem(ItemDrop.ItemData item) {
-            return new PackedItem {
-                prefabName = item.m_dropPrefab.name,
-                m_stack = item.m_stack,
-                m_durability = UnityEngine.Mathf.Clamp(item.m_durability, 0, item.m_shared.m_maxDurability + (item.m_shared.m_durabilityPerLevel * UnityEngine.Mathf.Max(item.m_quality, 1))),
-                m_quality = item.m_quality,
-                m_variant = item.m_variant,
-                m_worldlevel = item.m_worldLevel,
-                m_crafterID = item.m_crafterID,
-                m_crafterName = item.m_crafterName,
-                m_customdata = PackedItem.CopyCustomData(item.m_customData),
-                m_equipped = item.m_equipped,
-                m_gridpos = item.m_gridPos,
-            };
+            return PackedItem.From(item);
         }
 
         internal static List<ItemDelta> BuildCharacterItemDeltas() {
@@ -81,7 +72,9 @@ namespace ValheimEnforcer.modules.character {
 
             List<PackedItem> unmatched = new List<PackedItem>();
             foreach(ItemDrop.ItemData item in Player.m_localPlayer.GetInventory().GetAllItems()) {
-                unmatched.Add(BuildPackedItem(item));
+                PackedItem packed = BuildPackedItem(item);
+                if (packed == null) { continue; } // untrackable (no ItemDrop prefab) - never entered the baseline either
+                unmatched.Add(packed);
             }
 
             // Multiset diff: pair every baseline entry off against at most one entry in the current snapshot.
@@ -139,15 +132,19 @@ internal class DeltaChangeTracker : MonoBehaviour {
         // Take all of the deltas off the queue
         List<ItemDelta> itemDeltas = CharacterDeltaTracker.BuildCharacterItemDeltas();
 
-        Dictionary<string, string> currentCustomData = Player.m_localPlayer.m_customData;
+        // This comparison only started producing results once the two dictionaries stopped being the same
+        // object (they used to be aliased, so it diffed a dictionary against itself and never saw a change).
+        // Both are defaulted here because they are now actually walked.
+        Dictionary<string, string> currentCustomData = Player.m_localPlayer.m_customData ?? new Dictionary<string, string>();
+        Dictionary<string, string> trackedCustomData = CharacterManager.PlayerCharacter.PlayerCustomData ?? new Dictionary<string, string>();
         Dictionary<string, string> customDataModifications = new Dictionary<string, string>();
         List<string> customDataRemovedKeys = new List<string>();
 
         foreach (KeyValuePair<string, string> kvp in currentCustomData) {
             // has the key already 
-            if (CharacterManager.PlayerCharacter.PlayerCustomData.ContainsKey(kvp.Key)) {
+            if (trackedCustomData.ContainsKey(kvp.Key)) {
                 // Data update
-                if (CharacterManager.PlayerCharacter.PlayerCustomData[kvp.Key] != kvp.Value) {
+                if (trackedCustomData[kvp.Key] != kvp.Value) {
                     customDataModifications.Add(kvp.Key, kvp.Value);
                 }
             } else {
@@ -156,7 +153,7 @@ internal class DeltaChangeTracker : MonoBehaviour {
                 continue;
             }
         }
-        foreach(KeyValuePair<string, string> kvp in CharacterManager.PlayerCharacter.PlayerCustomData) {
+        foreach(KeyValuePair<string, string> kvp in trackedCustomData) {
             if (!currentCustomData.ContainsKey(kvp.Key)) {
                 customDataRemovedKeys.Add(kvp.Key);
             }
@@ -173,10 +170,15 @@ internal class DeltaChangeTracker : MonoBehaviour {
         // back a full duplicate of a pre-death inventory that was already sitting in the tombstone.
         List<PackedItem> currentPlayerItems = new List<PackedItem>();
         foreach (ItemDrop.ItemData item in Player.m_localPlayer.GetInventory().GetAllItems()) {
-            currentPlayerItems.Add(CharacterDeltaTracker.BuildPackedItem(item));
+            PackedItem packed = CharacterDeltaTracker.BuildPackedItem(item);
+            if (packed == null) { continue; } // untrackable (no ItemDrop prefab)
+            currentPlayerItems.Add(packed);
         }
         CharacterManager.PlayerCharacter.PlayerItems = currentPlayerItems;
-        CharacterManager.PlayerCharacter.PlayerCustomData = currentCustomData;
+        // Copy, never alias. currentCustomData IS Player.m_localPlayer.m_customData; storing the reference
+        // would make the baseline and the live dictionary the same object, and the comparison above would
+        // then be comparing a dictionary with itself - which is why custom data changes were never detected.
+        CharacterManager.PlayerCharacter.PlayerCustomData = PackedItem.SnapshotCustomData(currentCustomData);
         CharacterManager.PlayerCharacter.SkillLevels = Player.m_localPlayer.GetSkills().GetSkillList().ToDictionary(s => s.m_info.m_skill, s => s.m_level);
 
         Dictionary<string, PackedStatusEffect> currentActiveEffects = new Dictionary<string, PackedStatusEffect>();

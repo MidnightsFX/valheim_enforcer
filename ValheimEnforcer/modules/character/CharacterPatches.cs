@@ -24,10 +24,15 @@ namespace ValheimEnforcer.modules.character {
                 Player player = Player.m_localPlayer;
                 if (player == null) { return; }
 
-                if (!CharacterManager.JoinValidationComplete) {
-                    CharacterManager.LoadAndValidatePlayer(player);
-                } else {
+                if (CharacterManager.JoinValidationComplete) {
                     CharacterManager.RebaselineFromLiveInventory(player);
+                } else if (CharacterManager.JoinValidationPending) {
+                    // A deferred validation is already waiting on the server's answer; it will run for this
+                    // player when the answer lands.
+                } else if (CharacterManager.ShouldWaitForServerCharacter()) {
+                    JoinGate.BeginDeferredJoinValidation(player);
+                } else {
+                    CharacterManager.LoadAndValidatePlayer(player);
                 }
 
                 // Each spawn is a new Player with a new Inventory instance, so the change subscription that keeps
@@ -50,40 +55,77 @@ namespace ValheimEnforcer.modules.character {
                 }
                 CharacterManager.LogoutInProgress = false;
                 CharacterManager.JoinValidationComplete = false;
+                CharacterManager.ResetServerCharacterState();
                 CharacterDeltaTracker.StopWatching();
             }
         }
 
+        // The reset that cannot be missed. Game.Logout above covers a menu logout, but a failed handshake, a
+        // dropped connection during loading, and a listen host returning to the menu and hosting again all
+        // reach a new session without it - and a stale "the server already answered" from the previous session
+        // would let the next one skip straight past the check. A session cannot receive the character RPC
+        // before its own ZNet.Start, so resetting here is always safe and always early enough.
+        [HarmonyPatch(typeof(ZNet), nameof(ZNet.Start))]
+        public static class ResetServerCharacterStateOnConnect {
+            [HarmonyPrefix]
+            [HarmonyPriority(Priority.First)]
+            private static void Prefix() {
+                CharacterManager.ResetServerCharacterState();
+            }
+        }
+
+        [HarmonyPatch(typeof(ZNet), nameof(ZNet.Shutdown))]
+        public static class ResetServerCharacterStateOnShutdown {
+            [HarmonyPostfix]
+            [HarmonyPriority(Priority.Last)]
+            private static void Postfix() {
+                CharacterManager.ResetServerCharacterState();
+            }
+        }
+
+        // Player.Load runs *inside* Game.SpawnPlayer, so this fires before the SpawnPlayer postfix that does the
+        // rest of the join validation - which means it cannot be deferred to wait for the server's answer the
+        // way LoadAndValidatePlayerPatch can. It has to decide now, and it decides the safe way: with no known
+        // character, a joining player's custom data is cleared rather than kept. If the server's character does
+        // arrive afterwards, LoadAndValidatePlayer puts the stored custom data back.
         [HarmonyPatch(typeof(Player))]
         public static class LoadPlayerCustomData {
             [HarmonyPostfix]
             [HarmonyPriority(Priority.First)]
             [HarmonyPatch(nameof(Player.Load))]
             static void Postfix(Player __instance) {
+                if (!ValConfig.PreventExternalCustomDataChanges.Value) { return; }
+                // GetPlayerID reads the player list off ZNet, and this runs early enough that neither is
+                // guaranteed to exist yet (character selection, or the main menu preview player).
+                if (ZNet.instance == null || SceneManager.GetActiveScene().name.Equals("main") == false) { return; }
+
                 string playerID;
                 string PlayerName;
-                DataObjects.Character savableChar = null;
                 if (CharacterManager.PlayerCharacter != null) {
-                    savableChar = CharacterManager.PlayerCharacter;
                     playerID = CharacterManager.PlayerCharacter.HostID;
                     PlayerName = CharacterManager.PlayerCharacter.Name;
                 } else {
                     playerID = CharacterManager.GetPlayerID(__instance);
                     PlayerName = __instance.GetPlayerName();
                 }
-                if (CharacterManager.PlayerCharacter == null) {
-                    savableChar = ValConfig.LoadCharacterFromSave(playerID, PlayerName);
-                }
+                if (string.IsNullOrEmpty(playerID)) { return; }
 
-                if (savableChar == null) {
-                    if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                        if (ValConfig.newCharacterClearCustomData.Value) { __instance.m_customData.Clear(); }
+                // Routed through ResolveSessionCharacter so this shares the single rule about when the local
+                // save file may be trusted. It is exactly this call that used to load a solo world's save on a
+                // first join and reinstate its custom data - the ExtraSlots backup from an unrelated world that
+                // kept turning up in server saves.
+                DataObjects.Character savableChar = CharacterManager.ResolveSessionCharacter(playerID, PlayerName, out bool isNewCharacter);
+
+                if (isNewCharacter) {
+                    if (ValConfig.newCharacterClearCustomData.Value && __instance.m_customData != null) {
+                        Logger.LogInfo($"New character {PlayerName}: clearing custom data carried in from elsewhere.");
+                        __instance.m_customData.Clear();
                     }
-                } else {
-                    if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                        __instance.m_customData = savableChar.PlayerCustomData;
-                        Logger.LogDebug("Set player custom data.");
-                    }
+                } else if (savableChar != null) {
+                    // Copy rather than alias: sharing one dictionary with the tracked character is what stopped
+                    // the delta tracker from ever detecting a custom data change.
+                    __instance.m_customData = PackedItem.SnapshotCustomData(savableChar.PlayerCustomData);
+                    Logger.LogDebug("Set player custom data.");
                 }
             }
         }

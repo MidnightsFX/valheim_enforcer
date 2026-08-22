@@ -39,8 +39,34 @@ namespace ValheimEnforcer.modules.character {
         }
 
         private abstract class Message { }
-        private sealed class FullSaveMessage : Message { public string RawYaml; }
+        private sealed class FullSaveMessage : Message {
+            public string RawYaml;
+            public long Sender;
+            // Who the SERVER believes this peer is, resolved from the socket at connect time. The payload
+            // carries its own HostID/Name, but those are written by the client and are not evidence of
+            // anything - see the identity check in Apply.
+            public string SenderAccountId;
+            public string SenderCharacterName;
+            // Non-null only when the server's connect-time lookup found no save for this sender AND an admin
+            // has server-side enforcement on. Captured on the main thread: the worker must never read a
+            // ConfigEntry, which the config file watcher can reload underneath it at any moment.
+            public NewCharacterRules.Policy NewCharacterPolicy;
+        }
         private sealed class DeltaMessage : Message { public DeltaSummaryUpdate Delta; public long Sender; }
+
+        /// <summary>Why GetOrLoad returned what it did. The distinction is load-bearing: a save that exists but
+        /// will not parse must never be mistaken for a character that has never been here, or a corrupt file
+        /// would get a real player's inventory confiscated.</summary>
+        internal enum LoadState { Found, Missing, Unreadable }
+
+        /// <summary>The worker sanitized a first save and the client needs to be told, so its live inventory
+        /// matches what the server now holds. Sending needs ZNet, so - exactly like DriftResync - the request
+        /// is handed back to the main thread instead of being sent from the worker.</summary>
+        internal sealed class SanitizedPush {
+            public long Sender;
+            public string HostID;
+            public string Name;
+        }
 
         /// <summary>A delta merge on the worker thread found our copy had drifted from the client's baseline.
         /// Sending the recovery RPC requires ZNet, so the request is handed back to the main thread instead.</summary>
@@ -53,6 +79,7 @@ namespace ValheimEnforcer.modules.character {
         private static readonly ConcurrentDictionary<string, Entry> cache = new ConcurrentDictionary<string, Entry>();
         private static readonly ConcurrentQueue<Message> messages = new ConcurrentQueue<Message>();
         private static readonly ConcurrentQueue<DriftResync> driftResyncs = new ConcurrentQueue<DriftResync>();
+        private static readonly ConcurrentQueue<SanitizedPush> sanitizedPushes = new ConcurrentQueue<SanitizedPush>();
         private static readonly AutoResetEvent signal = new AutoResetEvent(false);
         private static readonly object startLock = new object();
         private static Thread worker;
@@ -79,9 +106,16 @@ namespace ValheimEnforcer.modules.character {
 
         /// <summary>Persist a full character save received from a client. The raw YAML is parsed and
         /// written on the worker thread, so the caller does no serialization work.</summary>
-        internal static void SubmitFullSave(string rawYaml) {
+        internal static void SubmitFullSave(string rawYaml, long sender, string senderAccountId, string senderCharacterName,
+                                            NewCharacterRules.Policy newCharacterPolicy) {
             EnsureWorker();
-            messages.Enqueue(new FullSaveMessage { RawYaml = rawYaml });
+            messages.Enqueue(new FullSaveMessage {
+                RawYaml = rawYaml,
+                Sender = sender,
+                SenderAccountId = senderAccountId,
+                SenderCharacterName = senderCharacterName,
+                NewCharacterPolicy = newCharacterPolicy,
+            });
             signal.Set();
         }
 
@@ -104,6 +138,17 @@ namespace ValheimEnforcer.modules.character {
         /// <summary>Drop any queued drift-recovery requests (server shutting down; the peers are going away).</summary>
         internal static void ClearDriftResyncs() {
             while (driftResyncs.TryDequeue(out _)) { }
+        }
+
+        /// <summary>Main thread: take the next queued sanitized-character push, or null when there are none.
+        /// Drained by FullSyncSchedulerBehaviour alongside the drift resyncs.</summary>
+        internal static SanitizedPush TryDequeueSanitizedPush() {
+            return sanitizedPushes.TryDequeue(out SanitizedPush p) ? p : null;
+        }
+
+        /// <summary>Drop any queued sanitized-character pushes (server shutting down).</summary>
+        internal static void ClearSanitizedPushes() {
+            while (sanitizedPushes.TryDequeue(out _)) { }
         }
 
         /// <summary>Drop any cached state for a character so the next access reloads from disk. Used
@@ -223,26 +268,61 @@ namespace ValheimEnforcer.modules.character {
                         Logger.LogWarning("CharacterStore received a full save with no HostID/Name; dropping.");
                         return null;
                     }
+                    // A save is only ever accepted for the identity the SERVER resolved for this peer at connect.
+                    // Without this the payload names its own destination, and a client that names someone
+                    // else's can both overwrite that character's save and slip past the first-save check below
+                    // (which asks "does a save exist?" about whatever HostID/Name the payload supplies - name a
+                    // character that does exist and the answer is Found, so enforcement is skipped).
+                    if (!IdentityMatchesSender(c, full)) { return null; }
+
                     string key = KeyFor(c.HostID, c.Name);
                     // The incoming save replaces everything EXCEPT the confiscated list, which the server owns:
                     // the client only reports what it confiscated this session, and an overwrite would resurrect
                     // entries an admin cleared or returned mid-session. See Character.MergeConfiscatedItems.
                     List<PackedItem> reported = c.ConfiscatedItems;
-                    DataObjects.Character existing = GetOrLoad(key, c.HostID, c.Name);
+                    DataObjects.Character existing = GetOrLoad(key, c.HostID, c.Name, out LoadState state);
                     c.ConfiscatedItems = existing?.ConfiscatedItems ?? new List<PackedItem>();
                     int appended = c.MergeConfiscatedItems(reported);
                     if (appended > 0) {
                         Logger.LogInfo($"Recorded {appended} newly confiscated item(s) for {c.Name}.");
                     }
+
+                    // The server's own copy of the new-character rules. The client is supposed to have applied
+                    // these already (CharacterManager.BuildNewCharacter), but the client is the thing being
+                    // defended against, so this runs regardless of whether it did.
+                    //
+                    // Two conditions, both required. The policy is non-null only when the server's own
+                    // connect-time lookup found nothing for this peer - a fact no client input can influence.
+                    // LoadState.Missing then confirms there is still no save to merge onto, and specifically
+                    // is not `existing == null`: that would also be true for a save that exists but failed to
+                    // parse, and stripping one of those would wipe a real character over a corrupt file.
+                    //
+                    // Placed after the confiscation merge and before the re-serialize below, so the entries
+                    // this records are in the YAML that gets written.
+                    bool pushSanitized = false;
+                    if (full.NewCharacterPolicy != null && state == LoadState.Missing) {
+                        NewCharacterRules.Result sanitized = NewCharacterRules.Apply(c, full.NewCharacterPolicy, recordConfiscation: true);
+                        if (sanitized.Changed) {
+                            Logger.LogWarning($"First save for {c.Name} ({c.HostID}) held to the new-character rules: {sanitized.Describe()}");
+                            pushSanitized = true;
+                        }
+                    }
+
                     // Re-serialize from the parsed object so on-disk format is always server-canonical.
                     cache[key] = new Entry { Character = c, Yaml = yamlserializer.Serialize(c) };
+                    // Queued strictly AFTER the cache entry is published. The main thread answers this request
+                    // by reading the cached YAML back out, and it runs concurrently with this worker - enqueuing
+                    // first would let it read the pre-sanitization copy, or none at all.
+                    if (pushSanitized) {
+                        sanitizedPushes.Enqueue(new SanitizedPush { Sender = full.Sender, HostID = c.HostID, Name = c.Name });
+                    }
                     Logger.LogInfo($"Recieved Player data update - {c.Name}|{c.HostID}");
                     return key;
                 }
                 case DeltaMessage deltaMsg: {
                     DeltaSummaryUpdate d = deltaMsg.Delta;
                     string key = KeyFor(d.HostID, d.Name);
-                    DataObjects.Character cur = GetOrLoad(key, d.HostID, d.Name);
+                    DataObjects.Character cur = GetOrLoad(key, d.HostID, d.Name, out _);
                     if (cur == null) {
                         // No authoritative save to apply onto (the main thread requests a full sync when it
                         // can detect this up front; here it means a save vanished between check and apply).
@@ -261,15 +341,44 @@ namespace ValheimEnforcer.modules.character {
             return null;
         }
 
+        // Worker-thread only. Pure string comparison, no ZNet access - the caller resolved the peer's identity
+        // on the main thread and passed it along.
+        //
+        // The account id is compared with PlatformIds.Matches because the same account legitimately reaches us
+        // under more than one spelling; the character name has to match what the peer connected as. When the
+        // server could not resolve an identity at all the check is skipped rather than failing closed, so an
+        // unrecognised socket type cannot stop every save on the server from being written.
+        private static bool IdentityMatchesSender(DataObjects.Character c, FullSaveMessage full) {
+            if (string.IsNullOrEmpty(full.SenderAccountId) || string.IsNullOrEmpty(full.SenderCharacterName)) {
+                Logger.LogDebug($"No resolved identity for sender {full.Sender}; accepting the save for {c.Name} unchecked.");
+                return true;
+            }
+            if (!PlatformIds.Matches(full.SenderAccountId, c.HostID)) {
+                Logger.LogWarning($"Refusing a character save from {full.SenderCharacterName} ({full.SenderAccountId}): it claims to belong to account {c.HostID}.");
+                return false;
+            }
+            if (!string.Equals(full.SenderCharacterName, c.Name, StringComparison.OrdinalIgnoreCase)) {
+                Logger.LogWarning($"Refusing a character save from {full.SenderAccountId}: they connected as '{full.SenderCharacterName}' but uploaded a save for '{c.Name}'.");
+                return false;
+            }
+            return true;
+        }
+
         // Worker-thread only. Returns the authoritative character for a key, parsing a seeded YAML entry
-        // or reading from disk on demand. Returns null when no save exists.
-        private static DataObjects.Character GetOrLoad(string key, string id, string name) {
+        // or reading from disk on demand.
+        //
+        // state says WHY the result is null, which callers need: Missing means this character has genuinely
+        // never been stored here, Unreadable means a save is sitting on disk that could not be parsed. Those
+        // used to be the same answer (null), which is fine for "drop this delta" but is not fine for any
+        // decision that treats a first-time character differently from a returning one.
+        private static DataObjects.Character GetOrLoad(string key, string id, string name, out LoadState state) {
             if (cache.TryGetValue(key, out Entry e)) {
-                if (e.Character != null) { return e.Character; }
+                if (e.Character != null) { state = LoadState.Found; return e.Character; }
                 if (!string.IsNullOrEmpty(e.Yaml)) {
                     try {
                         e.Character = yamldeserializer.Deserialize<DataObjects.Character>(e.Yaml);
-                        return e.Character;
+                        if (e.Character != null) { state = LoadState.Found; return e.Character; }
+                        Logger.LogWarning($"CharacterStore parsed the seeded save for {key} to nothing. Falling back to disk.");
                     } catch (Exception ex) {
                         Logger.LogWarning($"CharacterStore failed to parse seeded save for {key}: {ex.Message}. Falling back to disk.");
                     }
@@ -277,15 +386,26 @@ namespace ValheimEnforcer.modules.character {
             }
 
             string path = Path.Combine(ValConfig.CharacterFilePath, id, $"{name}.yaml");
-            if (!File.Exists(path)) { return null; }
+            if (!File.Exists(path)) { state = LoadState.Missing; return null; }
             try {
                 string text = File.ReadAllText(path);
                 DataObjects.Character c = yamldeserializer.Deserialize<DataObjects.Character>(text);
+                if (c == null) {
+                    // An empty or whitespace-only file deserializes to null WITHOUT throwing. Reporting that as
+                    // Found-with-nothing would quietly disable the first-save check for this character (a save
+                    // file is present, so they are not new; but there is nothing to validate against either).
+                    // Unreadable is the honest answer, and it fails open.
+                    Logger.LogWarning($"CharacterStore found an empty save file for {key}. Treating it as unreadable rather than as a missing character.");
+                    state = LoadState.Unreadable;
+                    return null;
+                }
                 cache[key] = new Entry { Character = c, Yaml = text, SourceMtime = File.GetLastWriteTimeUtc(path) };
+                state = LoadState.Found;
                 return c;
             } catch (Exception ex) {
                 // Leave a present-but-corrupt save alone; dropping the update avoids overwriting it.
                 Logger.LogWarning($"CharacterStore failed to load existing save for {key}: {ex.Message}. Update dropped.");
+                state = LoadState.Unreadable;
                 return null;
             }
         }
