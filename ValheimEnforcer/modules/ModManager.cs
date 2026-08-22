@@ -545,6 +545,10 @@ namespace ValheimEnforcer.modules {
                 [HarmonyPrefix]
                 [HarmonyPriority(Priority.First)]
                 private static void Prefix(ZNet __instance, ZNetPeer peer) {
+                    // This is Priority.First, so a throw here would take out the other OnNewConnection patches
+                    // and vanilla's own per-peer registrations. The three sibling OnNewConnection patches all
+                    // null-check the peer; this one did not.
+                    if (peer?.m_rpc == null) { return; }
                     Logger.LogDebug($"New Connection, register VE Mod Sync RPC.");
                     // Register our RPC handler
                     peer.m_rpc.Register<ZPackage>(nameof(RPC_ReceiveModVersionData), RPC_ReceiveModVersionData);
@@ -617,11 +621,24 @@ namespace ValheimEnforcer.modules {
                     Logger.LogWarning($"Mod compatibility check failed for client.");
                 }
             } else {
-                // Server received data from client
+                // Server received data from client. This is a pre-authentication parse (it rides the handshake),
+                // so bound it before deserializing a hostile or malformed blob.
+                if ((data?.Size() ?? 0) > ValConfig.MaxModListBytes) {
+                    Logger.LogWarning($"Rejecting an oversize mod list from {peerAddress} ({data.Size()} bytes).");
+                    RejectPeer(sender);
+                    return;
+                }
                 Mods clientMods = new Mods().FromZPackage(data);
                 bool isadmin = ZNet.instance.IsAdmin(sender.m_socket.GetHostName());
                 Logger.LogDebug($"Server received server mod data from {peerAddress} Admin?{isadmin}: Required: {clientMods.RequiredMods.Count}, Optional: {clientMods.OptionalMods.Count}, AdminOnly: {clientMods.AdminOnlyMods.Count} mods");;
                 bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, adminStatusKnown: true, out string summary, out string details, out ModMismatchDetail detail);
+                string validatingHost = sender.m_socket?.GetHostName();
+                if (modsvalid) {
+                    // Positive record: this host actually sent a mod list and it passed. ZNet_RPC_PeerInfo_ModRejection
+                    // refuses any host that reaches PeerInfo in neither the validated nor the rejected set, which is
+                    // what stops a client that simply never runs the handshake (rather than failing it) from joining.
+                    if (!string.IsNullOrEmpty(validatingHost)) { ValidatedHosts.Add(validatingHost); }
+                }
                 if (modsvalid == false) {
                     Logger.LogWarning($"Mod compatibility check failed for client at {peerAddress}\n{summary}");
                     if (ValConfig.DiscordNotifyWrongMods.Value) {
@@ -650,6 +667,14 @@ namespace ValheimEnforcer.modules {
         private static readonly HashSet<string> RejectedHosts = new HashSet<string>();
 
         /// <summary>
+        /// Host ids that sent a mod list which PASSED validation this connection. The positive half of the gate:
+        /// a client that never sends its mod list at all - patching out the handshake rather than fabricating a
+        /// passing list - would otherwise slip past a check that only ever looks for a recorded FAILURE. Cleared
+        /// on disconnect alongside RejectedHosts. Server side only.
+        /// </summary>
+        private static readonly HashSet<string> ValidatedHosts = new HashSet<string>();
+
+        /// <summary>
         /// Server side: refuse a peer that failed mod validation.
         ///
         /// The "Error" RPC on its own is only advisory. Vanilla ZNet.RPC_Error assigns m_connectionStatus and
@@ -676,11 +701,25 @@ namespace ValheimEnforcer.modules {
                 if (!__instance.IsServer()) { return true; }
 
                 string hostId = rpc.GetSocket()?.GetHostName();
-                if (string.IsNullOrEmpty(hostId) || !RejectedHosts.Contains(hostId)) { return true; }
+                if (string.IsNullOrEmpty(hostId)) { return true; }
 
-                Logger.LogWarning($"Refusing peer info from {hostId}: rejected earlier for a mod validation failure.");
-                rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorVersion);
-                return false; // skip vanilla peer-info handling, exactly as vanilla's own rejections do
+                if (RejectedHosts.Contains(hostId)) {
+                    Logger.LogWarning($"Refusing peer info from {hostId}: rejected earlier for a mod validation failure.");
+                    rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorVersion);
+                    return false; // skip vanilla peer-info handling, exactly as vanilla's own rejections do
+                }
+
+                // Positive gate: an honest client's mod list arrives during RPC_ClientHandshake, before PeerInfo,
+                // on the same ordered ZRpc stream - so by here it is in ValidatedHosts. Reaching PeerInfo in
+                // neither set means the mod handshake never ran, which is what a client that stubbed it out looks
+                // like. Only the ModSync RPC (registered when ModSettings is ready) can populate the set, so do
+                // not refuse before this server is itself ready to validate.
+                if (ModSettings != null && !ValidatedHosts.Contains(hostId)) {
+                    Logger.LogWarning($"Refusing peer info from {hostId}: no mod list was received before PeerInfo (the ValheimEnforcer handshake did not run).");
+                    rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorVersion);
+                    return false;
+                }
+                return true;
             }
         }
 
@@ -690,9 +729,11 @@ namespace ValheimEnforcer.modules {
             private static void Prefix(ZNet __instance, ZNetPeer peer) {
                 if (!__instance.IsServer() || peer == null) { return; }
                 string hostId = peer.m_socket?.GetHostName();
-                if (!string.IsNullOrEmpty(hostId) && RejectedHosts.Remove(hostId)) {
+                if (string.IsNullOrEmpty(hostId)) { return; }
+                if (RejectedHosts.Remove(hostId)) {
                     Logger.LogDebug($"Cleared mod rejection for {hostId}; a corrected client may reconnect.");
                 }
+                ValidatedHosts.Remove(hostId);
             }
         }
 

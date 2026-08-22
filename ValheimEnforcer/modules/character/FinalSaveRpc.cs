@@ -36,16 +36,48 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
+        // Largest compressed final-save payload accepted, and the ceiling its decompression may expand to.
+        // This RPC is registered in OnNewConnection, before the handshake, so it is the earliest thing a
+        // hostile client can reach; an unbounded GZip here is a decompression bomb on the main thread.
+        private const int MaxCompressedBytes = 2 * 1024 * 1024;
+        private const int MaxDecompressedBytes = 8 * 1024 * 1024;
+
         // Server side: a client's end-of-session character save. Deserialization/persistence is shared with
         // the Jotunn handler via ValConfig.PersistReceivedCharacterYaml (disk mode hands off to the async
         // CharacterStore, so this stays cheap on the main thread).
         private static void RPC_FinalCharSave(ZRpc rpc, ZPackage pkg) {
-            long sender = ZNet.instance?.GetPeer(rpc)?.m_uid ?? 0L;
+            // Resolve the peer from the real socket, and require it to be READY (past RPC_PeerInfo). Before that
+            // its uid is 0 and its name is empty, which is exactly the state PersistReceivedCharacterYaml's
+            // identity check now fails closed on - but dropping here is clearer and avoids GetPeer(0) aliasing
+            // onto some other mid-handshake peer.
+            ZNetPeer peer = ZNet.instance?.GetPeer(rpc);
+            if (peer == null || !peer.IsReady()) {
+                Logger.LogWarning("Dropping a final character save from a peer that is not past the handshake yet.");
+                return;
+            }
+            long sender = peer.m_uid;
+
+            byte[] compressed;
+            try {
+                compressed = pkg.ReadByteArray();
+            } catch (Exception e) {
+                Logger.LogWarning($"Failed to read final character save from {sender}: {e.Message}");
+                return;
+            }
+            if (compressed == null || compressed.Length > MaxCompressedBytes) {
+                Logger.LogWarning($"Dropping an oversize final character save from {sender} ({compressed?.Length ?? 0} compressed bytes).");
+                return;
+            }
+
             string yaml;
             try {
-                yaml = Decompress(pkg.ReadByteArray());
+                yaml = Decompress(compressed);
             } catch (Exception e) {
                 Logger.LogWarning($"Failed to decompress final character save from {sender}: {e.Message}");
+                return;
+            }
+            if (yaml == null) {
+                Logger.LogWarning($"Dropping a final character save from {sender}: it decompressed past the {MaxDecompressedBytes} byte limit.");
                 return;
             }
             Logger.LogDebug($"Received synchronous final character save from {sender}.");
@@ -73,11 +105,20 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
+        // Bounded decompression: returns null rather than expanding past MaxDecompressedBytes, so a small
+        // compressed payload cannot balloon into hundreds of megabytes on the main thread.
         private static string Decompress(byte[] data) {
             using (MemoryStream input = new MemoryStream(data))
             using (GZipStream gz = new GZipStream(input, CompressionMode.Decompress))
             using (MemoryStream output = new MemoryStream()) {
-                gz.CopyTo(output);
+                byte[] buffer = new byte[8192];
+                int total = 0;
+                int read;
+                while ((read = gz.Read(buffer, 0, buffer.Length)) > 0) {
+                    total += read;
+                    if (total > MaxDecompressedBytes) { return null; }
+                    output.Write(buffer, 0, read);
+                }
                 return Encoding.UTF8.GetString(output.ToArray());
             }
         }

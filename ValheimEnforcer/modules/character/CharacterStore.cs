@@ -51,8 +51,13 @@ namespace ValheimEnforcer.modules.character {
             // has server-side enforcement on. Captured on the main thread: the worker must never read a
             // ConfigEntry, which the config file watcher can reload underneath it at any moment.
             public NewCharacterRules.Policy NewCharacterPolicy;
+            // Non-null only when the connecting peer was a RETURNING player and ServerSideJoinEnforcement is on,
+            // so the first full save of the session is re-validated against the stored character server-side.
+            // Snapshotted on the main thread for the same reason as above.
+            public ReturningCharacterRules.Policy ReturningPolicy;
         }
         private sealed class DeltaMessage : Message { public DeltaSummaryUpdate Delta; public long Sender; }
+        private sealed class DeathMessage : Message { public string HostID; public string Name; }
 
         /// <summary>Why GetOrLoad returned what it did. The distinction is load-bearing: a save that exists but
         /// will not parse must never be mistaken for a character that has never been here, or a corrupt file
@@ -107,7 +112,7 @@ namespace ValheimEnforcer.modules.character {
         /// <summary>Persist a full character save received from a client. The raw YAML is parsed and
         /// written on the worker thread, so the caller does no serialization work.</summary>
         internal static void SubmitFullSave(string rawYaml, long sender, string senderAccountId, string senderCharacterName,
-                                            NewCharacterRules.Policy newCharacterPolicy) {
+                                            NewCharacterRules.Policy newCharacterPolicy, ReturningCharacterRules.Policy returningPolicy) {
             EnsureWorker();
             messages.Enqueue(new FullSaveMessage {
                 RawYaml = rawYaml,
@@ -115,6 +120,7 @@ namespace ValheimEnforcer.modules.character {
                 SenderAccountId = senderAccountId,
                 SenderCharacterName = senderCharacterName,
                 NewCharacterPolicy = newCharacterPolicy,
+                ReturningPolicy = returningPolicy,
             });
             signal.Set();
         }
@@ -126,6 +132,17 @@ namespace ValheimEnforcer.modules.character {
         internal static void SubmitDelta(DeltaSummaryUpdate delta, long sender) {
             EnsureWorker();
             messages.Enqueue(new DeltaMessage { Delta = delta, Sender = sender });
+            signal.Set();
+        }
+
+        /// <summary>Record that a character died: clear its item list and mark it a dirty disconnect, so the
+        /// pre-death inventory can no longer be replayed as authoritative. Enqueued through the worker so it is
+        /// ordered FIFO with any save/delta already in flight for the same character - a pre-death full save
+        /// still in the queue is written first and then cleared, rather than racing the clear and winning.</summary>
+        internal static void SubmitDeath(string hostId, string name) {
+            if (string.IsNullOrEmpty(hostId) || string.IsNullOrEmpty(name)) { return; }
+            EnsureWorker();
+            messages.Enqueue(new DeathMessage { HostID = hostId, Name = name });
             signal.Set();
         }
 
@@ -307,6 +324,22 @@ namespace ValheimEnforcer.modules.character {
                             pushSanitized = true;
                         }
                     }
+                    // The returning-character counterpart: re-validate the first save of a session against the
+                    // stored character (state Found means we have one to validate against). Same reasoning as
+                    // the new-character rules - the client runs this too, but the client is what we defend
+                    // against. Only fires once per session because ClearReturning drops the policy after.
+                    else if (full.ReturningPolicy != null && state == LoadState.Found && existing != null) {
+                        ReturningCharacterRules.Result reconciled = ReturningCharacterRules.Apply(c, existing, full.ReturningPolicy);
+                        if (reconciled.Changed) {
+                            Logger.LogWarning($"Returning save for {c.Name} ({c.HostID}) reconciled to the stored character: {reconciled.Describe()}");
+                            pushSanitized = true;
+                        }
+                        FirstSaveEnforcement.ClearReturning(full.Sender);
+                    }
+
+                    // Bound any impossible skill value (>100, negative, NaN) to the valid range, independent
+                    // of the enforcement policies above.
+                    SkillClamp.Apply(c.SkillLevels, c.Name);
 
                     // Re-serialize from the parsed object so on-disk format is always server-canonical.
                     cache[key] = new Entry { Character = c, Yaml = yamlserializer.Serialize(c) };
@@ -337,6 +370,20 @@ namespace ValheimEnforcer.modules.character {
                     Logger.LogInfo($"Saved delta update for {cur.Name}.");
                     return key;
                 }
+                case DeathMessage death: {
+                    string key = KeyFor(death.HostID, death.Name);
+                    DataObjects.Character cur = GetOrLoad(key, death.HostID, death.Name, out _);
+                    if (cur == null) { return null; } // no stored save; nothing to clear, nothing to dupe
+                    bool alreadyCleared = (cur.PlayerItems == null || cur.PlayerItems.Count == 0)
+                                          && cur.LastDisconnect == DisconnectionState.DirtyDisconnect;
+                    if (alreadyCleared) { return null; } // honest client already cleared and pushed
+                    Logger.LogInfo($"Death recorded for {cur.Name} ({cur.HostID}); clearing the stored item list so the grave cannot be duplicated on rejoin.");
+                    if (cur.PlayerItems == null) { cur.PlayerItems = new List<PackedItem>(); } else { cur.PlayerItems.Clear(); }
+                    cur.ActiveCharacterEffects?.Clear();
+                    cur.LastDisconnect = DisconnectionState.DirtyDisconnect;
+                    cache[key] = new Entry { Character = cur, Yaml = yamlserializer.Serialize(cur) };
+                    return key;
+                }
             }
             return null;
         }
@@ -349,9 +396,17 @@ namespace ValheimEnforcer.modules.character {
         // server could not resolve an identity at all the check is skipped rather than failing closed, so an
         // unrecognised socket type cannot stop every save on the server from being written.
         private static bool IdentityMatchesSender(DataObjects.Character c, FullSaveMessage full) {
+            // Fail CLOSED when the main thread could not resolve the sender's identity (see the twin check in
+            // ValConfig.SaveBelongsToSender). Empty identity is the pre-handshake state, not a normal one.
             if (string.IsNullOrEmpty(full.SenderAccountId) || string.IsNullOrEmpty(full.SenderCharacterName)) {
-                Logger.LogDebug($"No resolved identity for sender {full.Sender}; accepting the save for {c.Name} unchecked.");
-                return true;
+                Logger.LogWarning($"Refusing a character save from sender {full.Sender}: the server could not resolve who they are.");
+                return false;
+            }
+            // HostID/Name become path segments in WriteToDisk; refuse a traversal-shaped one here too, so the
+            // worker never composes a path outside the character folder even if a caller forgot to check.
+            if (!PeerIdentity.IsSafeToken(c.HostID) || !PeerIdentity.IsSafeToken(c.Name)) {
+                Logger.LogWarning($"Refusing a character save from {full.SenderCharacterName} ({full.SenderAccountId}): the account id or character name is not a safe file name.");
+                return false;
             }
             if (!PlatformIds.Matches(full.SenderAccountId, c.HostID)) {
                 Logger.LogWarning($"Refusing a character save from {full.SenderCharacterName} ({full.SenderAccountId}): it claims to belong to account {c.HostID}.");

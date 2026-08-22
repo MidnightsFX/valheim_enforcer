@@ -32,23 +32,58 @@ namespace ValheimEnforcer.modules.character {
             internal string CharacterName;
         }
 
+        // Guards both dictionaries. Almost all access is on the main thread (SendSavedCharacter,
+        // PersistReceivedCharacterYaml), but ClearReturning is called from the CharacterStore worker thread
+        // once it has reconciled a returning save, so the two must not be touched without the lock.
+        private static readonly object gate = new object();
+        // Peers that connected with NO stored character - the first save each uploads is held to the
+        // new-character rules.
         private static readonly Dictionary<long, PendingPeer> pending = new Dictionary<long, PendingPeer>();
+        // Peers that connected WITH a stored character - the first save each uploads is reconciled against it,
+        // once per session (the entry is dropped after the first save reconciles it).
+        private static readonly Dictionary<long, PendingPeer> returning = new Dictionary<long, PendingPeer>();
 
         /// <summary>Server, main thread. The connect-time lookup found nothing for this peer.</summary>
         internal static void MarkNoSaveOnConnect(ZNetPeer peer, string accountId, string characterName) {
             if (peer == null) { return; }
-            pending[peer.m_uid] = new PendingPeer { AccountId = accountId, CharacterName = characterName };
+            lock (gate) {
+                pending[peer.m_uid] = new PendingPeer { AccountId = accountId, CharacterName = characterName };
+                returning.Remove(peer.m_uid);
+            }
             Logger.LogDebug($"First-save enforcement armed for {characterName} ({accountId}).");
         }
 
-        /// <summary>The peer does have a stored character, or has gone away. Either way it is not new.</summary>
+        /// <summary>Server, main thread. The connect-time lookup DID find a stored character for this peer, so
+        /// the first full save of the session is reconciled against it rather than trusted outright.</summary>
+        internal static void MarkHasSaveOnConnect(ZNetPeer peer, string accountId, string characterName) {
+            if (peer == null) { return; }
+            lock (gate) {
+                returning[peer.m_uid] = new PendingPeer { AccountId = accountId, CharacterName = characterName };
+                pending.Remove(peer.m_uid);
+            }
+            Logger.LogDebug($"Returning-character enforcement armed for {characterName} ({accountId}).");
+        }
+
+        /// <summary>The peer has gone away (disconnect). Drop it from both tracks.</summary>
         internal static void ClearForPeer(ZNetPeer peer) {
             if (peer == null) { return; }
-            pending.Remove(peer.m_uid);
+            lock (gate) {
+                pending.Remove(peer.m_uid);
+                returning.Remove(peer.m_uid);
+            }
+        }
+
+        /// <summary>The returning save for this peer has been reconciled; do not reconcile it again this
+        /// session. Safe to call from the CharacterStore worker thread.</summary>
+        internal static void ClearReturning(long sender) {
+            lock (gate) { returning.Remove(sender); }
         }
 
         internal static void ClearAll() {
-            pending.Clear();
+            lock (gate) {
+                pending.Clear();
+                returning.Clear();
+            }
         }
 
         /// <summary>
@@ -57,10 +92,17 @@ namespace ValheimEnforcer.modules.character {
         /// enforcement AND there is at least one rule to apply.
         /// </summary>
         internal static bool ShouldSanitize(long sender, out PendingPeer info) {
-            info = null;
-            if (!pending.TryGetValue(sender, out info)) { return false; }
-            if (ValConfig.ServerSideNewCharacterEnforcement == null || !ValConfig.ServerSideNewCharacterEnforcement.Value) { return false; }
-            return true;
+            lock (gate) {
+                return pending.TryGetValue(sender, out info);
+            }
+        }
+
+        /// <summary>Whether the first full save from this sender should be reconciled against the stored
+        /// character it connected with.</summary>
+        internal static bool ShouldReconcileReturning(long sender) {
+            lock (gate) {
+                return returning.ContainsKey(sender);
+            }
         }
 
         // A peer's entry outlives its first save on purpose. It is not cleared when a save arrives, because the

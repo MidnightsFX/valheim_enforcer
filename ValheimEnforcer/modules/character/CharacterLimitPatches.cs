@@ -31,6 +31,36 @@ namespace ValheimEnforcer.modules.character {
         // ---- Server ---------------------------------------------------------------------------------------
 
         /// <summary>
+        /// Refuses a connection whose character name is not usable as a file name, before anything files a save
+        /// under it. The name is read raw from the client's peer-info package by vanilla and used by this mod as
+        /// a path segment (Characters/&lt;id&gt;/&lt;name&gt;.yaml); a name like "..\..\plugins\x" would otherwise write
+        /// a .yaml wherever the traversal points. The save path already refuses such a name defensively, but
+        /// that leaves the player silently unsaved - rejecting at the handshake tells them why. Reuses the
+        /// character-limit reason channel to put the explanation on the connection-failed panel.
+        /// </summary>
+        [HarmonyPatch(typeof(ZNet), nameof(ZNet.RPC_PeerInfo))]
+        internal static class ZNet_RPC_PeerInfo_NameSafety {
+
+            [HarmonyPrefix]
+            [HarmonyPriority(Priority.First)]
+            private static bool Prefix(ZNet __instance, ZRpc rpc, ZPackage pkg) {
+                if (!__instance.IsServer()) { return true; }
+                // An unreadable or too-old package is left to vanilla (it is about to be version-rejected anyway).
+                if (!TryPeekPlayerName(pkg, out string playerName)) { return true; }
+                if (PeerIdentity.IsSafeToken(playerName)) { return true; }
+
+                string hostId = rpc.GetSocket()?.GetHostName();
+                Logger.LogWarning($"Refusing '{playerName}' from {hostId ?? "unknown"}: the character name is not a safe file name.");
+                string reason = "This server cannot accept your character name: it contains characters that are not allowed "
+                              + "(path separators, '..', a colon, or control characters). Rename the character and reconnect.";
+                rpc.Invoke(RPC_NAME, reason);
+                rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorKicked);
+                rpc.GetSocket()?.Flush();
+                return false; // skip vanilla peer-info handling, exactly as vanilla's own rejections do
+            }
+        }
+
+        /// <summary>
         /// Deliberately NOT Priority.First, unlike the mod-mismatch and known-cheater gates: the first prefix
         /// to return false short-circuits the rest, and "your mods are wrong" or "you are a known cheater" is
         /// the more useful thing to tell a player than "wrong character".

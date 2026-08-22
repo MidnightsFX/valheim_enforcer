@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
 using ValheimEnforcer.common;
+using ValheimEnforcer.modules.character;
 using ValheimEnforcer.modules.notifications;
 
 namespace ValheimEnforcer.modules.worldintegrity {
@@ -70,27 +71,46 @@ namespace ValheimEnforcer.modules.worldintegrity {
         private static bool createdThisPacket;
         private static readonly List<StructureOffence> pending = new List<StructureOffence>();
 
+        // Which of the two jobs this packet is being watched for. Structure detection respects the admin
+        // exemption and the master switch; death observation applies to everyone whenever server-side join
+        // enforcement is on, because a death is a fact to record, not a detection to act on.
+        private static bool structureWatch;
+        private static bool deathWatch;
+
+        private static readonly int TombstoneHash = "Player_tombstone".GetStableHashCode();
+
         /// <summary>Opens the bracket around one client's ZDOData packet.</summary>
         internal static void BeginPacket(ZRpc rpc) {
             inboundPeer = null;
             createdThisPacket = false;
             lastCreated = ZDOID.None;
+            structureWatch = false;
+            deathWatch = false;
             if (pending.Count > 0) { pending.Clear(); }
 
             // Everything from here down runs inside the ZDO stream, which is the one thing on a server that
             // must not be allowed to throw - a broken packet loop desyncs or disconnects everybody. The
             // detector going quiet is always the better failure.
             try {
-                if (!ValConfig.EnableStructureValidation.Value) { return; }
+                bool structureOn = ValConfig.EnableStructureValidation.Value
+                    && (ValConfig.DetectNonBuildableStructures.Value || ValConfig.DetectExcessiveStructureHealth.Value);
+                bool deathOn = ValConfig.ServerSideJoinEnforcement != null && ValConfig.ServerSideJoinEnforcement.Value;
+                if (!structureOn && !deathOn) { return; }
                 if (ZNet.instance == null || !ZNet.instance.IsServer()) { return; }
-                if (!ValConfig.DetectNonBuildableStructures.Value && !ValConfig.DetectExcessiveStructureHealth.Value) { return; }
 
                 ZNetPeer peer = PeerFor(rpc);
                 if (peer == null) { return; }
-                if (IsExempt(peer)) { return; }
+
+                // Structure detection skips exempt admins; death observation does not - an admin dying still
+                // creates a grave, and recording it is not a detection to be exempt from.
+                structureWatch = structureOn && !IsExempt(peer);
+                deathWatch = deathOn;
+                if (!structureWatch && !deathWatch) { return; }
                 inboundPeer = peer;
             } catch (Exception e) {
                 inboundPeer = null;
+                structureWatch = false;
+                deathWatch = false;
                 Logger.LogDebug($"Structure validation could not open a packet: {e.Message}");
             }
         }
@@ -105,6 +125,8 @@ namespace ValheimEnforcer.modules.worldintegrity {
             inboundPeer = null;
             createdThisPacket = false;
             lastCreated = ZDOID.None;
+            structureWatch = false;
+            deathWatch = false;
             if (pending.Count == 0) { return; }
 
             List<StructureOffence> offences = new List<StructureOffence>(pending);
@@ -132,7 +154,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
         /// cheated structure once would be the one reported.
         /// </summary>
         internal static float CaptureHealth(ZDO zdo) {
-            if (inboundPeer == null || zdo == null) { return float.NaN; }
+            if (inboundPeer == null || !structureWatch || zdo == null) { return float.NaN; }
             try {
                 if (!ValConfig.DetectExcessiveStructureHealth.Value) { return float.NaN; }
                 return zdo.GetFloat(ZDOVars.s_health, float.NaN);
@@ -155,6 +177,16 @@ namespace ValheimEnforcer.modules.worldintegrity {
         private static void Evaluate(ZDO zdo, float previousHealth) {
             bool isNew = createdThisPacket && zdo.m_uid == lastCreated;
             createdThisPacket = false;
+
+            // Death observation: a newly created Player_tombstone in this peer's packet means this peer just
+            // died. Record it server-side so the grave cannot be duplicated by a client that skips its own
+            // death handling (ClearTrackedItemsOnDeath). Only fires on the created ZDO, so the GetPrefab cost
+            // lands on new ZDOs only, and deaths are rare.
+            if (deathWatch && isNew) {
+                if (zdo.GetPrefab() == TombstoneHash) { ObserveDeath(); }
+            }
+
+            if (!structureWatch) { return; }
 
             int prefabHash = zdo.GetPrefab();
             if (prefabHash == 0) { return; }
@@ -182,6 +214,58 @@ namespace ValheimEnforcer.modules.worldintegrity {
         }
 
         /// <summary>
+        /// Records that the peer whose packet is being processed just died: clears the item list on their
+        /// stored character and marks it a dirty disconnect, so the pre-death inventory can no longer be
+        /// replayed onto the server as authoritative. This is the server-side twin of the client's
+        /// CharacterManager.ClearTrackedItemsForDeath - a modified client that skips its copy can otherwise
+        /// keep the pre-death items live on the server and dupe the grave on the next join.
+        ///
+        /// Attribution is always the packet's own peer, so a forged tombstone can only ever clear the SENDER's
+        /// own character - never another player's. Runs on the main thread (inside ZDO deserialize), so it does
+        /// its own load/write rather than using the async store; deaths are rare, so the synchronous I/O is fine.
+        /// </summary>
+        private static void ObserveDeath() {
+            ZNetPeer peer = inboundPeer;
+            if (peer == null || peer.m_socket == null) { return; }
+            string endpoint = peer.m_socket.GetEndPointString();
+            string name = peer.m_playerName;
+            if (string.IsNullOrEmpty(endpoint) || string.IsNullOrEmpty(name)) { return; }
+
+            try {
+                // Resolve the spelling the save is actually filed under (an account reaches us under more than
+                // one id spelling; see PlatformIds), so the clear lands on the right file.
+                if (!CharacterSaves.TryResolveSave(endpoint, name, out string saveId, out string saveName, out bool lookupFailed)) {
+                    // No stored save (or the store could not be read) - nothing to clear, nothing to dupe.
+                    if (lookupFailed) { Logger.LogDebug($"Death observed for {name} but the character store could not be read; leaving it alone."); }
+                    return;
+                }
+
+                if (ValConfig.InternalStorageMode.Value) {
+                    // Internal storage is main-thread only and has no async worker to race, so clear it inline.
+                    DataObjects.Character stored = ValConfig.LoadCharacterFromSave(saveId, saveName);
+                    if (stored == null) { return; }
+                    bool alreadyCleared = (stored.PlayerItems == null || stored.PlayerItems.Count == 0)
+                                          && stored.LastDisconnect == DataObjects.DisconnectionState.DirtyDisconnect;
+                    if (alreadyCleared) { return; }
+                    Logger.LogInfo($"Death observed for {saveName} ({saveId}); clearing the stored item list so the grave cannot be duplicated on rejoin.");
+                    if (stored.PlayerItems == null) { stored.PlayerItems = new List<DataObjects.PackedItem>(); } else { stored.PlayerItems.Clear(); }
+                    stored.ActiveCharacterEffects?.Clear();
+                    stored.LastDisconnect = DataObjects.DisconnectionState.DirtyDisconnect;
+                    ValConfig.WritePlayerCharacterToSave(saveId, stored);
+                    return;
+                }
+
+                // Disk mode: route through the async store so the clear is ordered FIFO behind any full save
+                // already queued for this character. Clearing on disk directly here would race a pending
+                // pre-death full save in the worker queue, which would then be written after the clear and
+                // restore the very inventory we are trying to drop.
+                CharacterStore.SubmitDeath(saveId, saveName);
+            } catch (Exception e) {
+                Logger.LogDebug($"Death observation failed for {name}: {e.Message}");
+            }
+        }
+
+        /// <summary>
         /// Gate on ZNetScene.RPC_SpawnObject, the second way to get a structure into the world.
         ///
         /// ZNetScene.SpawnObject has no callers anywhere in the game assembly - it is a routed RPC that makes
@@ -194,23 +278,41 @@ namespace ValheimEnforcer.modules.worldintegrity {
                 if (!ValConfig.EnableStructureValidation.Value) { return true; }
                 if (!ValConfig.DetectNonBuildableStructures.Value) { return true; }
                 if (ZNet.instance == null || !ZNet.instance.IsServer()) { return true; }
-                if (!StructureIndex.EnsureBuilt()) { return true; }
-                if (!StructureIndex.IsNonBuildableStructure(prefabHash)) { return true; }
-                if (StructureIndex.IsIgnored(prefabHash)) { return true; }
 
+                // ZNetScene.SpawnObject has no caller anywhere in the game assembly - it is a routed RPC that
+                // makes every receiver, the server included, Instantiate an arbitrary prefab by hash. So when
+                // structure validation is on, NO client-originated SpawnObject is legitimate, whatever the
+                // prefab: a structure, a creature, a boss, an item. The check used to let anything that was not
+                // a non-buildable structure through; now the default is to block, with a structure still getting
+                // the full report-and-enforce treatment. `spawner` is trustworthy here because RoutedRpcGuard
+                // corrects the routed sender before this runs.
                 ZNetPeer peer = ZNet.instance.GetPeer(spawner);
-                if (peer != null && IsExempt(peer)) { return true; }
+                if (peer != null && IsExempt(peer)) { return true; } // admins keep their devcommands-style freedom
 
-                StructureOffence offence = new StructureOffence {
-                    Id = ZDOID.None,
-                    PrefabHash = prefabHash,
-                    PrefabName = StructureIndex.NameOf(prefabHash),
-                    Position = pos,
-                    Reason = "asked the server to spawn a structure no build tool can place (SpawnObject RPC)",
-                };
+                bool indexReady = StructureIndex.EnsureBuilt();
+                if (indexReady && StructureIndex.IsIgnored(prefabHash)) { return true; } // allowlisted prefab
 
-                // No removal pass: nothing is instantiated, because this returns false.
-                Act(peer, new List<StructureOffence> { offence }, false);
+                if (indexReady && StructureIndex.IsNonBuildableStructure(prefabHash)) {
+                    StructureOffence offence = new StructureOffence {
+                        Id = ZDOID.None,
+                        PrefabHash = prefabHash,
+                        PrefabName = StructureIndex.NameOf(prefabHash),
+                        Position = pos,
+                        Reason = "asked the server to spawn a structure no build tool can place (SpawnObject RPC)",
+                    };
+                    // No removal pass: nothing is instantiated, because this returns false.
+                    Act(peer, new List<StructureOffence> { offence }, false);
+                    return false;
+                }
+
+                // Any other client-originated SpawnObject. Block it too - the RPC has no legitimate client
+                // caller - but do not kick/ban for it: a non-structure spawn is lower-confidence than the
+                // structure case, and refusing the RPC already neutralises it.
+                string who = peer != null
+                    ? (peer.m_socket != null ? peer.m_socket.GetHostName() : peer.m_uid.ToString())
+                    : spawner.ToString();
+                string name = indexReady ? StructureIndex.NameOf(prefabHash) : prefabHash.ToString();
+                Logger.LogWarning($"Blocked a SpawnObject RPC for '{name}' from {who}: nothing in the game legitimately sends this RPC.");
                 return false;
             } catch (Exception e) {
                 // Let it through rather than blocking on a bug of ours.
@@ -378,6 +480,8 @@ namespace ValheimEnforcer.modules.worldintegrity {
             inboundPeer = null;
             createdThisPacket = false;
             lastCreated = ZDOID.None;
+            structureWatch = false;
+            deathWatch = false;
             pending.Clear();
             lastNotified.Clear();
         }

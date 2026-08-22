@@ -38,7 +38,6 @@ namespace ValheimEnforcer {
         // Comma-separated rather than List<string>: BepInEx's config system only supports primitives,
         // string and enums, so binding a List<string> throws at startup.
         public static ConfigEntry<string> NewCharacterStartingItems;
-        public static ConfigEntry<bool> ServerSideNewCharacterEnforcement;
         public static ConfigEntry<bool> ConfiscateUnidentifiableItems;
         public static ConfigEntry<int> InitialCharacterSyncWaitSeconds;
         public static ConfigEntry<bool> PreventExternalCustomDataChanges;
@@ -48,6 +47,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> SavePlayerStatusEffectsOnLogout;
         public static ConfigEntry<bool> ItemRemovalForDirtyReconnection;
         public static ConfigEntry<bool> ItemReturnForDirtyReconnection;
+        public static ConfigEntry<bool> ServerSideJoinEnforcement;
 
         public static ConfigEntry<bool> EnforceCharacterLimit;
         public static ConfigEntry<int> MaxCharactersPerAccount;
@@ -64,6 +64,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<int> DeltaSynchronizationFrequencyInSeconds;
         public static ConfigEntry<int> FullSyncPullIntervalMinutes;
         public static ConfigEntry<int> FullSyncMaxConcurrentPlayers;
+        public static ConfigEntry<bool> EnforceRoutedRpcSender;
 
         public static ConfigEntry<bool> EnableCheatDetection;
         public static ConfigEntry<bool> DetectCheatEngine;
@@ -189,7 +190,6 @@ namespace ValheimEnforcer {
             PreventExternalCustomDataChanges = BindServerConfig("Player Sync", "PreventExternalCustomDataChanges", true, "If enabled, tracks player custom data. Warning: custom data can be large and can impact how other mods function.");
             newCharacterClearCustomData = BindServerConfig("Player Sync", "newCharacterClearCustomData", true, "If enabled, new characters will have their custom data cleared.");
             NewCharacterStartingItems = BindServerConfig("Player Sync", "NewCharacterStartingItems", "ArmorRagsChest,ArmorRagsLegs,Torch", "Comma separated prefab names a brand new character is allowed to arrive holding when NewCharactersRemoveExtraItems is enabled. Anything else in their inventory on their first join is confiscated, as is any item above quality 1. Names are matched exactly (case insensitively), not as substrings, so 'Torch' does not also permit 'TorchMist'. Change this if your modpack starts players with different gear; leave it empty to allow no starting items at all.");
-            ServerSideNewCharacterEnforcement = BindServerConfig("Player Sync", "ServerSideNewCharacterEnforcement", true, "If enabled, the server applies the NewCharacter* rules itself to the first character save it ever stores for a player, instead of trusting the client to have done it. The client does this too, but a client is what you are defending against - this is the copy of the check that a modified client cannot skip. Inert unless at least one of NewCharactersRemoveExtraItems, NewCharacterSetSkillsToZero or newCharacterClearCustomData is on.");
             ConfiscateUnidentifiableItems = BindServerConfig("Player Sync", "ConfiscateUnidentifiableItems", false, "Controls what happens to an inventory item whose ItemDrop prefab does not resolve on the client - usually a modded item, or an entry another mod created directly. These cannot be tracked, matched or handed back, so by default they are left alone and logged. Enable to confiscate them instead; note that a confiscated item with no prefab name can never be returned with the confiscation commands.", null, true);
             InitialCharacterSyncWaitSeconds = BindServerConfig("Player Sync", "InitialCharacterSyncWaitSeconds", 10, "How long a joining client waits for the server's answer about its stored character before giving up and treating the character as new. The answer normally arrives during the connection handshake, well before the world finishes loading, so this only matters if that is delayed. Set to 0 to never wait. Either way the character is treated as NEW when no answer arrives - the local save file on the joining machine is never used as the baseline for a server.", true, 0, 60);
             ValidateItemCustomData = BindServerConfig("Player Sync", "ValidateItemCustomData", true, "If enabled, custom data on items will be validated.");
@@ -198,6 +198,7 @@ namespace ValheimEnforcer {
             SavePlayerStatusEffectsOnLogout = BindServerConfig("Player Sync", "SavePlayerStatusEffectsOnLogout", true, "Whether or not to save active character effects on logout and reapply on login");
             ItemRemovalForDirtyReconnection = BindServerConfig("Player Sync", "ItemRemovalForDirtyReconnection", false, "Leniency for dirty reconnects (crash/timeout, where the server save may be up to one delta window stale). RemoveNontrackedItemsFromJoiningPlayers always runs otherwise; if this is enabled, untracked items are NOT confiscated when the player's last disconnect was dirty, so crash victims keep items gained in the unsaved window.");
             ItemReturnForDirtyReconnection = BindServerConfig("Player Sync", "ItemReturnForDirtyReconnection", false, "Leniency for dirty reconnects. AddMissingItemsFromPlayerServerSave always restores missing tracked items on a clean join; on a dirty reconnect restoration is skipped by default (to avoid duping items consumed in the unsaved window) unless this is enabled.");
+            ServerSideJoinEnforcement = BindServerConfig("Player Sync", "ServerSideJoinEnforcement", true, "If enabled, the server re-applies the join rules (item confiscation, skill clamping, custom-data reset) to the first full character save a RETURNING player uploads each session, instead of trusting the client to have done it. This is the returning-character counterpart to the first-save enforcement the server already runs for brand new characters: the client runs the same checks, but the client is what you are defending against, so this is the copy a modified client cannot skip. Honours RemoveNontrackedItemsFromJoiningPlayers, PreventExternalSkillRaises, PreventExternalCustomDataChanges and the dirty-reconnect leniency settings, so turning those off turns off the matching server-side check too. Inert if none of them are on.");
 
             EnforceCharacterLimit = BindServerConfig("Player Sync", "EnforceCharacterLimit", false, "Master switch for the one-character-per-account rule. When enabled, an account may only join with a character the server already has a save for, up to MaxCharactersPerAccount; any other character is refused at the connect handshake and told which character to use instead. Characters that already have a save are always allowed, so turning this on never locks out an existing player - it only stops new characters being added. Freeing a slot means deleting that character's save file (BepInEx/config/ValheimEnforcer/Characters/<accountId>/<Name>.yaml), which is what a character reset already involves. Off by default.");
             MaxCharactersPerAccount = BindServerConfig("Player Sync", "MaxCharactersPerAccount", 1, "How many characters one account may have on this server when EnforceCharacterLimit is enabled. Accounts that already have more than this keep every character they have; the limit only blocks adding another.", valmin: 1, valmax: 20);
@@ -219,6 +220,7 @@ namespace ValheimEnforcer {
             HashComputeTimeoutSeconds = BindServerConfig("Advanced", "HashComputeTimeoutSeconds", 30, "Maximum time spent hashing local plugin DLLs at startup before giving up and reporting the remainder as unverifiable. Hashing runs on background threads and usually takes well under a second; this is a safety valve for a stalled disk, not a tuning knob.", advanced: true, valmin: 5, valmax: 300);
             ThunderstoreMaxArchiveMB = BindServerConfig("Advanced", "ThunderstoreMaxArchiveMB", 128, "Largest Thunderstore archive, in megabytes, the server will download when resolving mod hashes. Archives are held in memory while their DLLs are hashed, so this is also the peak transient allocation; packages are resolved one at a time so it is never multiplied. Larger archives are skipped and logged.", advanced: true, valmin: 1, valmax: 512);
             FullSyncMaxConcurrentPlayers = BindServerConfig("Advanced", "FullSyncMaxConcurrentPlayers", 5, "Maximum number of players the server asks to upload a full character save at the same time. Larger player counts are staggered into successive waves of this size to avoid a bandwidth spike. 10 is safe on a healthy server; lower it on constrained upload/VPS hosts.", advanced: true, valmin: 1, valmax: 50);
+            EnforceRoutedRpcSender = BindServerConfig("Advanced", "EnforceRoutedRpcSender", true, "If enabled (the default), the server verifies the sender id on every routed network message against the connection it actually arrived on, and corrects it if they disagree. Valheim's routed RPC carries a sender id that the sending client writes and the server never checks, so without this a modified client can impersonate any other connected player - running admin commands, getting someone else banned, or overwriting another player's character save. This affects only forged packets; an honest client is never touched. Leave it on unless another mod is misbehaving because of it, in which case report the mod - turning this off re-opens sender spoofing for this mod AND every other routed RPC on the server.", advanced: true);
 
             EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Master switch for client-side cheat scanning. When enabled the client checks running processes, the DLLs loaded into the game, and open window titles against a catalog of known cheat tools. Only matched entries are reported to the server - the player's full process list is never transmitted.");
             DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Detect ValheimTooler by the namespace of the types it loads (rename-proof), including assemblies injected mid-session. A confirmed detection is always auto-banned regardless of ActionOnDetection. High confidence, very low cost.");
@@ -264,6 +266,14 @@ namespace ValheimEnforcer {
         // often enough that logging every one at info level would drown the log. Notable saves (join, logout,
         // death, an incoming character from a client) leave it false and stay visible without debug logging.
         internal static void WritePlayerCharacterToSave(string id, DataObjects.Character character, bool routine = false) {
+            // The id and the character name are both used as path segments below. On the server they arrive from
+            // a client (the account id from the socket, the name from the peer-info package), so a
+            // traversal-shaped one must never reach Path.Combine. Refuse rather than throw - a bad save is
+            // dropped, the server keeps running.
+            if (character == null || !modules.character.PeerIdentity.IsSafeToken(id) || !modules.character.PeerIdentity.IsSafeToken(character.Name)) {
+                Logger.LogWarning($"Refusing to write a character save under an unsafe account id or name ('{id}' / '{character?.Name}').");
+                return;
+            }
             if (ValConfig.InternalStorageMode.Value) {
                 if (routine) { Logger.LogDebug("Saving character with internal storage mode."); } else { Logger.LogInfo("Saving character with internal storage mode."); }
                 InternalDataStore.SaveAccountCharacter(character);
@@ -281,6 +291,10 @@ namespace ValheimEnforcer {
         }
 
         internal static DataObjects.Character LoadCharacterFromSave(string id, string name) {
+            if (!modules.character.PeerIdentity.IsSafeToken(id) || !modules.character.PeerIdentity.IsSafeToken(name)) {
+                Logger.LogWarning($"Refusing to load a character save for an unsafe account id or name ('{id}' / '{name}').");
+                return null;
+            }
             if (ValConfig.InternalStorageMode.Value) {
                 Logger.LogInfo("Loading character from internal storage system.");
                 DataObjects.Character savedChar = InternalDataStore.GetAccountCharacter(id, name);
@@ -434,7 +448,10 @@ namespace ValheimEnforcer {
                 modules.character.FirstSaveEnforcement.MarkNoSaveOnConnect(peer, id, peer.m_playerName);
                 return CharacterPayload("", CharPayloadNone);
             }
-            modules.character.FirstSaveEnforcement.ClearForPeer(peer);
+            // This peer connected WITH a stored character: arm the returning-character reconciliation, so the
+            // first full save it uploads this session is validated against that stored character server-side
+            // rather than trusted. Keyed by peer uid from the server's own lookup, exactly like the no-save case.
+            modules.character.FirstSaveEnforcement.MarkHasSaveOnConnect(peer, saveId, saveName);
 
             if (ValConfig.InternalStorageMode.Value) {
                 Logger.LogInfo("Using internal storage mode to send character data.");
@@ -482,7 +499,27 @@ namespace ValheimEnforcer {
             return CharacterPayload(StripConfiscatedItemsFromYaml(filecontents), CharPayloadCharacter);
         }
 
+        // Coarse DoS guards on inbound client payloads. None of these are tight - they exist so a single
+        // packet cannot exhaust memory or stall the main thread, not to constrain a legitimate one. A full
+        // character save with a large modded inventory is generously bounded; a delta is small by design.
+        internal const int MaxCharacterPayloadBytes = 8 * 1024 * 1024;
+        internal const int MaxDeltaPayloadBytes = 1 * 1024 * 1024;
+        internal const int MaxCheatReportBytes = 64 * 1024;
+        internal const int MaxModListBytes = 2 * 1024 * 1024;
+        internal const int MaxCommandArgs = 32;
+
+        /// <summary>True when a received package is within a size limit; logs and returns false when it is not.</summary>
+        internal static bool WithinLimit(ZPackage package, int limitBytes, long sender, string what) {
+            int size = package?.Size() ?? 0;
+            if (size > limitBytes) {
+                Logger.LogWarning($"Dropping an oversize {what} from {sender}: {size} bytes exceeds the {limitBytes} byte limit.");
+                return false;
+            }
+            return true;
+        }
+
         public static IEnumerator OnServerRecieveCharacter(long sender, ZPackage package) {
+            if (!WithinLimit(package, MaxCharacterPayloadBytes, sender, "character save")) { yield break; }
             string yaml = package.ReadString(); // must run on the main thread (consumes the ZPackage); cheap
             PersistReceivedCharacterYaml(sender, yaml);
             yield break;
@@ -500,6 +537,16 @@ namespace ValheimEnforcer {
             if (modules.character.FirstSaveEnforcement.ShouldSanitize(sender, out _)) {
                 NewCharacterRules.Policy candidate = NewCharacterRules.Current();
                 if (candidate.AnyEnabled) { newCharacterPolicy = candidate; }
+            }
+
+            // The returning-character counterpart: when this peer connected WITH a stored character and
+            // ServerSideJoinEnforcement is on, the first full save of the session is re-validated against that
+            // stored character. Mutually exclusive with newCharacterPolicy - a peer either had a save or did not.
+            modules.character.ReturningCharacterRules.Policy returningPolicy = null;
+            if (ValConfig.ServerSideJoinEnforcement != null && ValConfig.ServerSideJoinEnforcement.Value
+                && modules.character.FirstSaveEnforcement.ShouldReconcileReturning(sender)) {
+                modules.character.ReturningCharacterRules.Policy candidate = modules.character.ReturningCharacterRules.Current();
+                if (candidate.AnyEnabled) { returningPolicy = candidate; }
             }
 
             // Who the server says this peer is. The payload names its own HostID and Name, but those are
@@ -529,7 +576,8 @@ namespace ValheimEnforcer {
                     // Both stores have to be empty before this counts as a first save. WritePlayerCharacterToSave
                     // deliberately double-writes (registry AND disk) so that switching storage modes does not
                     // lose data, which means a character can be absent from one and present in the other.
-                    if (newCharacterPolicy != null && existing == null && !modules.character.CharacterSaves.ExistsOnDisk(chara.HostID, chara.Name)) {
+                    bool isFirstSave = existing == null && !modules.character.CharacterSaves.ExistsOnDisk(chara.HostID, chara.Name);
+                    if (newCharacterPolicy != null && isFirstSave) {
                         NewCharacterRules.Result sanitized = NewCharacterRules.Apply(chara, newCharacterPolicy, recordConfiscation: true);
                         if (sanitized.Changed) {
                             Logger.LogWarning($"First save for {chara.Name} ({chara.HostID}) held to the new-character rules: {sanitized.Describe()}");
@@ -539,6 +587,19 @@ namespace ValheimEnforcer {
                             return;
                         }
                     }
+                    // Returning-character reconciliation, first save of the session only.
+                    else if (returningPolicy != null && existing != null) {
+                        modules.character.ReturningCharacterRules.Result reconciled = modules.character.ReturningCharacterRules.Apply(chara, existing, returningPolicy);
+                        modules.character.FirstSaveEnforcement.ClearReturning(sender);
+                        if (reconciled.Changed) {
+                            Logger.LogWarning($"Returning save for {chara.Name} ({chara.HostID}) reconciled to the stored character: {reconciled.Describe()}");
+                            modules.character.SkillClamp.Apply(chara.SkillLevels, chara.Name);
+                            WritePlayerCharacterToSave(chara.HostID, chara);
+                            SendSanitizedCharacterToClient(sender, chara);
+                            return;
+                        }
+                    }
+                    modules.character.SkillClamp.Apply(chara.SkillLevels, chara.Name);
                     WritePlayerCharacterToSave(chara.HostID, chara);
                 } catch (Exception e) {
                     Logger.LogWarning($"Failed to deserialize character data from {sender}: {e.Message}");
@@ -549,7 +610,7 @@ namespace ValheimEnforcer {
             // Disk mode: hand the raw YAML to the background store. All parsing, serialization and disk I/O
             // happen off the main thread, so a burst of saves (e.g. every client saving at once on a
             // "save player profiles" broadcast) cannot stall the server and time peers out.
-            modules.character.CharacterStore.SubmitFullSave(yaml, sender, senderAccountId, senderCharacterName, newCharacterPolicy);
+            modules.character.CharacterStore.SubmitFullSave(yaml, sender, senderAccountId, senderCharacterName, newCharacterPolicy, returningPolicy);
         }
 
         /// <summary>
@@ -563,9 +624,19 @@ namespace ValheimEnforcer {
         /// </summary>
         private static bool SaveBelongsToSender(DataObjects.Character chara, long sender, string senderAccountId, string senderCharacterName) {
             if (chara == null) { return false; }
+            // Fail CLOSED when the connection carries no identity. This used to accept the save "unchecked",
+            // which is exactly the pre-handshake state VE_FINAL_CHAR_SAVE could smuggle a save in during. On
+            // every supported backend a ready peer has both an endpoint and a name, so an empty one is a
+            // reason to refuse, not to trust.
             if (string.IsNullOrEmpty(senderAccountId) || string.IsNullOrEmpty(senderCharacterName)) {
-                Logger.LogDebug($"No resolved identity for sender {sender}; accepting the save for {chara.Name} unchecked.");
-                return true;
+                Logger.LogWarning($"Refusing a character save from sender {sender}: the server could not resolve who they are.");
+                return false;
+            }
+            // The name and id are about to be used as filesystem path segments; a traversal-shaped one is
+            // refused before it reaches Path.Combine.
+            if (!modules.character.PeerIdentity.IsSafeToken(chara.HostID) || !modules.character.PeerIdentity.IsSafeToken(chara.Name)) {
+                Logger.LogWarning($"Refusing a character save from {senderCharacterName} ({senderAccountId}): the account id or character name is not a safe file name.");
+                return false;
             }
             if (!PlatformIds.Matches(senderAccountId, chara.HostID)) {
                 Logger.LogWarning($"Refusing a character save from {senderCharacterName} ({senderAccountId}): it claims to belong to account {chara.HostID}.");
@@ -625,10 +696,28 @@ namespace ValheimEnforcer {
             CharacterSaveRPC.SendPackage(sender, payload);
         }
 
+        /// <summary>
+        /// Whether a routed message a CLIENT received genuinely came from the server it is connected to.
+        ///
+        /// Every OnClientReceive* handler in this mod acts on the sender's behalf - adopting a character,
+        /// planting items, clearing confiscations, uploading a full save on request. The server relays a
+        /// routed RPC to whatever target the sender named (ZRoutedRpc.RouteRPC), so without this check one
+        /// client can address another and drive these handlers directly. `sender` is trustworthy here because
+        /// the server-side RoutedRpcGuard corrects it before the packet leaves the server; a client cannot
+        /// forge the server's own uid past that.
+        /// </summary>
+        private static bool FromServer(long sender) {
+            if (ZNet.instance == null) { return false; }
+            if (ZNet.instance.IsServer()) { return true; } // integrated host: a local send is from us
+            ZNetPeer server = ZNet.instance.GetServerPeer();
+            return server != null && sender == server.m_uid;
+        }
+
         // Client handler: an admin cleared confiscated entries for this player. The character save on the
         // server is already authoritative; this drops the same entries from the copy this session is
         // tracking, which is what would otherwise re-append them on the next full push.
         public static IEnumerator OnClientReceiveClearConfiscated(long sender, ZPackage package) {
+            if (!FromServer(sender)) { Logger.LogWarning($"Ignoring a clear-confiscated message not from the server (sender {sender})."); yield break; }
             string filter = package.ReadString();
             int cleared = modules.character.ConfiscatedItems.ClearTrackedLocally(
                 modules.character.ConfiscatedItems.ParseFilter(filter));
@@ -637,6 +726,7 @@ namespace ValheimEnforcer {
         }
 
         public static IEnumerator OnClientReceiveCharacter(long sender, ZPackage package) {
+            if (!FromServer(sender)) { Logger.LogWarning($"Ignoring a character payload not from the server (sender {sender})."); yield break; }
             IncomingCharacter incoming = ReadIncomingCharacter(package);
 
             switch (incoming.Outcome) {
@@ -726,6 +816,7 @@ namespace ValheimEnforcer {
         }
 
         public static IEnumerator OnServerReceiveCheatReport(long sender, ZPackage package) {
+            if (!WithinLimit(package, MaxCheatReportBytes, sender, "cheat report")) { yield break; }
             string yaml = package.ReadString();
             DataObjects.CheatSummaryReport summary;
             try {
@@ -736,11 +827,15 @@ namespace ValheimEnforcer {
             }
 
             ZNetPeer peer = ZNet.instance.GetPeer(sender);
-            string playerName = summary.PlayerName;
             if (peer == null) {
-                Logger.LogWarning($"Received cheat report for {playerName} but could not find corresponding peer. No action will be taken.");
+                Logger.LogWarning($"Received a cheat report from {sender} but could not find the corresponding peer. No action will be taken.");
                 yield break;
             }
+            // The report's PlayerName is client-supplied and used only for display; log/notify with the name the
+            // SERVER knows for this connection instead, and bound anything free-text the report carries so a
+            // hostile one cannot flood the log or a Discord embed.
+            string playerName = string.IsNullOrEmpty(peer.m_playerName) ? summary.PlayerName : peer.m_playerName;
+            CapDetections(summary);
 
             // Enforcement targets the reporting peer's socket host id (SteamID/PlatformUserID),
             // never the client-supplied character name: names are spoofable and collide, so a
@@ -843,6 +938,29 @@ namespace ValheimEnforcer {
             return $"Cheat detection: {detail}";
         }
 
+        // Bounds a client-supplied cheat report so a hostile one cannot flood the log or a Discord embed: caps
+        // the number of detections and truncates each free-text field. The Tool label is still resolved against
+        // the server's own catalog for any enforcement decision, so truncating it here only affects display.
+        private const int MaxCheatDetections = 32;
+        private const int MaxCheatFieldLength = 256;
+        private static void CapDetections(DataObjects.CheatSummaryReport summary) {
+            if (summary?.DetectedTools == null) { return; }
+            if (summary.DetectedTools.Count > MaxCheatDetections) {
+                summary.DetectedTools = summary.DetectedTools.GetRange(0, MaxCheatDetections);
+            }
+            foreach (DataObjects.CheatToolDetection d in summary.DetectedTools) {
+                if (d == null) { continue; }
+                d.Tool = Truncate(d.Tool);
+                d.Vector = Truncate(d.Vector);
+                d.Detail = Truncate(d.Detail);
+            }
+        }
+
+        private static string Truncate(string s) {
+            if (string.IsNullOrEmpty(s) || s.Length <= MaxCheatFieldLength) { return s; }
+            return s.Substring(0, MaxCheatFieldLength);
+        }
+
         // Compact one-line rendering of the reported tools for the server log.
         private static string DescribeDetectedTools(DataObjects.CheatSummaryReport summary) {
             if (summary.DetectedTools == null || summary.DetectedTools.Count == 0) { return "none"; }
@@ -882,6 +1000,13 @@ namespace ValheimEnforcer {
             }
 
             int argCount = package.ReadInt();
+            // Bound the count before allocating: even an admin (or a uid-spoofer, before RoutedRpcGuard is on)
+            // must not be able to request an array of int.MaxValue strings. No enforcer command takes anywhere
+            // near this many arguments.
+            if (argCount < 0 || argCount > MaxCommandArgs) {
+                Logger.LogWarning($"Rejecting '{command}' from {PeerHostId(sender)}: implausible argument count ({argCount}).");
+                yield break;
+            }
             string[] args = new string[argCount];
             for (int i = 0; i < argCount; i++) { args[i] = package.ReadString(); }
 
@@ -896,13 +1021,22 @@ namespace ValheimEnforcer {
         /// markup and each client honours its own EnableTerminalColors setting.
         /// </summary>
         public static IEnumerator OnClientReceiveCommandOutput(long sender, ZPackage package) {
+            if (!FromServer(sender)) { Logger.LogWarning($"Ignoring command output not from the server (sender {sender})."); yield break; }
             int count = package.ReadInt();
+            // The server batches at most TerminalOutput.BatchLines per packet; a huge count is a malformed or
+            // hostile payload, so bound the loop rather than letting it drive an unbounded print into the console.
+            if (count < 0 || count > MaxCommandOutputLines) {
+                Logger.LogWarning($"Ignoring a command-output batch with an implausible line count ({count}).");
+                yield break;
+            }
             for (int i = 0; i < count; i++) {
                 OutputLevel level = (OutputLevel)package.ReadByte();
                 TerminalManager.PrintResponse(level, package.ReadString());
             }
             yield break;
         }
+
+        private const int MaxCommandOutputLines = 256;
 
         private static string PeerHostId(long sender) {
             ZNetPeer peer = ZNet.instance?.GetPeer(sender);
@@ -920,6 +1054,7 @@ namespace ValheimEnforcer {
         }
 
         public static IEnumerator OnClientReceiveConfiscatedItems(long sender, ZPackage package) {
+            if (!FromServer(sender)) { Logger.LogWarning($"Ignoring a confiscated-item return not from the server (sender {sender})."); yield break; }
             List<DataObjects.PackedItem> items = DataObjects.yamldeserializer.Deserialize<List<DataObjects.PackedItem>>(package.ReadString());
             Logger.LogInfo($"Received {items.Count} confiscated item(s) returned from server.");
             foreach (DataObjects.PackedItem item in items) {
@@ -930,6 +1065,7 @@ namespace ValheimEnforcer {
         }
 
         internal static IEnumerator OnServerRecieveDeltaItemUpdate(long sender, ZPackage package) {
+            if (!WithinLimit(package, MaxDeltaPayloadBytes, sender, "delta update")) { yield break; }
             string yaml = package.ReadString();
             DeltaSummaryUpdate deltaUpdate;
             try {
@@ -940,6 +1076,22 @@ namespace ValheimEnforcer {
             }
             if (string.IsNullOrEmpty(deltaUpdate.Name) || string.IsNullOrEmpty(deltaUpdate.HostID)) {
                 Logger.LogWarning($"Malformed delta update from {sender}: missing CharacterName or HostName.");
+                yield break;
+            }
+
+            // A delta mutates the save named in its own payload. Bind that to the connection it arrived on -
+            // the full-save path has always done this, the delta path historically did not, so any client
+            // could edit any stored character. Identity is trustworthy because RoutedRpcGuard has already
+            // corrected `sender`. Refuse (not silently drop) so the mismatch is visible in the log.
+            if (!modules.character.PeerIdentity.TryResolve(sender, out string deltaAccount, out string deltaName)
+                || !modules.character.PeerIdentity.Owns(deltaAccount, deltaName, deltaUpdate.HostID, deltaUpdate.Name)) {
+                Logger.LogWarning($"Refusing a delta update from {sender}: it targets character '{deltaUpdate.Name}' ({deltaUpdate.HostID}), which is not the character that connection is playing.");
+                yield break;
+            }
+            // Defence in depth: the name/id are used as path segments below. Owns already implies the sender's
+            // own (safe) identity matches, but check the payload values directly before they reach the disk.
+            if (!modules.character.PeerIdentity.IsSafeToken(deltaUpdate.HostID) || !modules.character.PeerIdentity.IsSafeToken(deltaUpdate.Name)) {
+                Logger.LogWarning($"Refusing a delta update from {sender}: unsafe account id or character name.");
                 yield break;
             }
 
@@ -1032,6 +1184,7 @@ namespace ValheimEnforcer {
         // Client side: the server is asking for a full character save. Sent both on the periodic server pull
         // (FullSyncScheduler) and as recovery when a delta arrives with no authoritative save to apply onto.
         public static IEnumerator OnClientReceiveFullSyncRequest(long sender, ZPackage package) {
+            if (!FromServer(sender)) { Logger.LogWarning($"Ignoring a full-sync request not from the server (sender {sender})."); yield break; }
             if (Player.m_localPlayer == null) {
                 Logger.LogWarning("Server requested a full character sync but the local player is null; cannot respond.");
                 yield break;
@@ -1081,7 +1234,10 @@ namespace ValheimEnforcer {
             }
             Logger.LogDebug($"Updated custom data for {character.Name}.");
 
-            // Update skills and active status effects
+            // Update skills and active status effects. Clamp a fabricated jump against the levels we already
+            // held for this character before overwriting them - the client reports its own skills, so a
+            // modified one can claim any value.
+            modules.character.SkillClamp.Apply(deltaSummary.SkillLevels, character.Name);
             character.SkillLevels = deltaSummary.SkillLevels;
             character.ActiveCharacterEffects = deltaSummary.ActiveCharacterEffects;
 
@@ -1193,7 +1349,10 @@ namespace ValheimEnforcer {
 
         public static ZNetPeer GetPeerByPlatformID(string platformID) {
             foreach (ZNetPeer peer in ZNet.instance.GetPeers()) {
-                if (peer.IsReady() && peer.m_socket.GetHostName() == platformID) {
+                // PlatformIds.Matches rather than ==: the same account reaches us as both "Steam_7656..." and
+                // the bare "7656...", and an admin may type either into a command. An exact compare here silently
+                // sent a returned item down the "they are offline" path when the spellings differed.
+                if (peer.IsReady() && peer.m_socket != null && PlatformIds.Matches(peer.m_socket.GetHostName(), platformID)) {
                     return peer;
                 }
             }
