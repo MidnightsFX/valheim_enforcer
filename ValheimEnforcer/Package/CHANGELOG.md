@@ -20,9 +20,9 @@
     - Tab completion now works past the first argument, and offers the account ids and character names
       the server actually has
     - Adds EnableTerminalColors (on, local) to colour command output by severity
- - Fixes clearing confiscated items doing nothing at all when the player was offline
- - Naming a character the server has no save for now says so, instead of failing with a null reference
-   or reporting "no confiscated items"
+    - Fixes clearing confiscated items doing nothing at all when the player was offline
+    - Naming a character the server has no save for now says so
+- Fixes first-join allowing items on in a specific scenario
  ```
 
 **0.19.0**
