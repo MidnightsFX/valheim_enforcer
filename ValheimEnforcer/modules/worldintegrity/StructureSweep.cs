@@ -23,8 +23,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
     /// covers surface and interior alike.
     ///
     /// That test is deliberately generous, and the cost of it is stated in the report: a structure spawned
-    /// next to real ruins is excluded along with the ruins. Missing one is recoverable; deleting a player's
-    /// dungeon is not, and the live detector catches that case anyway, wherever it happens.
+    /// next to real ruins is excluded along with the ruins.
     /// </summary>
     internal static class StructureSweep {
 
@@ -256,7 +255,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
             }
 
             private static string Where(Vector3 pos) {
-                return $"{pos.x:F0}, {pos.y:F0}, {pos.z:F0}";
+                return $"X:{pos.x:F0}, Y:{pos.y:F0}, Z:{pos.z:F0}";
             }
 
             private void Report(int checkedCount, List<Hit> hits, int removed, string refusal) {
