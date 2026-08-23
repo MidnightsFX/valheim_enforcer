@@ -240,14 +240,15 @@ Valheim gives the server nothing to work with here. There is no "place piece" me
 
 **Nobody is blamed for somebody else's structure.** Ownership of an object moves to whichever player is nearest, every couple of seconds. Health that was already too high before a client wrote to it is attributed to no one, so walking past a cheated structure — or hitting it — cannot get an innocent player reported. `enforcer-structures-scan` is how those get found.
 
-`DetectNonBuildableStructures` also closes a second door: `SpawnObject`, a message nothing in the game ever sends, which asks the server to create any prefab by name. It is refused for the same prefabs, and the attempt is logged.
+There is a second door: `SpawnObject`, a routed message nothing in the game ever sends, which asks the server to instantiate any prefab by hash — a creature or an item as easily as a structure. `BlockSpawnObjectRPC` (on) refuses every one of them and, by default, posts the block to your moderation channel; it follows `StructureValidationAction` for what happens to the player, which defaults to `Log`, so out of the box it blocks and reports without kicking or banning. A structure spawned this way is reported as a structure detection either way. Turn it off to fall back to refusing only non-buildable structures through `SpawnObject`, if a mod on your server legitimately uses the call.
 
 #### Settings
 
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `EnableStructureValidation` | `false` | Master switch. Everything below is inert until this is on |
-| `DetectNonBuildableStructures` | `true` | The build-menu check, and the `SpawnObject` block |
+| `DetectNonBuildableStructures` | `true` | The build-menu check |
+| `BlockSpawnObjectRPC` | `true` | Refuse every client-sent `SpawnObject` RPC (all prefabs, not just structures) and post it to the moderation channel |
 | `DetectExcessiveStructureHealth` | `true` | The health-ceiling check |
 | `StructureValidationAction` | `Log` | What happens to the player: `Log`, `Kick` or `Ban`. Detections are logged and posted to Discord regardless |
 | `RemoveDetectedStructures` | `false` | Whether the structure itself is deleted |

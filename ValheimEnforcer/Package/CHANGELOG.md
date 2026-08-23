@@ -1,42 +1,23 @@
 **0.20.0**
  ---
  ```
- - Server-authority hardening. Several places trusted something the client wrote where the server had the
-   facts to decide for itself; these now decide server-side.
  - Routed RPC sender verification (EnforceRoutedRpcSender, Advanced, on by default). Valheim's routed RPC
-   carries a sender id the sending client writes and the server never checks. The server now verifies it
-   against the connection each message arrived on and corrects a forged one. This closes impersonation of
-   another connected player across every routed RPC at once - this mod's, Jotunn's admin config sync, and
-   any other mod's. Only forged packets are affected; honest clients are untouched.
-    - Previously a modified client could, while any admin was online, run admin-only enforcer commands, get
-      another player banned via a crafted cheat report, or overwrite another player's character save.
- - Client-side messages from the server are now verified as actually coming from the server, so one client
-   can no longer drive another client's character handling (inventory strip, item injection, forced sync).
- - Character saves and, newly, incremental deltas are bound to the connection that sent them - a client can
-   only write its own character, never another account's.
+   carries a sender id the sending client writes, which the server now validates, this is applied to every registered RPC.
+    - Client-side messages from the server are now verified before being accepted.
  - Character names and account ids are validated before being used as save-file paths, and a connection
    whose character name is not a safe file name is refused at the handshake with a clear reason.
- - Mod validation is now a positive gate: a client that never completes the mod handshake is refused, not
-   just one that fails it.
- - Server-side join enforcement for returning characters (ServerSideJoinEnforcement, on by default). The
-   item-confiscation, skill-clamp and custom-data rules that run on a joining client are now also re-run on
-   the server against its stored character, so a modified client cannot skip them and upload the result.
  - A player's death is now recorded server-side (from the grave the client creates), so a client that skips
-   its own death handling can no longer keep its pre-death inventory authoritative and duplicate the grave.
+   its own death handling can no longer keep its pre-death inventory.
  - Skill levels reported by a client are clamped to the game's valid 0-100 range before being stored.
- - Inbound network payloads (mod list, character save, delta, cheat report, command args, the end-of-session
-   save) are size-bounded, and the end-of-session save's decompression is bounded, so one packet cannot
-   exhaust memory or stall the server. Cheat reports are logged/announced with the name the server knows for
-   the connection rather than the client-supplied one.
- - Fixes a confiscated-item return going to the "offline" path when an admin typed an account id whose
-   platform prefix differed from the connection's.
  - Adds structure validation: server-side detection of clients placing structures no build tool can
    place, and of pieces whose health is above what their prefab allows
     - Configurable EnableStructureValidation (off by default) to enable this functionality
     - StructureValidationAction determines the automated response to a player triggering this
     - Admins are exempt by default
- - Blocks ZNetScene's SpawnObject RPC entirely, an unused routed call that otherwise lets any client
-   have the server instantiate any prefab by hash (creatures and items included, not just structures)
+ - Blocks ZNetScene's SpawnObject RPC (BlockSpawnObjectRPC, on by default), an unused routed call that
+   otherwise lets any client have the server instantiate any prefab by hash (creatures and items included,
+   not just structures). A block posts to the moderation Discord channel by default and follows
+   StructureValidationAction (default Log, so it reports without kicking or banning)
  - Adds Enforcer-Scan-Structures, which allows finding existing structures like this
  - Adds a structureFlagged Discord notification, routed to the moderation webhook
  - Console commands improvements

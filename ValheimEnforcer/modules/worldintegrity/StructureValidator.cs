@@ -276,43 +276,44 @@ namespace ValheimEnforcer.modules.worldintegrity {
         internal static bool AllowSpawnObject(long spawner, Vector3 pos, int prefabHash) {
             try {
                 if (!ValConfig.EnableStructureValidation.Value) { return true; }
-                if (!ValConfig.DetectNonBuildableStructures.Value) { return true; }
                 if (ZNet.instance == null || !ZNet.instance.IsServer()) { return true; }
 
                 // ZNetScene.SpawnObject has no caller anywhere in the game assembly - it is a routed RPC that
-                // makes every receiver, the server included, Instantiate an arbitrary prefab by hash. So when
-                // structure validation is on, NO client-originated SpawnObject is legitimate, whatever the
-                // prefab: a structure, a creature, a boss, an item. The check used to let anything that was not
-                // a non-buildable structure through; now the default is to block, with a structure still getting
-                // the full report-and-enforce treatment. `spawner` is trustworthy here because RoutedRpcGuard
-                // corrects the routed sender before this runs.
+                // makes every receiver, the server included, Instantiate an arbitrary prefab by hash. So no
+                // client-originated SpawnObject is legitimate, whatever the prefab: a structure, a creature, a
+                // boss, an item. `spawner` is trustworthy here because RoutedRpcGuard corrects the routed sender
+                // before this runs.
                 ZNetPeer peer = ZNet.instance.GetPeer(spawner);
                 if (peer != null && IsExempt(peer)) { return true; } // admins keep their devcommands-style freedom
 
                 bool indexReady = StructureIndex.EnsureBuilt();
                 if (indexReady && StructureIndex.IsIgnored(prefabHash)) { return true; } // allowlisted prefab
 
-                if (indexReady && StructureIndex.IsNonBuildableStructure(prefabHash)) {
-                    StructureOffence offence = new StructureOffence {
-                        Id = ZDOID.None,
-                        PrefabHash = prefabHash,
-                        PrefabName = StructureIndex.NameOf(prefabHash),
-                        Position = pos,
-                        Reason = "asked the server to spawn a structure no build tool can place (SpawnObject RPC)",
-                    };
-                    // No removal pass: nothing is instantiated, because this returns false.
-                    Act(peer, new List<StructureOffence> { offence }, false);
-                    return false;
-                }
+                bool isStructure = indexReady
+                    && ValConfig.DetectNonBuildableStructures.Value
+                    && StructureIndex.IsNonBuildableStructure(prefabHash);
 
-                // Any other client-originated SpawnObject. Block it too - the RPC has no legitimate client
-                // caller - but do not kick/ban for it: a non-structure spawn is lower-confidence than the
-                // structure case, and refusing the RPC already neutralises it.
-                string who = peer != null
-                    ? (peer.m_socket != null ? peer.m_socket.GetHostName() : peer.m_uid.ToString())
-                    : spawner.ToString();
-                string name = indexReady ? StructureIndex.NameOf(prefabHash) : prefabHash.ToString();
-                Logger.LogWarning($"Blocked a SpawnObject RPC for '{name}' from {who}: nothing in the game legitimately sends this RPC.");
+                // A non-structure SpawnObject only blocks when BlockSpawnObjectRPC is on. A structure one is
+                // covered by the structure check regardless, so it goes through even when the broad block is off.
+                if (!isStructure && !ValConfig.BlockSpawnObjectRPC.Value) { return true; }
+
+                string reason = isStructure
+                    ? "asked the server to spawn a structure no build tool can place (SpawnObject RPC)"
+                    : $"asked the server to spawn '{(indexReady ? StructureIndex.NameOf(prefabHash) : prefabHash.ToString())}' via the SpawnObject RPC, which nothing in the game legitimately sends";
+
+                StructureOffence offence = new StructureOffence {
+                    Id = ZDOID.None,
+                    PrefabHash = prefabHash,
+                    PrefabName = indexReady ? StructureIndex.NameOf(prefabHash) : prefabHash.ToString(),
+                    Position = pos,
+                    Reason = reason,
+                };
+
+                // No removal pass: nothing is instantiated, because this returns false. Act logs, posts the
+                // structureFlagged notification to the moderation channel (Discord.NotifyStructureFlagged, on
+                // by default) and applies StructureValidationAction - which defaults to Log, so the default
+                // outcome is "block it and tell the mods" without a kick or ban.
+                Act(peer, new List<StructureOffence> { offence }, false);
                 return false;
             } catch (Exception e) {
                 // Let it through rather than blocking on a bug of ours.
