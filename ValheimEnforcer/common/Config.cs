@@ -35,6 +35,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> NewCharactersRemoveExtraItems;
         public static ConfigEntry<bool> NewCharacterSetSkillsToZero;
         public static ConfigEntry<bool> newCharacterClearCustomData;
+        public static ConfigEntry<bool> PassthroughCompatModCustomData;
         // Comma-separated rather than List<string>: BepInEx's config system only supports primitives,
         // string and enums, so binding a List<string> throws at startup.
         public static ConfigEntry<string> NewCharacterStartingItems;
@@ -190,6 +191,11 @@ namespace ValheimEnforcer {
             NewCharacterSetSkillsToZero = BindServerConfig("Player Sync", "NewCharacterSetSkillsToZero", false, "If enabled, new characters will have their skills set to zero. Prevents players from raising skills before connecting.");
             PreventExternalCustomDataChanges = BindServerConfig("Player Sync", "PreventExternalCustomDataChanges", true, "If enabled, tracks player custom data. Warning: custom data can be large and can impact how other mods function.");
             newCharacterClearCustomData = BindServerConfig("Player Sync", "newCharacterClearCustomData", true, "If enabled, new characters will have their custom data cleared.");
+            PassthroughCompatModCustomData = BindServerConfig("Player Sync", "PassthroughCompatModCustomData", true, "Leaves inventory-describing custom data owned by compatible mods to those mods instead of tracking and enforcing it. ExtraSlots keeps a serialized backup of every extra-slot item in player custom data and restores those items whenever a character loads with empty extra slots; when the enforcer tracked that backup and re-applied its (stale) copy on every spawn, each death resurrected and duplicated the player's extra-slot gear. With this enabled the affected keys are never stored in server saves, never streamed as deltas, and never overwrite the live player's own value, and ExtraSlots' per-item slot-memory keys are ignored when deciding whether an item matches the save. Disable only to restore the old behaviour.", advanced: true);
+            // The flag is read from worker threads through a volatile snapshot (see CompatCustomData); keep
+            // that snapshot current from the main thread, including on config reload and server sync.
+            PassthroughCompatModCustomData.SettingChanged += (sender, args) => modules.compat.CompatCustomData.RefreshEnabled();
+            modules.compat.CompatCustomData.RefreshEnabled();
             NewCharacterStartingItems = BindServerConfig("Player Sync", "NewCharacterStartingItems", "ArmorRagsChest,ArmorRagsLegs,Torch", "Comma separated prefab names a brand new character is allowed to arrive holding when NewCharactersRemoveExtraItems is enabled. Anything else in their inventory on their first join is confiscated, as is any item above quality 1. Names are matched exactly (case insensitively), not as substrings, so 'Torch' does not also permit 'TorchMist'. Change this if your modpack starts players with different gear; leave it empty to allow no starting items at all.");
             ConfiscateUnidentifiableItems = BindServerConfig("Player Sync", "ConfiscateUnidentifiableItems", false, "Controls what happens to an inventory item whose ItemDrop prefab does not resolve on the client - usually a modded item, or an entry another mod created directly. These cannot be tracked, matched or handed back, so by default they are left alone and logged. Enable to confiscate them instead; note that a confiscated item with no prefab name can never be returned with the confiscation commands.", null, true);
             InitialCharacterSyncWaitSeconds = BindServerConfig("Player Sync", "InitialCharacterSyncWaitSeconds", 10, "How long a joining client waits for the server's answer about its stored character before giving up and treating the character as new. The answer normally arrives during the connection handshake, well before the world finishes loading, so this only matters if that is delayed. Set to 0 to never wait. Either way the character is treated as NEW when no answer arrives - the local save file on the joining machine is never used as the baseline for a server.", true, 0, 60);
@@ -565,6 +571,9 @@ namespace ValheimEnforcer {
                     DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(yaml);
                     Logger.LogInfo($"Recieved Player data update for {sender} - {chara.Name}|{chara.HostID}");
                     if (!SaveBelongsToSender(chara, sender, senderAccountId, senderCharacterName)) { return; }
+                    // Shed pass-through compat keys before this save is merged or written - also scrubs the
+                    // stale copies saves written before pass-through handling still carry.
+                    modules.compat.CompatCustomData.StripPassthroughKeys(chara.PlayerCustomData);
                     // The client's confiscated list is a report of what it confiscated this session, never a
                     // replacement for ours - see Character.MergeConfiscatedItems.
                     DataObjects.Character existing = InternalDataStore.GetAccountCharacter(chara.HostID, chara.Name);
@@ -1232,6 +1241,10 @@ namespace ValheimEnforcer {
                 character.PlayerCustomData.Remove(key);
             }
             foreach (var kvp in deltaSummary.PlayerCustomDataModifications) {
+                // A pass-through compat key never legitimately appears in a delta (the client's diff skips
+                // it); drop rather than store one arriving from a modified client. Removals are deliberately
+                // still applied - removing such a key only helps an older save shed it.
+                if (modules.compat.CompatCustomData.IsPassthroughPlayerKey(kvp.Key)) { continue; }
                 character.PlayerCustomData[kvp.Key] = kvp.Value;
             }
             Logger.LogDebug($"Updated custom data for {character.Name}.");

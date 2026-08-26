@@ -123,9 +123,13 @@ namespace ValheimEnforcer.modules.character {
                 }
             }
 
-            // Custom data reset to the stored copy (a detached copy, so the two do not alias).
+            // Custom data reset to the stored copy (a detached copy, so the two do not alias). The stored
+            // save may predate pass-through handling and still carry a compat mod's inventory backup; shed
+            // it so the reset cannot write it back into the incoming save. The incoming side was already
+            // stripped at ingestion.
             if (policy.ResetCustomData) {
                 Dictionary<string, string> storedCopy = PackedItem.SnapshotCustomData(stored.PlayerCustomData);
+                compat.CompatCustomData.StripPassthroughKeys(storedCopy);
                 if (!CustomDataEquals(incoming.PlayerCustomData, storedCopy)) {
                     incoming.PlayerCustomData = storedCopy;
                     result.CustomDataReset = true;

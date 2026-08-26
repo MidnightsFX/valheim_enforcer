@@ -4,6 +4,7 @@ using UnityEngine;
 using ValheimEnforcer;
 using ValheimEnforcer.common;
 using ValheimEnforcer.modules.character;
+using ValheimEnforcer.modules.compat;
 using static ValheimEnforcer.common.DataObjects;
 using Logger = ValheimEnforcer.Logger;
 
@@ -141,7 +142,10 @@ internal class DeltaChangeTracker : MonoBehaviour {
         List<string> customDataRemovedKeys = new List<string>();
 
         foreach (KeyValuePair<string, string> kvp in currentCustomData) {
-            // has the key already 
+            // Pass-through compat keys live only on the player; the tracked baseline never holds them, so
+            // without this skip the (large) ExtraSlots backup would stream as a "new key" on every flush.
+            if (CompatCustomData.IsPassthroughPlayerKey(kvp.Key)) { continue; }
+            // has the key already
             if (trackedCustomData.ContainsKey(kvp.Key)) {
                 // Data update
                 if (trackedCustomData[kvp.Key] != kvp.Value) {
@@ -154,6 +158,7 @@ internal class DeltaChangeTracker : MonoBehaviour {
             }
         }
         foreach(KeyValuePair<string, string> kvp in trackedCustomData) {
+            if (CompatCustomData.IsPassthroughPlayerKey(kvp.Key)) { continue; }
             if (!currentCustomData.ContainsKey(kvp.Key)) {
                 customDataRemovedKeys.Add(kvp.Key);
             }
@@ -178,7 +183,7 @@ internal class DeltaChangeTracker : MonoBehaviour {
         // Copy, never alias. currentCustomData IS Player.m_localPlayer.m_customData; storing the reference
         // would make the baseline and the live dictionary the same object, and the comparison above would
         // then be comparing a dictionary with itself - which is why custom data changes were never detected.
-        CharacterManager.PlayerCharacter.PlayerCustomData = PackedItem.SnapshotCustomData(currentCustomData);
+        CharacterManager.PlayerCharacter.PlayerCustomData = CompatCustomData.SnapshotForTracking(currentCustomData);
         CharacterManager.PlayerCharacter.SkillLevels = Player.m_localPlayer.GetSkills().GetSkillList().ToDictionary(s => s.m_info.m_skill, s => s.m_level);
 
         Dictionary<string, PackedStatusEffect> currentActiveEffects = new Dictionary<string, PackedStatusEffect>();

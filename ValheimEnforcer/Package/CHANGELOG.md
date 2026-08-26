@@ -1,3 +1,10 @@
+**0.20.1**
+---
+```
+- Fixes ExtraSlots compatibility: gear kept in ExtraSlots slots came back (and duplicated) after every
+   death while player custom data tracking was on.
+```
+
 **0.20.0**
  ---
  ```

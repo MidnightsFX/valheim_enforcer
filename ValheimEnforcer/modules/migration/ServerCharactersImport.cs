@@ -181,6 +181,9 @@ namespace ValheimEnforcer.modules.migration {
                 // ignores entries with a null confiscationId, so anything parked there could never be returned.
                 ConfiscatedItems = new List<DataObjects.PackedItem>()
             };
+            // Imported saves carry whatever ServerCharacters recorded, including pass-through compat keys
+            // (the ExtraSlots inventory backup) that must never enter the tracked record.
+            compat.CompatCustomData.StripPassthroughKeys(character.PlayerCustomData);
 
             foreach (FchItem item in profile.Items) {
                 character.PlayerItems.Add(new DataObjects.PackedItem {

@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using ValheimEnforcer.common;
+using ValheimEnforcer.modules.compat;
 using static ValheimEnforcer.common.DataObjects;
 using static Version;
 
@@ -298,7 +299,7 @@ namespace ValheimEnforcer.modules.character {
                 if (ValConfig.PreventExternalCustomDataChanges.Value) {
                     // Copy: aliasing the live dictionary makes the tracked baseline and the player the same
                     // object, so the delta tracker can never see a change (it would diff a dict against itself).
-                    savableChar.PlayerCustomData = PackedItem.SnapshotCustomData(__instance.m_customData);
+                    savableChar.PlayerCustomData = CompatCustomData.SnapshotForTracking(__instance.m_customData);
                 }
                 if (ValConfig.SavePlayerStatusEffectsOnLogout.Value) {
                     savableChar.ActiveCharacterEffects.Clear();
@@ -317,7 +318,7 @@ namespace ValheimEnforcer.modules.character {
                 savableChar.SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
                 Logger.LogDebug($"Updated player skills for {PlayerName} with ID {playerID}.");
                 if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                    savableChar.PlayerCustomData = PackedItem.SnapshotCustomData(__instance.m_customData);
+                    savableChar.PlayerCustomData = CompatCustomData.SnapshotForTracking(__instance.m_customData);
                     Logger.LogDebug("Updated player custom data.");
                 }
                 savableChar.PlayerItems.Clear();
@@ -455,7 +456,9 @@ namespace ValheimEnforcer.modules.character {
             // afterwards (a join deferred by JoinGate, or a server push). Reapplying here repairs that, and is
             // a harmless no-op when Player.Load already got it right.
             if (ValConfig.PreventExternalCustomDataChanges.Value && !isNewCharacter) {
-                player.m_customData = PackedItem.SnapshotCustomData(savableChar.PlayerCustomData);
+                // ApplyToPlayer rather than a plain snapshot: pass-through compat keys (the ExtraSlots
+                // inventory backup) keep the live player's own value - see CompatCustomData.
+                player.m_customData = CompatCustomData.ApplyToPlayer(savableChar.PlayerCustomData, player.m_customData);
                 Logger.LogDebug("Reapplied tracked custom data.");
             }
 
@@ -517,7 +520,7 @@ namespace ValheimEnforcer.modules.character {
             }
 
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                player.m_customData = PackedItem.SnapshotCustomData(sanitized.PlayerCustomData);
+                player.m_customData = CompatCustomData.ApplyToPlayer(sanitized.PlayerCustomData, player.m_customData);
             }
 
             // Re-baseline from what the player actually holds now, and drop the dirty flag the removals just
@@ -567,7 +570,7 @@ namespace ValheimEnforcer.modules.character {
                 character.AddItemToPlayerItems(item);
             }
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                character.PlayerCustomData = PackedItem.SnapshotCustomData(player.m_customData);
+                character.PlayerCustomData = CompatCustomData.SnapshotForTracking(player.m_customData);
             }
 
             NewCharacterRules.Policy policy = NewCharacterRules.Current();
@@ -670,7 +673,7 @@ namespace ValheimEnforcer.modules.character {
             savableChar.SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
             savableChar.ActiveCharacterEffects.Clear();
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                savableChar.PlayerCustomData = PackedItem.SnapshotCustomData(player.m_customData);
+                savableChar.PlayerCustomData = CompatCustomData.SnapshotForTracking(player.m_customData);
             }
 
             PlayerCharacter = savableChar;
@@ -754,6 +757,9 @@ namespace ValheimEnforcer.modules.character {
                         ItemValidationSummary.CustomDataMatch = true;
                         if (ValConfig.ValidateItemCustomData.Value) {
                             foreach (KeyValuePair<string, string> playerItemKVP in item.m_customData) {
+                                // Compat-owned slot memory is stamped and pruned outside the save cycle, so a
+                                // stale tracked value is expected, not evidence of tampering.
+                                if (CompatCustomData.IsIgnoredItemKey(playerItemKVP.Key)) { continue; }
                                 if (savedItem.m_customdata.ContainsKey(playerItemKVP.Key) && savedItem.m_customdata[playerItemKVP.Key] != playerItemKVP.Value) {
                                     ItemValidationSummary.CustomDataMatch = false;
                                     validationReason += $"Custom data mismatch on key {playerItemKVP.Key}. Expected {savedItem.m_customdata[playerItemKVP.Key]} got {playerItemKVP.Value} ";

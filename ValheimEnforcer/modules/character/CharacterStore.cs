@@ -292,6 +292,12 @@ namespace ValheimEnforcer.modules.character {
                     // character that does exist and the answer is Found, so enforcement is skipped).
                     if (!IdentityMatchesSender(c, full)) { return null; }
 
+                    // Shed pass-through compat keys (the ExtraSlots inventory backup) before the save is
+                    // merged and re-serialized below - also scrubs the stale copies saves written before
+                    // pass-through handling still carry. Safe here: CompatCustomData reads a volatile
+                    // snapshot rather than a ConfigEntry.
+                    compat.CompatCustomData.StripPassthroughKeys(c.PlayerCustomData);
+
                     string key = KeyFor(c.HostID, c.Name);
                     // The incoming save replaces everything EXCEPT the confiscated list, which the server owns:
                     // the client only reports what it confiscated this session, and an overwrite would resurrect

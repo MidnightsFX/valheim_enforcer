@@ -450,13 +450,24 @@ namespace ValheimEnforcer.common {
             }
 
             private static bool CustomDataEquals(Dictionary<string, string> a, Dictionary<string, string> b) {
-                int acount = a == null ? 0 : a.Count;
-                int bcount = b == null ? 0 : b.Count;
-                if (acount != bcount) { return false; }
-                if (acount == 0) { return true; } // null and empty are the same thing here
-                foreach (KeyValuePair<string, string> kvp in a) {
-                    if (!b.TryGetValue(kvp.Key, out string other)) { return false; }
-                    if (kvp.Value != other) { return false; }
+                // Keys a compat mod stamps onto items at save time and prunes again during play
+                // (CompatCustomData.IsIgnoredItemKey) are not part of the item's identity: two honest
+                // captures of the same item routinely disagree about them, and counting them made a
+                // stamped copy and a pruned copy compare as different items - which is a confiscation.
+                // Compared entry-wise in both directions rather than by count so those keys can be
+                // skipped; null and empty are the same thing here.
+                if (a != null) {
+                    foreach (KeyValuePair<string, string> kvp in a) {
+                        if (CompatCustomData.IsIgnoredItemKey(kvp.Key)) { continue; }
+                        if (b == null || !b.TryGetValue(kvp.Key, out string other) || kvp.Value != other) { return false; }
+                    }
+                }
+                if (b != null) {
+                    foreach (KeyValuePair<string, string> kvp in b) {
+                        if (CompatCustomData.IsIgnoredItemKey(kvp.Key)) { continue; }
+                        // Values already compared above; only a key missing from a can still differ.
+                        if (a == null || !a.ContainsKey(kvp.Key)) { return false; }
+                    }
                 }
                 return true;
             }
@@ -465,6 +476,8 @@ namespace ValheimEnforcer.common {
                 if (data == null || data.Count == 0) { return 0; } // must agree with CustomDataEquals
                 int acc = 0;
                 foreach (KeyValuePair<string, string> kvp in data) {
+                    // Skipped keys must stay out of the hash too, or equal items could hash differently.
+                    if (CompatCustomData.IsIgnoredItemKey(kvp.Key)) { continue; }
                     // XOR the per-pair hashes so the result does not depend on enumeration order - a yaml round
                     // trip is free to reorder the map.
                     unchecked {

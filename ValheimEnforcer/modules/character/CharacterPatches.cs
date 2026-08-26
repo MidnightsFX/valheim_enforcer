@@ -124,7 +124,15 @@ namespace ValheimEnforcer.modules.character {
                 } else if (savableChar != null) {
                     // Copy rather than alias: sharing one dictionary with the tracked character is what stopped
                     // the delta tracker from ever detecting a custom data change.
-                    __instance.m_customData = PackedItem.SnapshotCustomData(savableChar.PlayerCustomData);
+                    //
+                    // ApplyToPlayer rather than a plain snapshot, and this is the site that matters most:
+                    // this postfix runs at Priority.First, BEFORE ExtraSlots' own Player.Load postfix decides
+                    // whether to restore its inventory backup. Installing the tracked copy of that backup
+                    // here is what used to resurrect a dead player's extra-slot gear - vanilla's death save
+                    // had just correctly emptied the live backup, this overwrote it with the stale pre-death
+                    // one, and ExtraSlots then restored a full set of gear that was also lying in the
+                    // tombstone. Pass-through keys keep the live (profile-fresh) value instead.
+                    __instance.m_customData = modules.compat.CompatCustomData.ApplyToPlayer(savableChar.PlayerCustomData, __instance.m_customData);
                     Logger.LogDebug("Set player custom data.");
                 }
             }
