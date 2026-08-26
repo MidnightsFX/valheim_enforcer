@@ -13,7 +13,10 @@ namespace ValheimEnforcer.modules.compat {
     /// vanilla refreshes the live copy in the save that runs right before a death respawn, but the tracked
     /// copy still described the pre-death inventory, and re-applying it to the freshly spawned player (whose
     /// extra slots are empty by definition) handed ExtraSlots a pre-death inventory to resurrect while the
-    /// same items sat in the tombstone. Gear came back on every death, duplicated.
+    /// same items sat in the tombstone. Gear came back on every death, duplicated. EquipmentAndQuickSlots
+    /// (its 3.x rewrite shares the ExtraSlots architecture, and its 2.x legacy keys are worse - the
+    /// migration that consumes them re-adds gear with no guard at all) and InventorySlots carry the same
+    /// design, so their keys are listed alongside.
     ///
     /// The rule that follows: a key listed here is left entirely to the mod that owns it. It is never
     /// captured into the tracked character, never written into a server save, never streamed in a delta, and
@@ -27,23 +30,63 @@ namespace ValheimEnforcer.modules.compat {
     /// </summary>
     internal static class CompatCustomData {
 
-        // ExtraSlots InventoryBackup.customKeyBackupID: the serialized extra-rows inventory described above.
-        // Matched by name rather than through the ExtraSlots API so a stale key is still shed from saves on
-        // installations where ExtraSlots is not currently loaded - a server that never runs it, or one that
-        // removed it - instead of lying in wait to resurrect gear if the mod is ever (re)installed.
+        // Keys are matched by name rather than through any mod's API so a stale key is still shed from
+        // saves on installations where the owning mod is not currently loaded - a server that never runs
+        // it, or one that removed it - instead of lying in wait to resurrect gear if the mod is ever
+        // (re)installed. ExtraSlotsCustomSlots (shudnal's addon) was reviewed too: it registers slots
+        // purely through the ExtraSlots API and persists nothing of its own, so the ExtraSlots keys
+        // already cover it.
         private static readonly HashSet<string> PassthroughPlayerKeys = new HashSet<string>() {
+            // ExtraSlots InventoryBackup.customKeyBackupID: the serialized extra-rows inventory
+            // described above.
             "ExtraSlotsInventoryBackup",
+            // EquipmentAndQuickSlots (the 3.x rewrite) InventoryBackup.customKeyBackupID - the same
+            // design as ExtraSlots: rewritten on every Player.Save, restored on Player.Load whenever the
+            // slot rows are empty, restore guard knows only ServerCharacters.
+            "eaqs_backup",
+            // InventorySlots (sighsorry) BackupKey - the same design a third time (SaveSlotBackup /
+            // TryRestoreSlotBackup).
+            "InventorySlotsBackup",
+            // EquipmentAndQuickSlots 2.x stored its whole equipment and quickslot side inventories in
+            // these two keys, and the 3.x rewrite's Player.Load migration ADDS AND EQUIPS their contents
+            // whenever a key is present - no empty-slots guard at all - then deletes the keys. Re-applying
+            // a tracked copy would re-run that migration, and duplicate the gear, on every single spawn.
+            // On a server still running 2.x these keys are live storage and the live value is equally the
+            // only correct one: replaying a tracked copy after a death restored the pre-death loadout.
+            "QuickSlotInventory",
+            "EquipmentSlotInventory",
+            // The matching EAQS 2.x container key, deleted by the same migration.
+            "ExtendedPlayerData",
         };
 
-        // ExtraSlots' per-item slot memory (Slots.customKeyPlayerID / customKeySlotID /
-        // customKeyWeaponShield). ExtraSlots stamps these onto items at save time and prunes them again
-        // during play, so two honest captures of the same item routinely disagree about them. They stay ON
-        // the items - slot memory survives confiscation and restore that way - but item identity comparisons
-        // have to ignore them, or the stamp/prune cycle reads as a modified item and gets confiscated.
+        // Per-item slot bookkeeping. The ExtraSlots and eaqs_* trios are stamped onto items at save time
+        // and pruned again during play, so two honest captures of the same item routinely disagree about
+        // them; the InventorySlots pair marks which custom slot an item currently sits in - positional
+        // metadata of exactly the kind item identity already excludes (m_gridPos). They all stay ON the
+        // items - slot memory survives confiscation and restore that way - but item identity comparisons
+        // have to ignore them, or moving an item between slots (or the stamp/prune cycle itself) reads as
+        // a modified item and gets confiscated.
         private static readonly HashSet<string> IgnoredItemKeys = new HashSet<string>() {
+            // ExtraSlots Slots.customKeyPlayerID / customKeySlotID / customKeyWeaponShield.
             "ExtraSlotsEquippedBy",
             "ExtraSlotsEquippedSlot",
             "ExtraSlotsEquippedWeaponShield",
+            // EquipmentAndQuickSlots 3.x: the same stamp/prune slot memory, plus the transient marker for
+            // armor parked by a gravestone pickup, which the validation sweep removes.
+            "eaqs_player",
+            "eaqs_slot",
+            "eaqs_weaponshield",
+            "eaqs_parked",
+            // EquipmentAndQuickSlots 2.x grave markers, written onto tombstone items and honored once on
+            // pickup by the 3.x rewrite.
+            "eaqs-e",
+            "eaqs-qs",
+            // InventorySlots slot residence markers (MarkItemSlot / ClearItemSlot), and its
+            // favorite-upgrade bookmark - a client-side UI id with no gameplay power, whose
+            // delete-and-recreate cycle would otherwise read as a changed item.
+            "InventorySlotsSlotId",
+            "InventorySlotsEquippedBy",
+            "InventorySlotsUpgradeFavoriteId",
         };
 
         // Snapshot of PassthroughCompatModCustomData, written only from the main thread (RefreshEnabled) and

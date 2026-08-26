@@ -1,8 +1,8 @@
 **0.20.1**
 ---
 ```
-- Fixes ExtraSlots compatibility: gear kept in ExtraSlots slots came back (and duplicated) after every
-   death while player custom data tracking was on.
+- Improve item compatibility storage of Extraslots, ExtraCustomSlots, Equipment & Quickslots, and InventorySlots
+    - Configurable through PassthroughCompatModCustomData (default on). If disabled, you must disable your inventory mod from restoring backup items
 ```
 
 **0.20.0**
