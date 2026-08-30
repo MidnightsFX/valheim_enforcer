@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using System;
 using UnityEngine;
 using ValheimEnforcer.common;
@@ -88,6 +88,8 @@ namespace ValheimEnforcer.modules.worldintegrity {
             StructureSweep.Abort();
             StructureValidator.Reset();
             StructureIndex.Invalidate();
+            ItemOriginIndex.Invalidate();
+            ItemOriginValidator.Reset();
         }
     }
 }

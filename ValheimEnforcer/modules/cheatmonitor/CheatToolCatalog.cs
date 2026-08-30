@@ -169,6 +169,13 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// AdditionalCheatProcesses are appended as exact-match process-only entries.
         /// </summary>
         internal static List<CheatToolSignature> Enabled() {
+            // Rebuilt only when one of the settings feeding it changes. This is called once per scan
+            // tick and the result is handed to a worker thread, so it must be a stable snapshot rather
+            // than a list rebuilt (and reallocated) underneath the scan every time.
+            string key = $"{ValConfig.DetectCheatTools.Value}|{ValConfig.DetectCheatEngine.Value}|{ValConfig.AdditionalCheatProcesses.Value}";
+            List<CheatToolSignature> cached = enabledCache;
+            if (cached != null && key == enabledCacheKey) { return cached; }
+
             List<CheatToolSignature> signatures = new List<CheatToolSignature>();
 
             if (ValConfig.DetectCheatTools.Value) {
@@ -188,8 +195,15 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 });
             }
 
+            enabledCacheKey = key;
+            enabledCache = signatures;
             return signatures;
         }
+
+        // Written on the main thread only; the list itself is never mutated after publication, so a
+        // worker holding a reference to an older snapshot still sees a consistent catalog.
+        private static string enabledCacheKey;
+        private static volatile List<CheatToolSignature> enabledCache;
 
         /// <summary>Splits a comma-separated config value, trimming blanks.</summary>
         internal static List<string> SplitList(string value) {
@@ -235,15 +249,24 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
         // IsIgnored is called once per process, module and window, so the parsed allowlist is cached
         // and only rebuilt when the admin edits the setting.
+        //
+        // The rebuild is deliberately separated from the read: IsIgnored now runs on the scan worker
+        // thread, and having it mutate these statics would be a data race against the main thread
+        // doing the same. RefreshIgnoreList is called on the main thread before a scan is dispatched;
+        // IgnoreList only ever reads the published snapshot. Same volatile-snapshot shape as
+        // CompatCustomData.RefreshEnabled.
         private static string ignoreListRaw;
-        private static List<string> ignoreListParsed = new List<string>();
+        private static volatile List<string> ignoreListParsed = new List<string>();
+
+        /// <summary>Main thread only. Re-parses the allowlist if the admin has edited it.</summary>
+        internal static void RefreshIgnoreList() {
+            string raw = ValConfig.IgnoredCheatProcesses.Value ?? "";
+            if (raw == ignoreListRaw) { return; }
+            ignoreListParsed = SplitList(raw);
+            ignoreListRaw = raw;
+        }
 
         private static List<string> IgnoreList() {
-            string raw = ValConfig.IgnoredCheatProcesses.Value ?? "";
-            if (raw != ignoreListRaw) {
-                ignoreListParsed = SplitList(raw);
-                ignoreListRaw = raw;
-            }
             return ignoreListParsed;
         }
 

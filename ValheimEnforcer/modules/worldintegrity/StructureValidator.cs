@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
@@ -404,6 +404,10 @@ namespace ValheimEnforcer.modules.worldintegrity {
             }
 
             Notify(playerName, hostId, actionable, removed, canRemove);
+            // Same signal as an RPC guard refusal: something this client did that its declared mod set does
+            // not account for. PeerTrust correlates the two halves; see that class for what it does and does
+            // not claim.
+            network.PeerTrust.NoteGuardTrip(peer, "structure", actionable[0].Reason);
             Enforce(hostId, playerName, actionable);
         }
 

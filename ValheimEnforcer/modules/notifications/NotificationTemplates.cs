@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
@@ -20,6 +20,8 @@ namespace ValheimEnforcer.modules.notifications {
         CharacterRejected,
         ModMismatch,
         StructureFlagged,
+        ClientContradiction,
+        ItemOriginFlagged,
     }
 
     /// <summary>
@@ -157,6 +159,8 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.CheaterBanned:
                 case NotificationEvent.CharacterRejected:
                 case NotificationEvent.StructureFlagged:
+                case NotificationEvent.ClientContradiction:
+                case NotificationEvent.ItemOriginFlagged:
                     return NotificationCategory.Moderation;
                 case NotificationEvent.ModMismatch:
                     return NotificationCategory.ModMismatch;
@@ -185,6 +189,8 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.CharacterRejected: return set.CharacterRejected;
                 case NotificationEvent.ModMismatch: return set.ModMismatch;
                 case NotificationEvent.StructureFlagged: return set.StructureFlagged;
+                case NotificationEvent.ClientContradiction: return set.ClientContradiction;
+                case NotificationEvent.ItemOriginFlagged: return set.ItemOriginFlagged;
                 default: return null;
             }
         }
@@ -200,6 +206,8 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.CharacterRejected: set.CharacterRejected = template; break;
                 case NotificationEvent.ModMismatch: set.ModMismatch = template; break;
                 case NotificationEvent.StructureFlagged: set.StructureFlagged = template; break;
+                case NotificationEvent.ClientContradiction: set.ClientContradiction = template; break;
+                case NotificationEvent.ItemOriginFlagged: set.ItemOriginFlagged = template; break;
             }
         }
 

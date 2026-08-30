@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using Jotunn.Managers;
 using System;
 using System.Collections.Generic;
@@ -37,6 +37,8 @@ namespace ValheimEnforcer.common {
             RegisterCharacterCommands();
             RegisterNotificationCommands();
             RegisterStructureCommands();
+            RegisterNetworkCommands();
+            RegisterItemOriginCommands();
 
             Logger.LogDebug($"Registered {Registry.Count} ValheimEnforcer console commands.");
         }

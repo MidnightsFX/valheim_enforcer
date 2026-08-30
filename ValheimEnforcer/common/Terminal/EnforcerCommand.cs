@@ -1,11 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 
 namespace ValheimEnforcer.common {
 
     /// <summary>Which family a command belongs to. Only used to group the enforcer-help listing.</summary>
-    internal enum CommandArea { Meta, Player, Items, Characters, Notifications, Structures }
+    internal enum CommandArea { Meta, Player, Items, Characters, Notifications, Structures, Network }
 
     /// <summary>
     /// Severity of one line of command output. Deliberately separate from the text: colour is applied where

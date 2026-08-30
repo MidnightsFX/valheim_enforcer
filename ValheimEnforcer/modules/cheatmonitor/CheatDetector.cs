@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 using UnityEngine;
 using ValheimEnforcer.common;
 using ValheimEnforcer.modules.character;
@@ -24,8 +25,16 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         // desktop cannot turn one scan into an unbounded report.
         private const int MaxWindowMatches = 8;
 
+        // The one live detector. Initialize is wired to MinimapManager.OnVanillaMapDataLoaded, which
+        // fires on every world load, and the host is DontDestroyOnLoad - so without this guard every
+        // join added another detector that nothing ever destroyed. Each one ran its own process and
+        // module scan on its own drifting timer, which is what turned a periodic cost into a stream of
+        // irregular stalls that got worse the longer the game stayed open. Mirrors
+        // CharacterDeltaTracker.DeltaTracker.
+        private static CheatDetectorBehaviour instance;
+
         internal static void Initialize() {
-            if (ZNet.instance != null && ZNet.instance.IsDedicated()) {
+            if (ZNet.instance != null && ZNet.instance.IsDedicated() || instance != null) {
                 return;
             }
             if (ValConfig.EnableCheatDetection.Value == false) {
@@ -35,8 +44,20 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             GameObject host = new GameObject("VE_CheatDetector");
             UnityEngine.Object.DontDestroyOnLoad(host);
             host.hideFlags = HideFlags.HideAndDontSave;
-            host.AddComponent<CheatDetectorBehaviour>();
+            instance = host.AddComponent<CheatDetectorBehaviour>();
             Logger.LogDebug("CheatDetector initialized.");
+        }
+
+        /// <summary>
+        /// Destroys the detector at the end of a session so returning to the menu does not leave one
+        /// behind for the next world load to duplicate. Destroying the host disables the behaviour,
+        /// and OnDisable releases its AppDomain.AssemblyLoad subscription.
+        /// </summary>
+        internal static void Teardown() {
+            if (instance == null) { return; }
+            UnityEngine.Object.Destroy(instance.gameObject);
+            instance = null;
+            Logger.LogDebug("CheatDetector torn down.");
         }
 
         /// <summary>
@@ -75,12 +96,12 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// enumeration is used regardless of catalog size; the cost here is the syscall, not the
         /// string matching.
         /// </summary>
-        internal static List<CheatToolDetection> ScanProcesses(List<CheatToolSignature> signatures) {
+        internal static List<CheatToolDetection> ScanProcesses(List<CheatToolSignature> signatures, bool genericTrainers) {
             List<CheatToolDetection> found = new List<CheatToolDetection>();
+            StallWatch timer = StallWatch.Start("Cheat scan: process enumeration");
             Process[] procs = null;
             try {
                 procs = Process.GetProcesses();
-                bool genericTrainers = ValConfig.DetectGenericTrainers.Value;
                 foreach (Process p in procs) {
                     string name;
                     // ProcessName throws for processes that exit between enumeration and access.
@@ -106,6 +127,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                         try { p.Dispose(); } catch { }
                     }
                 }
+                timer.Stop();
             }
             return found;
         }
@@ -117,6 +139,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// </summary>
         internal static List<CheatToolDetection> ScanLoadedModules(List<CheatToolSignature> signatures) {
             List<CheatToolDetection> found = new List<CheatToolDetection>();
+            StallWatch timer = StallWatch.Start("Cheat scan: loaded module enumeration");
             try {
                 using (Process self = Process.GetCurrentProcess()) {
                     foreach (ProcessModule m in self.Modules) {
@@ -133,6 +156,8 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 }
             } catch (Exception e) {
                 Logger.LogDebug($"CheatDetector.ScanLoadedModules failed: {e.Message}");
+            } finally {
+                timer.Stop();
             }
             return found;
         }
@@ -145,14 +170,14 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// comes back empty for windowless and elevated processes.
         /// </summary>
         internal static List<CheatToolDetection> ScanWindows(List<CheatToolSignature> signatures) {
+            // The Windows-platform check lives in the caller: Application.platform is a Unity API and
+            // this now runs on a worker thread.
             List<CheatToolDetection> found = new List<CheatToolDetection>();
-            if (Application.platform != RuntimePlatform.WindowsPlayer && Application.platform != RuntimePlatform.WindowsEditor) {
-                return found;
-            }
             List<CheatToolSignature> windowed = signatures
                 .Where(s => s.WindowClasses.Length > 0 || s.WeakWindowClasses.Length > 0 || s.WindowTitles.Length > 0).ToList();
             if (windowed.Count == 0) { return found; }
 
+            StallWatch timer = StallWatch.Start("Cheat scan: window enumeration");
             try {
                 // Held in a local so the delegate cannot be collected while EnumWindows is running.
                 NativeWin32.EnumWindowsProc callback = (hWnd, _) => {
@@ -177,6 +202,8 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 NativeWin32.EnumWindows(callback, IntPtr.Zero);
             } catch (Exception e) {
                 Logger.LogDebug($"CheatDetector.ScanWindows failed: {e.Message}");
+            } finally {
+                timer.Stop();
             }
             return found;
         }
@@ -280,6 +307,11 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             // the same frame. Process enumeration in particular is a blocking syscall.
             private int scanPhase;
 
+            // The scan in flight, or null. Process and module enumeration are blocking Windows
+            // syscalls that take hundreds of milliseconds on a modded install, so they run off the
+            // main thread; Update collects the result and does the reporting back on the main thread.
+            private Task<List<CheatToolDetection>> scanTask;
+
             private void OnEnable() {
                 AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoaded;
             }
@@ -310,6 +342,8 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
                 // Retry reporting until the local character identity is available.
                 if (toolerDetected && !reported) { TryReportTooler(); }
+
+                CollectFinishedScan();
 
                 if (Time.unscaledTime < nextScan) { return; }
                 nextScan = Time.unscaledTime + Mathf.Max(5, ValConfig.CheatScanIntervalSeconds.Value);
@@ -360,6 +394,32 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 });
             }
 
+            /// <summary>
+            /// Hands a completed background scan to the reporting path, on the main thread. Reading
+            /// Exception observes a faulted task, so a failed scan cannot surface later as an
+            /// unobserved task exception.
+            /// </summary>
+            private void CollectFinishedScan() {
+                if (scanTask == null || !scanTask.IsCompleted) { return; }
+                Task<List<CheatToolDetection>> finished = scanTask;
+                scanTask = null;
+
+                if (finished.Status == TaskStatus.RanToCompletion) {
+                    // The scan is dispatched with an identity and collected a few frames later, so the
+                    // session can end in between - ReportNewDetections addresses the report with
+                    // CharacterManager.PlayerCharacter, which Game.Logout has already nulled by then.
+                    // Drop the result rather than report an unattributable detection; a tool that is
+                    // still running is found again by the next scan.
+                    if (finished.Result != null && CharacterManager.PlayerCharacter != null) {
+                        ReportNewDetections(finished.Result);
+                    }
+                    return;
+                }
+                if (finished.Exception != null) {
+                    Logger.LogDebug($"CheatDetector background scan failed: {finished.Exception.GetBaseException().Message}");
+                }
+            }
+
             private void RunPeriodicScan() {
                 // Fallback assembly sweep: covers the rare case a native injector loads an
                 // assembly without raising the managed AssemblyLoad event. Cached assemblies are
@@ -374,27 +434,38 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 // Identity comes from the character save, and the report is useless without it.
                 if (CharacterManager.PlayerCharacter == null) { return; }
 
+                // A scan still running means the previous tick's syscall has not come back yet. Skip
+                // this tick rather than queueing behind it, so a slow machine cannot build a backlog.
+                if (scanTask != null) { return; }
+
+                bool genericTrainers = ValConfig.DetectGenericTrainers.Value;
                 List<CheatToolSignature> signatures = CheatToolCatalog.Enabled();
-                if (signatures.Count == 0 && !ValConfig.DetectGenericTrainers.Value) { return; }
+                if (signatures.Count == 0 && !genericTrainers) { return; }
 
-                List<CheatToolDetection> detections;
-                switch (scanPhase++ % 3) {
-                    case 0:
-                        detections = ScanProcesses(signatures);
-                        break;
-                    case 1:
-                        detections = ValConfig.ScanLoadedModules.Value
-                            ? ScanLoadedModules(signatures)
-                            : new List<CheatToolDetection>();
-                        break;
-                    default:
-                        detections = ValConfig.ScanWindowTitles.Value
-                            ? ScanWindows(signatures)
-                            : new List<CheatToolDetection>();
-                        break;
-                }
+                // Everything the scan needs from Unity or from config is read here, on the main
+                // thread, and captured by value. The worker below touches nothing else: the signature
+                // list is an immutable published snapshot, and RefreshIgnoreList republishes the
+                // allowlist so IsIgnored only ever reads it.
+                CheatToolCatalog.RefreshIgnoreList();
+                int phase = scanPhase++ % 3;
+                bool scanModules = ValConfig.ScanLoadedModules.Value;
+                bool scanWindows = ValConfig.ScanWindowTitles.Value
+                    && (Application.platform == RuntimePlatform.WindowsPlayer
+                        || Application.platform == RuntimePlatform.WindowsEditor);
 
-                ReportNewDetections(detections);
+                // None of the three vectors touch a Unity object, so they belong off the main thread.
+                // Process.GetProcesses and Process.Modules are the expensive ones - the latter reads a
+                // file-version resource per loaded module, and a modded install carries hundreds.
+                scanTask = Task.Run(() => {
+                    switch (phase) {
+                        case 0:
+                            return ScanProcesses(signatures, genericTrainers);
+                        case 1:
+                            return scanModules ? ScanLoadedModules(signatures) : new List<CheatToolDetection>();
+                        default:
+                            return scanWindows ? ScanWindows(signatures) : new List<CheatToolDetection>();
+                    }
+                });
             }
 
             // Sends only tools not already reported this session, in a single report. Weak and

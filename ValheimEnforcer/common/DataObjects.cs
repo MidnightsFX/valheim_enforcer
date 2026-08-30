@@ -146,12 +146,98 @@ namespace ValheimEnforcer.common {
             }
         }
 
+        /// <summary>
+        /// One BepInEx preloader patcher, keyed by its path relative to BepInEx/patchers with forward slashes.
+        ///
+        /// Deliberately shaped like <see cref="Mod"/>: <see cref="Hash"/>/<see cref="HashStatus"/> are what a
+        /// client reports about itself, <see cref="AcceptedHashes"/> is what a server will allow. A patcher
+        /// carries no BepInEx metadata at all - no plugin id, no version - so unlike a mod there is nothing
+        /// else to identify it by, which is why the file hash is the only policy this list can express.
+        /// </summary>
+        public class PatcherEntry {
+            public string Name { get; set; }
+
+            /// <summary>Client -> server: the SHA256 of the file, or null with a reason in HashStatus.</summary>
+            [DefaultValue(null)]
+            public string Hash { get; set; }
+
+            /// <summary>Client -> server: why Hash is null. One of PluginHasher's fixed status tokens.</summary>
+            [DefaultValue(null)]
+            public string HashStatus { get; set; }
+
+            /// <summary>Server side: the hashes this patcher is allowed to have. Admin authored or recorded.</summary>
+            [DefaultValue(null)]
+            public List<string> AcceptedHashes { get; set; }
+
+            public bool AcceptsHash(string candidate) {
+                if (AcceptedHashes == null || AcceptedHashes.Count == 0) { return false; }
+                if (string.IsNullOrEmpty(candidate)) { return false; }
+                foreach (string accepted in AcceptedHashes) {
+                    if (string.Equals(accepted, candidate, StringComparison.OrdinalIgnoreCase)) { return true; }
+                }
+                return false;
+            }
+
+            public bool HasRecordedHash() {
+                return AcceptedHashes != null && AcceptedHashes.Count > 0;
+            }
+        }
+
         public class Mods {
             public Dictionary<string, Mod> ActiveMods { get; set; } = new Dictionary<string, Mod>();
             public Dictionary<string, Mod> RequiredMods { get; set; } = new Dictionary<string, Mod>();
             public Dictionary<string, Mod> OptionalMods { get; set; } = new Dictionary<string, Mod>();
             public Dictionary<string, Mod> AdminOnlyMods { get; set; } = new Dictionary<string, Mod>();
             public Dictionary<string, Mod> ServerOnlyMods { get; set; } = new Dictionary<string, Mod>();
+
+            /// <summary>What this machine actually has in BepInEx/patchers. Rebuilt every start, like ActiveMods.</summary>
+            public Dictionary<string, PatcherEntry> ActivePatchers { get; set; } = new Dictionary<string, PatcherEntry>();
+
+            /// <summary>
+            /// Server policy: the patchers a client may carry. Allowlist semantics, not required-mod semantics -
+            /// a client with none is always fine, which matters because almost no client has any while a server
+            /// may well have several.
+            /// </summary>
+            public Dictionary<string, PatcherEntry> AllowedPatchers { get; set; } = new Dictionary<string, PatcherEntry>();
+
+            /// <summary>
+            /// Server -> client: a random value this connection must fold into its report, so the report cannot
+            /// be a canned answer replayed from a previous session. Absent when the feature is off, and absent
+            /// from a server that predates it - both of which a client handles by simply not answering.
+            /// </summary>
+            [DefaultValue(null)]
+            public string Nonce { get; set; }
+
+            /// <summary>
+            /// Client -> server: SHA256 over the nonce and the declaration being sent. See
+            /// <see cref="modules.mods.Attestation"/> for exactly what a match does and does not prove.
+            /// </summary>
+            [DefaultValue(null)]
+            public string Attestation { get; set; }
+
+            /// <summary>
+            /// The server's payload for one specific connection: everything <see cref="ToZPackage"/> sends,
+            /// plus that connection's nonce.
+            ///
+            /// A copy rather than a mutation of the shared settings object, because two clients can be
+            /// mid-handshake at once and stamping the live object would hand the second one the first one's
+            /// nonce. The copy is shallow on purpose - only the scalar differs, and nothing here writes to the
+            /// dictionaries.
+            /// </summary>
+            public ZPackage ToZPackage(string nonce) {
+                if (string.IsNullOrEmpty(nonce)) { return ToZPackage(); }
+                Mods forPeer = new Mods {
+                    ActiveMods = ActiveMods,
+                    RequiredMods = RequiredMods,
+                    OptionalMods = OptionalMods,
+                    AdminOnlyMods = AdminOnlyMods,
+                    ServerOnlyMods = ServerOnlyMods,
+                    ActivePatchers = ActivePatchers,
+                    AllowedPatchers = AllowedPatchers,
+                    Nonce = nonce,
+                };
+                return forPeer.ToZPackage();
+            }
 
             public ZPackage ToZPackage() {
                 string stringified = DataObjects.yamlserializer.Serialize(this);
@@ -170,7 +256,7 @@ namespace ValheimEnforcer.common {
             /// side's count logging is unaffected.
             /// </summary>
             public ZPackage ActiveModsToZPackage() {
-                Mods trimmed = new Mods { ActiveMods = ActiveMods };
+                Mods trimmed = new Mods { ActiveMods = ActiveMods, ActivePatchers = ActivePatchers, Attestation = Attestation };
                 ZPackage package = new ZPackage();
                 package.Write(DataObjects.yamlserializer.Serialize(trimmed));
                 return package;
@@ -178,11 +264,21 @@ namespace ValheimEnforcer.common {
 
             public Mods FromZPackage(ZPackage incoming) {
                 Mods mods = DataObjects.yamldeserializer.Deserialize<Mods>(incoming.ReadString());
+                // Normalised on `mods` and not on `this`, because `mods` is what every caller uses - they all
+                // go through `new Mods().FromZPackage(pkg)` and keep the return value. A payload from a build
+                // that predates patcher reporting carries neither key, and IgnoreUnmatchedProperties means an
+                // absent key deserializes to null rather than throwing. Empty reads correctly here: a client
+                // that says nothing about patchers is a client reporting that it has none.
+                mods.ActivePatchers = mods.ActivePatchers ?? new Dictionary<string, PatcherEntry>();
+                mods.AllowedPatchers = mods.AllowedPatchers ?? new Dictionary<string, PatcherEntry>();
+
                 ActiveMods = mods.ActiveMods;
                 RequiredMods = mods.RequiredMods;
                 OptionalMods = mods.OptionalMods;
                 AdminOnlyMods = mods.AdminOnlyMods;
                 ServerOnlyMods = mods.ServerOnlyMods;
+                ActivePatchers = mods.ActivePatchers;
+                AllowedPatchers = mods.AllowedPatchers;
                 return mods;
             }
         }
@@ -595,6 +691,14 @@ namespace ValheimEnforcer.common {
         public class DeltaSummaryUpdate {
             public string Name { get; set; }
             public string HostID { get; set; }
+
+            /// <summary>
+            /// The sender's own PlayerProfile id - the value stamped onto anything they craft. Not the account
+            /// id: it lives in the player's profile and the server has no other way to learn it, which is why
+            /// it is reported here and collected into the known-id registry.
+            /// </summary>
+            [DefaultValue(0L)]
+            public long PlayerID { get; set; }
             public DisconnectionState DisconnectionState { get; set; } = DisconnectionState.DirtyDisconnect;
             public List<ItemDelta> ItemModifications { get; set; } = new List<ItemDelta>();
             public Dictionary<string, string> PlayerCustomDataModifications { get; set; } = new Dictionary<string, string>();
@@ -765,6 +869,10 @@ namespace ValheimEnforcer.common {
             public string ModMismatch { get; set; }
             [YamlMember(ScalarStyle = ScalarStyle.Literal)]
             public string StructureFlagged { get; set; }
+            [YamlMember(ScalarStyle = ScalarStyle.Literal)]
+            public string ClientContradiction { get; set; }
+            [YamlMember(ScalarStyle = ScalarStyle.Literal)]
+            public string ItemOriginFlagged { get; set; }
         }
     }
 }

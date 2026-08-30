@@ -1,10 +1,15 @@
-﻿using BepInEx.Logging;
+using BepInEx.Logging;
 using System;
 
 
 namespace ValheimEnforcer {
     internal class Logger {
         public static LogLevel Level = LogLevel.Info;
+
+        // Every LogDebug call site builds its interpolated string before the call, so the level check
+        // inside LogDebug only saves the BepInEx dispatch, not the formatting. Hot paths test this
+        // first and format inside the branch instead.
+        public static bool DebugEnabled { get { return Level >= LogLevel.Debug; } }
 
         public static void EnableDebugLogging(object sender, EventArgs e) {
             CheckEnableDebugLogging();

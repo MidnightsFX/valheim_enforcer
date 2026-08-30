@@ -35,6 +35,9 @@ namespace ValheimEnforcer.modules {
             // Started before the config read so the file hashing overlaps the YAML parse below. Idempotent, so
             // the second call on a listen host (both Jotunn prefab events fire) costs nothing.
             PluginHasher.BeginPass(ActiveMods);
+            // Same reasoning, second directory: BepInEx/patchers is loaded before any plugin and was never
+            // looked at, so a cheat shipped as a preloader patcher bypassed mod validation entirely.
+            PatcherIndex.BeginPass();
 
             ModSettings = new DataObjects.Mods();
             Logger.LogDebug($"Detected {ActiveMods.Keys.Count} mods.");
@@ -43,7 +46,9 @@ namespace ValheimEnforcer.modules {
             LoadConfig(File.ReadAllText(ValConfig.ModsConfigFilePath));
 
             PluginHasher.WaitForPass(ValConfig.HashComputeTimeoutSeconds.Value * 1000);
+            PatcherIndex.WaitForPass(ValConfig.HashComputeTimeoutSeconds.Value * 1000);
             RebuildActiveMods();
+            RebuildActivePatchers();
 
             foreach (KeyValuePair<string, BaseUnityPlugin> plugin in ActiveMods) {
                 Logger.LogDebug($"Found active mod: {plugin.Key} v{plugin.Value.Info.Metadata.Version}");
@@ -105,6 +110,13 @@ namespace ValheimEnforcer.modules {
             "#   adminOnlyMods   Only admins may connect with these; everyone else is rejected.",
             "#   serverOnlyMods  Server side only. Not demanded of clients - but a client that installs one",
             "#                   is rejected for it, so this is not the list for client-side mods.",
+            "#",
+            "# The two patcher lists are keyed by file path instead, relative to BepInEx/patchers. Patchers are",
+            "# not plugins and carry no GUID or version, so the file hash is all there is to hold them to.",
+            "#",
+            "#   activePatchers  What this machine has in BepInEx/patchers. Rebuilt every start - editing it does nothing.",
+            "#   allowedPatchers Patchers a client may carry. An allowlist: a client with none always passes.",
+            "#                   The server's own are added here automatically. Needs Mods.ValidatePatchers to enforce.",
             "#",
             "# Per entry: enforceVersion: true requires an exact version match (defaults to false).",
             "# File verification uses acceptedHashes / hashSource / thunderstorePackage / hashEnforcement.",
@@ -216,6 +228,81 @@ namespace ValheimEnforcer.modules {
         }
 
         /// <summary>
+        /// Rebuilds <see cref="DataObjects.Mods.ActivePatchers"/> from the patcher directory, and on the server
+        /// adopts anything new into <see cref="DataObjects.Mods.AllowedPatchers"/>.
+        ///
+        /// Derived, never read back from the file, for exactly the reason ActiveMods is: it is the list this
+        /// peer *reports* about itself, and a list taken from a text file is a list a player can type anything
+        /// into.
+        ///
+        /// The adopt step is what makes this feature need no manual work on a normal server. A patcher already
+        /// installed when the feature arrives is allowlisted on the next start, and only a patcher that appears
+        /// on a client without being on the server is ever refused.
+        /// </summary>
+        private static void RebuildActivePatchers() {
+            if (ModSettings == null) { ModSettings = new DataObjects.Mods(); }
+            ModSettings.ActivePatchers = PatcherIndex.Snapshot();
+            if (ModSettings.AllowedPatchers == null) { ModSettings.AllowedPatchers = new Dictionary<string, DataObjects.PatcherEntry>(); }
+
+            if (ModSettings.ActivePatchers.Count > 0) {
+                Logger.LogInfo($"Detected {ModSettings.ActivePatchers.Count} BepInEx patcher(s).");
+            }
+
+            // Server-side adoption only. A client doing this would be allowlisting its own patchers, which is
+            // not a thing a client gets to do - and on a client the list is never consulted anyway.
+            if (!ValConfig.AutoAddPatchersToAllowed.Value) { return; }
+            if (ZNet.instance != null && !ZNet.instance.IsServer()) { return; }
+
+            foreach (KeyValuePair<string, DataObjects.PatcherEntry> patcher in ModSettings.ActivePatchers) {
+                if (!ModSettings.AllowedPatchers.TryGetValue(patcher.Key, out DataObjects.PatcherEntry allowed)) {
+                    allowed = new DataObjects.PatcherEntry { Name = patcher.Value.Name };
+                    ModSettings.AllowedPatchers[patcher.Key] = allowed;
+                    Logger.LogDebug($"Automatically allowing the patcher {patcher.Key}.");
+                }
+                // Record the local hash the same way RecordLocalHashIfAllowed does for plugins: only ever add,
+                // so an admin who pinned a hash by hand keeps it and a second build does not silently replace
+                // the first.
+                if (patcher.Value.Hash == null) { continue; }
+                if (allowed.AcceptedHashes == null) { allowed.AcceptedHashes = new List<string>(); }
+                if (!allowed.AcceptsHash(patcher.Value.Hash)) { allowed.AcceptedHashes.Add(patcher.Value.Hash); }
+            }
+        }
+
+        /// <summary>
+        /// Compares a client's patchers against the server's allowlist.
+        ///
+        /// Allowlist, not required-list: a client carrying no patchers passes unconditionally, and only what it
+        /// actually has is checked. The reverse rule - "match the server" - would reject essentially every
+        /// client, since a server may run patchers that no player has any reason to install.
+        ///
+        /// Hash comparison is unconditional rather than routed through HashPolicy. A patcher has no version
+        /// string to fall back on, so its file is the only thing that identifies it; "allowed by name, any
+        /// contents" would let a hostile DLL inherit an allowlisted name and defeat the whole check.
+        /// </summary>
+        private static void ValidatePatchers(Mods checking, Mods authoritative,
+                                             List<string> extra, List<string> hashMismatch, List<string> unverifiable) {
+            if (checking?.ActivePatchers == null || checking.ActivePatchers.Count == 0) { return; }
+            Dictionary<string, DataObjects.PatcherEntry> allowed = authoritative?.AllowedPatchers;
+
+            foreach (KeyValuePair<string, DataObjects.PatcherEntry> reported in checking.ActivePatchers) {
+                DataObjects.PatcherEntry record = null;
+                if (allowed != null) { allowed.TryGetValue(reported.Key, out record); }
+
+                if (record == null) {
+                    extra.Add(reported.Key);
+                    continue;
+                }
+                if (!record.HasRecordedHash()) { continue; } // allowed by name; the server pinned nothing to compare
+
+                if (string.IsNullOrEmpty(reported.Value?.Hash)) {
+                    unverifiable.Add($"{reported.Key} ({reported.Value?.HashStatus ?? "no hash reported"})");
+                } else if (!record.AcceptsHash(reported.Value.Hash)) {
+                    hashMismatch.Add(reported.Key);
+                }
+            }
+        }
+
+        /// <summary>
         /// Applies an edited Mods.yaml to the in-memory settings.
         ///
         /// Only the four policy lists are taken from the file. ActiveMods is deliberately NOT adopted and is
@@ -253,6 +340,7 @@ namespace ValheimEnforcer.modules {
             internal List<string> AdminOnlyMods = new List<string>();
             internal List<string> HashMismatches = new List<string>();
             internal List<string> UnverifiedMods = new List<string>();
+            internal List<string> Patchers = new List<string>();
 
             /// <summary>Comma-separated, or an empty string so the field carrying it drops out of the message.</summary>
             internal static string Join(List<string> entries) {
@@ -271,6 +359,9 @@ namespace ValheimEnforcer.modules {
             List<string> hashMismatch = new List<string>();     // the file does not match anything the server accepts
             List<string> hashUnverifiable = new List<string>(); // the server has a record but no usable hash was reported
             List<string> hashNotRecorded = new List<string>();  // Strict only: enforced mod the server never pinned
+            List<string> extraPatchers = new List<string>();       // a BepInEx patcher the server does not allow
+            List<string> patcherHashMismatch = new List<string>(); // allowed by name, but not this build of it
+            List<string> patcherUnverifiable = new List<string>(); // the server pinned it, the client reported no hash
             List<string> requiredModsMissing = AuthoratativeMods.RequiredMods.Keys.Distinct().ToList();
             // At least one version mismatch was found by the file check rather than by enforceVersion, so the
             // list gets the extra line saying why a version the server never marked as enforced still matters.
@@ -371,6 +462,18 @@ namespace ValheimEnforcer.modules {
             }
 
 
+            // Patchers are checked separately from mods and against their own list. They are not plugins:
+            // BepInEx loads them from BepInEx/patchers before any plugin exists and lets them rewrite the
+            // game's assemblies on the way in, so they need covering - but they carry no GUID or version to
+            // hold them to, and an allowlist keyed on the file is the only policy that applies.
+            if (ValConfig.ValidatePatchers != null && ValConfig.ValidatePatchers.Value) {
+                ValidatePatchers(CheckingMods, AuthoratativeMods, extraPatchers, patcherHashMismatch, patcherUnverifiable);
+            } else if (CheckingMods?.ActivePatchers != null && CheckingMods.ActivePatchers.Count > 0) {
+                // Reported even when enforcement is off, so an admin can see what their players actually carry
+                // and build the list before switching ValidatePatchers on.
+                Logger.LogInfo($"Patcher validation is off; the peer being checked carries {CheckingMods.ActivePatchers.Count} patcher(s): {string.Join(", ", CheckingMods.ActivePatchers.Keys.ToArray())}");
+            }
+
             // The same lists the summary is built from, kept addressable for the Discord template. hashUnverifiable
             // and hashNotRecorded are merged: both mean "the server could not confirm this file", and the split
             // between them is a detail of HashEnforcement rather than something a channel message acts on.
@@ -381,6 +484,12 @@ namespace ValheimEnforcer.modules {
             detail.HashMismatches = hashMismatch;
             detail.UnverifiedMods = new List<string>(hashUnverifiable);
             detail.UnverifiedMods.AddRange(hashNotRecorded);
+            // One field for every patcher problem. The split between "not allowed" and "wrong build" matters in
+            // the disconnect text, where the player is told what to do about it, and not in a channel message
+            // whose job is to say that a patcher was involved at all.
+            detail.Patchers = new List<string>(extraPatchers);
+            detail.Patchers.AddRange(patcherHashMismatch);
+            detail.Patchers.AddRange(patcherUnverifiable);
 
             if (versionMismatch.Count > 0) {
                 string wrongVersions = $"\nMod versions that do not match the server: {string.Join(", ", versionMismatch)}";
@@ -422,8 +531,24 @@ namespace ValheimEnforcer.modules {
                 summay += unpinned;
                 Logger.LogWarning(unpinned);
             }
+            if (extraPatchers.Count > 0) {
+                string badPatchers = $"\nBepInEx patchers not allowed by this server: {string.Join(", ", extraPatchers)}";
+                summay += badPatchers;
+                Logger.LogWarning(badPatchers);
+            }
+            if (patcherHashMismatch.Count > 0) {
+                string modifiedPatchers = $"\nModified BepInEx patcher files detected: {string.Join(", ", patcherHashMismatch)}";
+                summay += modifiedPatchers;
+                Logger.LogWarning(modifiedPatchers);
+            }
+            if (patcherUnverifiable.Count > 0) {
+                string unverifiedPatchers = $"\nBepInEx patchers that could not be verified: {string.Join(", ", patcherUnverifiable)}";
+                summay += unverifiedPatchers;
+                Logger.LogWarning(unverifiedPatchers);
+            }
             if (versionMismatch.Count > 0 || requiredModsMissing.Count > 0 || extraMods.Count > 0 || adminOnlyNotAllowed.Count > 0 || adminOnlyInfo.Count > 0
-                || hashMismatch.Count > 0 || hashUnverifiable.Count > 0 || hashNotRecorded.Count > 0) {
+                || hashMismatch.Count > 0 || hashUnverifiable.Count > 0 || hashNotRecorded.Count > 0
+                || extraPatchers.Count > 0 || patcherHashMismatch.Count > 0 || patcherUnverifiable.Count > 0) {
                 // Build detailed error message for display in Jotunn's CompatibilityWindow
                 StringBuilder errorBuilder = new StringBuilder();
                 errorBuilder.AppendLine("\n<b>ValheimEnforcer - Mod Validation Failed</b>");
@@ -481,6 +606,23 @@ namespace ValheimEnforcer.modules {
                     errorBuilder.AppendLine("\n<b>Mods The Server Has Not Pinned (server misconfiguration):</b>");
                     AppendBullets(errorBuilder, hashNotRecorded);
                     errorBuilder.AppendLine("  Ask the server admin to record a hash for these, or to lower HashEnforcement.");
+                }
+
+                if (extraPatchers.Count > 0) {
+                    errorBuilder.AppendLine("\n<b>Non-Allowed BepInEx Patchers:</b>");
+                    AppendBullets(errorBuilder, extraPatchers);
+                    errorBuilder.AppendLine("  These are files in your BepInEx/patchers folder, not plugins. Remove them, or ask the admin to allow them.");
+                }
+
+                if (patcherHashMismatch.Count > 0) {
+                    errorBuilder.AppendLine("\n<b>Modified BepInEx Patcher Files:</b>");
+                    AppendBullets(errorBuilder, patcherHashMismatch);
+                    errorBuilder.AppendLine("  Reinstall these from their original download - a recompiled or edited DLL will not match.");
+                }
+
+                if (patcherUnverifiable.Count > 0) {
+                    errorBuilder.AppendLine("\n<b>Unverifiable BepInEx Patcher Files:</b>");
+                    AppendBullets(errorBuilder, patcherUnverifiable);
                 }
 
                 string fullError = errorBuilder.ToString();
@@ -573,6 +715,14 @@ namespace ValheimEnforcer.modules {
                     // read to the server as a tampered client.
                     PluginHasher.WaitForPass(2000);
                     PluginHasher.ApplyTo(ModSettings.ActiveMods);
+                    // Same race, same fix: the patcher scan normally finished long ago, but a listen host or an
+                    // immediate reconnect can reach the handshake while it is still running, and a half-filled
+                    // set reads to the server as a client hiding patchers.
+                    PatcherIndex.WaitForPass(2000);
+                    ModSettings.ActivePatchers = PatcherIndex.Snapshot();
+                    // Computed last, over the mod and patcher lists exactly as they are about to be sent.
+                    // Null when the server issued no nonce, which leaves the field out of the payload.
+                    ModSettings.Attestation = Attestation.Respond(ModSettings);
                     Logger.LogDebug("Client sending mod version data to server");
                     rpc.Invoke(nameof(RPC_ReceiveModVersionData), ModSettings.ActiveModsToZPackage());
                 }
@@ -590,8 +740,12 @@ namespace ValheimEnforcer.modules {
                         Logger.LogWarning("Mod settings are not initialized yet; not sending the server mod list to this client.");
                         return;
                     }
+                    // Minted here, which is the earliest point the server speaks to this connection - and,
+                    // because vanilla only invokes ClientHandshake after this prefix returns, always before the
+                    // client builds the report it has to fold the nonce into.
+                    string nonce = Attestation.Issue(rpc.GetSocket()?.GetHostName());
                     Logger.LogDebug("Server sending mod version data to client");
-                    rpc.Invoke(nameof(RPC_ReceiveModVersionData), ModSettings.ToZPackage());
+                    rpc.Invoke(nameof(RPC_ReceiveModVersionData), ModSettings.ToZPackage(nonce));
                 }
             }
         }
@@ -605,6 +759,9 @@ namespace ValheimEnforcer.modules {
             if (!ZNet.instance.IsServer()) {
                 // Client received data from server
                 Mods serverMods = new Mods().FromZPackage(data);
+                // Held before validation runs: the handshake prefix that uses it fires on the very next
+                // message from this server, so there is no later opportunity.
+                Attestation.HoldNonce(serverMods.Nonce);
                 Logger.LogDebug($"Client received server mod data: Required: {serverMods.RequiredMods.Count}, Optional: {serverMods.OptionalMods.Count}, AdminOnly: {serverMods.AdminOnlyMods.Count} mods");
                 // Client cannot trust its admin status during the handshake: Jotunn syncs it only
                 // after login (post-RPC_PeerInfo) and PlayerIsAdmin defaults to true. Pass it as
@@ -631,13 +788,23 @@ namespace ValheimEnforcer.modules {
                 Mods clientMods = new Mods().FromZPackage(data);
                 bool isadmin = ZNet.instance.IsAdmin(sender.m_socket.GetHostName());
                 Logger.LogDebug($"Server received server mod data from {peerAddress} Admin?{isadmin}: Required: {clientMods.RequiredMods.Count}, Optional: {clientMods.OptionalMods.Count}, AdminOnly: {clientMods.AdminOnlyMods.Count} mods");;
-                bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, adminStatusKnown: true, out string summary, out string details, out ModMismatchDetail detail);
                 string validatingHost = sender.m_socket?.GetHostName();
+
+                // Checked before the mod list itself. A failure here says the declaration below was not
+                // generated for this connection, so it is not worth reasoning about its contents in detail -
+                // and under Require it is a rejection on its own.
+                if (!CheckAttestation(sender, validatingHost, clientMods, peerAddress)) { return; }
+
+                bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, adminStatusKnown: true, out string summary, out string details, out ModMismatchDetail detail);
                 if (modsvalid) {
                     // Positive record: this host actually sent a mod list and it passed. ZNet_RPC_PeerInfo_ModRejection
                     // refuses any host that reaches PeerInfo in neither the validated nor the rejected set, which is
                     // what stops a client that simply never runs the handshake (rather than failing it) from joining.
                     if (!string.IsNullOrEmpty(validatingHost)) { ValidatedHosts.Add(validatingHost); }
+                    // Recorded here, where we know both what this client declared and that we accepted it. If a
+                    // server-side guard later refuses something this peer sends, that declaration is the other
+                    // half of the contradiction.
+                    network.PeerTrust.Declare(validatingHost, clientMods, ModSettings);
                 }
                 if (modsvalid == false) {
                     Logger.LogWarning($"Mod compatibility check failed for client at {peerAddress}\n{summary}");
@@ -653,6 +820,7 @@ namespace ValheimEnforcer.modules {
                             { "adminOnlyMods", ModMismatchDetail.Join(detail.AdminOnlyMods) },
                             { "hashMismatches", ModMismatchDetail.Join(detail.HashMismatches) },
                             { "unverifiedMods", ModMismatchDetail.Join(detail.UnverifiedMods) },
+                            { "patchers", ModMismatchDetail.Join(detail.Patchers) },
                         });
                     }
                     RejectPeer(sender);
@@ -691,6 +859,48 @@ namespace ValheimEnforcer.modules {
             sender.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorVersion);
             // Push the error out before anything tears the connection down - same reason FinalSaveRpc flushes.
             sender.GetSocket()?.Flush();
+        }
+
+        /// <summary>
+        /// Verifies that this client's declaration was built for this connection, and applies AttestationPolicy.
+        ///
+        /// Returns false when the connection has been refused and the caller must stop. A pass here is a narrow
+        /// claim - see <see cref="Attestation"/> - so it is deliberately not treated as evidence about the
+        /// contents of the declaration, only about its freshness.
+        /// </summary>
+        private static bool CheckAttestation(ZRpc sender, string hostId, Mods clientMods, string peerAddress) {
+            Attestation.Verdict verdict = Attestation.Check(hostId, clientMods);
+            if (verdict == Attestation.Verdict.Pass) { return true; }
+
+            string why;
+            switch (verdict) {
+                case Attestation.Verdict.Missing:
+                    why = "it carries no attestation (the client is running a ValheimEnforcer build that predates the feature, or one that has had it removed)";
+                    break;
+                case Attestation.Verdict.Mismatch:
+                    why = "its attestation does not match the mod list it sent (the report was not generated for this connection)";
+                    break;
+                case Attestation.Verdict.NotIssued:
+                    // Our own bookkeeping, not the client's fault: the nonce went missing between handshake and
+                    // report. Reconnecting re-issues one, so this must never reject however strict the policy.
+                    Logger.LogWarning($"No attestation nonce is on record for {peerAddress}; skipping the check for this connection.");
+                    return true;
+                default:
+                    why = "its attestation could not be verified";
+                    break;
+            }
+
+            if (Attestation.Policy() != Attestation.Require) {
+                Logger.LogWarning($"Attestation check failed for the client at {peerAddress}: {why}. Allowed, because AttestationPolicy is {Attestation.Policy()}.");
+                return true;
+            }
+
+            Logger.LogWarning($"Rejecting the client at {peerAddress}: {why}.");
+            // No detail panel is set from here. DetailsUpdater drives the local client's connection-error
+            // window, so on a server it reaches nobody; the rejected player sees vanilla's version-error
+            // screen, which is the same thing every other pre-PeerInfo rejection in this file produces.
+            RejectPeer(sender);
+            return false;
         }
 
         [HarmonyPatch(typeof(ZNet), nameof(ZNet.RPC_PeerInfo))]
@@ -734,6 +944,8 @@ namespace ValheimEnforcer.modules {
                     Logger.LogDebug($"Cleared mod rejection for {hostId}; a corrected client may reconnect.");
                 }
                 ValidatedHosts.Remove(hostId);
+                Attestation.Clear(hostId);
+                network.PeerTrust.Clear(hostId);
             }
         }
 

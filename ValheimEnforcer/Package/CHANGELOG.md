@@ -1,3 +1,17 @@
+**0.21.0**
+---
+```
+- Improves scanning performance and prevents main thread hitches related to these scans
+- Adds Network Integrity: server-side validation of the vanilla routed RPCs the server relays without ever
+  looking at them, configurable EnableRpcGuards (off by default)
+- Adds BepInEx patcher validation (ValidatePatchers, off by default)
+- Adds per-connection session handshakes
+- Adds client contradiction reporting (ReportClientContradictions, off by default), which ties what a client
+  declared at join to what the guards later catch it doing
+- Adds item origin detection (DetectItemOrigins, off by default), which monitors users aquiring items that are not fully valid
+   - Admins are exempt by default (ItemOriginExemptAdmins); IgnoredItemOriginPrefabs disables the check for certain items
+```
+
 **0.20.1**
 ---
 ```

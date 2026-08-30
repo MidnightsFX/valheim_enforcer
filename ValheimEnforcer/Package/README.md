@@ -31,6 +31,8 @@ Mod Enforcement. All of the following features are configurable (server authorat
 - Prevents users connecting with mods not listed
 - Optional per-mod lists for required, optional, admin-only and server-only mods
 - Optional SHA256 file verification of client plugin DLLs, so a recompiled mod is rejected even when its version string is untouched
+- Optional allowlisting of BepInEx **patchers**, the DLLs that load before any plugin and rewrite the game's assemblies ([Patchers](#patchers))
+- Optional per-connection attestation, so a client's mod report cannot be a canned answer replayed from a previous session ([Attestation](#attestation))
 
 Nothing needs configuring for the default behaviour — every mod the server loads becomes a required mod. [Mod List](#mod-list) covers the file for when you want something else.
 
@@ -185,10 +187,22 @@ requiredMods:
 - Under `Strict`, enforcement is deferred for mods whose `thunderstorePackage` has not resolved yet, but only until the first resolve pass after server start finishes. That window is bounded and logged; it exists so a restart does not lock everyone out for the few seconds the downloads take.
 - BepInEx *patchers* (`BepInEx/patchers/`) are not plugins and are not covered by any of this.
 
+Item origins. Off by default, server authoritative.
+- Reports equipment that appears with no crafter, and that nothing in this world drops, sells or spawns
+- Reports equipment crafted by a player id nobody here has ever been
+- Only looks at items that have just appeared, so existing characters are never re-examined ([Item Origins](#item-origins))
+
 Structure validation. Off by default, server authoritative.
 - Catches a client spawning world-generation geometry — dungeon rooms, dvergr towns, ruins — instead of building
 - Catches a piece whose health has been set above what its prefab allows, which is how an indestructible structure is made
 - Blueprint and bulk-building mods cannot trip it, by design ([Structure Validation](#structure-validation))
+
+Network integrity. Off by default, server authoritative.
+- Binds every chat message to the name the server holds for that connection, so nobody can talk as somebody else
+- Refuses the player-teleport message from non-admins, the one-packet way to drop a whole server into the ocean
+- Filters mass object deletion down to what the sender actually owns or is standing next to
+- Drops hits carrying impossible damage, and optionally re-decides PvP and restricts which global keys a client may set ([Network Integrity](#network-integrity))
+- Optionally ties what a client declared at join to what the guards later catch it doing ([Client Contradictions](#client-contradictions))
 
 Cheat detection (enabled by default, configurable).
 - Automatic log, kick or ban for common cheating utilities
@@ -217,7 +231,71 @@ Window *titles* are ignored on windows that display content rather than run it �
 
 *Disclaimer: Valheim is client authoratative and without extremely invasive measures, cheating cannot be fully prevented. Process-name detection in particular is a speed bump rather than a wall — renaming Cheat Engine is a documented feature of the tool, and trainer executables are renameable by design. The module and window-title checks exist because they survive a rename, but a client that can cheat can also lie about what it is running. The same applies to mod file verification: the hash is computed and reported by the client, so it stops a recompiled mod, not a patched enforcer. What it changes is the cost — from "edit one file and rebuild" to "reverse engineer and patch the anti-cheat", which is a real barrier to the people who actually do the former and none at all to the people who can do the latter.*
 
-*What the server does refuse to take on trust is anything it can decide for itself. The sender of every network message is verified against the connection it arrived on, so a modified client cannot act as another player — it cannot run an admin's commands, get someone else banned, or write to another account's character. A character save or inventory delta is only ever accepted for the account and character the connection joined as. The join rules (item confiscation, skill clamping, custom-data reset) are re-run on the server for returning characters, not just applied on the client, and a first save from a brand-new character is held to the new-character rules server-side. These are the parts a client cannot lie its way past; the caveats above are about the parts — what mods it runs, what it has in its inventory this instant — that it still can.*
+*What the server does refuse to take on trust is anything it can decide for itself. The sender of every network message is verified against the connection it arrived on, so a modified client cannot act as another player — it cannot run an admin's commands, get someone else banned, or write to another account's character. A character save or inventory delta is only ever accepted for the account and character the connection joined as. The join rules (item confiscation, skill clamping, custom-data reset) are re-run on the server for returning characters, not just applied on the client, and a first save from a brand-new character is held to the new-character rules server-side. These are the parts a client cannot lie its way past; the caveats above are about the parts — what mods it runs, what it has in its inventory this instant — that it still can. [Network Integrity](#network-integrity) extends the same principle to the vanilla RPCs the server relays: chat names, player teleports, mass object deletion, damage values and global keys are all checked against what the server itself knows, so no amount of patching the client gets past them.*
+
+### Patchers
+
+Off by default. Set `ValidatePatchers` to `true` and clients are held to a list of allowed BepInEx **patchers**, the same way they are held to a list of allowed mods.
+
+Patchers are not plugins. They are the DLLs in `BepInEx/patchers`, and BepInEx loads them *before any plugin exists*, handing each one the game's assemblies to rewrite on the way in. That is a strictly more powerful position than any plugin has, this one included. Until now nothing here looked at that folder, so dropping a cheat there bypassed mod validation completely.
+
+They are keyed by file path relative to `BepInEx/patchers`, not by GUID, because a patcher carries no BepInEx metadata at all - no plugin id, no version. The file hash is the only thing there is to hold one to.
+
+| List | Who fills it in | Client has it | Client does not |
+| --- | --- | --- | --- |
+| `activePatchers` | Generated, every start | - | - |
+| `allowedPatchers` | Auto-populated from the server's own, then yours | allowed | allowed |
+
+**It is an allowlist, not a required list.** A client carrying no patchers always passes, which matters because almost no player has any while a server may well run several. Only a patcher a client *has* and the server has *not* allowed is refused. A patcher allowed by name is still checked against its recorded hash, since "any file under this name" would let a hostile DLL inherit an allowlisted one.
+
+Patchers are enumerated and logged whether or not `ValidatePatchers` is on, so leave it off for a while first and read the log to see what your players actually carry.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `ValidatePatchers` | `false` | Enforce the allowlist. Enumeration and logging happen either way |
+| `AutoAddPatchersToAllowed` | `true` | Adds the server's own patchers, with hashes, at startup. Hashes are only ever added, never replaced |
+
+### Attestation
+
+Off by default. `AttestationPolicy` makes each client prove its mod report was generated *for this connection*.
+
+Without it, a client reports the same plugin list and the same file hashes every session, forever - so a client patched to skip the work can capture one valid payload and replay it indefinitely. The server now hands each connection a random value during the handshake, and the client returns a digest over that value and the exact mod and patcher list it is sending. The server recomputes it and compares.
+
+**Be clear on what a pass means.** It proves the report was produced now, by code that actually ran. It does **not** prove the report is true: a client that keeps the original DLLs on disk and hashes those still passes. What it costs an attacker is the difference between returning a constant and keeping a working hashing path alive per connection. That is a real increase, and it is not a wall.
+
+| Value | Effect |
+| --- | --- |
+| `Off` | Nothing is issued and nothing is checked |
+| `Report` | A missing or wrong attestation is logged; the player connects |
+| `Require` | A missing or wrong attestation is a rejection |
+
+**Before setting `Require`:** a player on an older ValheimEnforcer sends no attestation at all, and is rejected too. Roll the pack out first. If the server's own record of a connection's nonce goes missing, that connection is *allowed* rather than refused - our bookkeeping failing is not the player's fault.
+
+### Item Origins
+
+Off by default. Set `DetectItemOrigins` to `true` and the server watches the items appearing in players' inventories for gear nobody ever made.
+
+A crafted item records who made it. An item conjured with `give`, devcommands or a mod menu records nobody, because only the crafting path ever writes that field. Two checks follow from that:
+
+| Check | What it reports |
+| --- | --- |
+| `DetectUncraftedEquipment` | Equipment with no crafter, that nothing in this world drops, sells or spawns |
+| `DetectUnknownCrafterIds` | Equipment crafted by a player id nobody on this server has ever reported |
+
+**Having no crafter is not suspicious on its own.** Every loot drop, chest item, boss drop and trader purchase in the game has none, so flagging that alone would report a Dvergr circlet and a fishing rod bought from Haldor. The server therefore works out, from the prefabs this world actually loaded, which equipment has *no uncrafted route at all* - reading drop tables, creature drops, pickables and trader stock - and only reports that. A modded boss with a custom weapon drop is covered without anyone listing it. Run `enforcer-item-origins` to see the list; the answer to "why was this flagged" is always in it.
+
+The second check exists because somebody who spawns gear and then thinks to stamp a crafter on it has to invent a number, and an invented one belongs to no player here. Ids are collected from connected players into `PlayerIds.yaml`. **Trading is unaffected**: the question is whether the id is *known*, not whether it is *yours*, so a sword one player made and gave to another is fine because its maker is on file.
+
+**Only items that have just appeared are examined**, never whole inventories. A character carrying gear from before you enabled this is never re-examined, so there is no migration, no grace period and no one-time baseline to sit through.
+
+This **warns and never confiscates**, on purpose.
+
+#### Things worth knowing
+
+- **The crafter id comes from the client.** It arrives inside the item payload the client wrote, so a client that thinks to set the field to a plausible value defeats both checks. What this catches is items that were *spawned* - which is how the tools actually in circulation hand out gear, none of them bothering with a crafter. It is a good detector of careless cheating, not an item-integrity guarantee.
+- **Expect some noise from `DetectUnknownCrafterIds` at first.** An item crafted by somebody who has not joined since you switched it on has a crafter the registry has not met yet. Nothing is reported at all until the registry has somebody in it, and it fills as people play.
+- **`IgnoredItemOriginPrefabs` is the escape hatch** for a mod that hands out gear by a route the prefab scan cannot see - a quest reward written in code, an item granted by a script. Reach for it rather than turning the feature off.
+- Admins are exempt by default (`ItemOriginExemptAdmins`), because spawning items is an ordinary thing to do with devcommands.
 
 ### Structure Validation
 
@@ -284,6 +362,64 @@ Removal also refuses to delete more than 500 objects at once without a prefab fi
 - **What is detected is a *structure*.** Something with no piece component at all — scenery, a plant, a creature — is outside the first check on purpose. Requiring one is what keeps tombstones, dropped items, arrows and animals out of a detector that can delete things.
 - **Detections name the connection, not the character.** A character name is whatever a client says it is, and the crafter field on a cheated piece is empty by definition. Structures found by a scan are reported with no player at all, because nothing durable records who created an object.
 - **A world-generated piece can be damaged.** Locations spawn with their pieces pre-damaged, which is below the ceiling and never flagged.
+
+### Network Integrity
+
+Off by default. Set `EnableRpcGuards` to `true` and the server starts checking the vanilla network messages that it otherwise relays without looking at them.
+
+These are a different kind of check from everything else in this mod. Cheat detection and mod verification ask the client about itself and have to take the answer on trust; these guards read the packet the server already has in its hands, so **there is nothing for a client to lie about**. A patched Enforcer gets past the first kind and not past this one.
+
+Each guard covers one vanilla RPC that validates nothing:
+
+| Guard | The RPC | What a client can do with it today | What the guard does |
+| --- | --- | --- | --- |
+| `GuardChatSenderName` | `ChatMessage` | The display name travels *inside* the message, written by the sender. Talk as any player, or as an admin | Rewrites the name to the one the server holds. The message still arrives |
+| `GuardPlayerTeleportRpc` | `RPC_TeleportPlayer` | Teleports whoever *receives* it, and can be addressed to everybody at once | Refused for non-admins |
+| `GuardZdoDestruction` | `DestroyZDO` | Names a list of objects and the server deletes every one. No ownership check, no limit | Keeps the ids the sender owns or is near, drops the rest |
+| `GuardDamageRpc` | `RPC_Damage` | Damage is applied from numbers the attacker's client wrote. One-shot anything | Drops hits that are NaN, infinite, negative or above `MaxAllowedHitDamage` |
+| `GuardPvpDamage` | `RPC_Damage` | The hit's ignore-PvP flag is written by the attacker, so setting it kills players who never opted in | Re-decides it on the server, where the flag carries no weight. Off by default |
+| `GuardGlobalKeys` | `SetGlobalKey` | Sets any world key — every boss defeated, free building, altered damage rates | Allows only keys a loaded prefab actually sets |
+
+Everything is refused *and logged*; `RpcGuardAction` decides whether the player is also kicked or banned, and defaults to `Log`. Run it that way for a while first — a mod doing something unusual shows up here as a refusal, and the log names it. Repeat offences from the same player collapse into one line per 30 seconds, so a script cannot flood the log.
+
+Admins are exempt by default (`RpcGuardExemptAdmins`), because vanilla's own admin-only `recall` command sends the teleport message, and admins legitimately clean up objects they do not own. **The chat name binding ignores that exemption** — an admin has no reason to speak under another player's name, and it is the most valuable name to borrow.
+
+#### Global keys
+
+This one is off even when `EnableRpcGuards` is on, and it is the only guard with an asymmetric failure mode: a key wrongly refused stops progression registering, quietly. Turn it on deliberately.
+
+There is no list to maintain. Every key a client legitimately sets is written on a prefab — the key a creature sets when it dies, the one an offering bowl sets when a boss is summoned, the one a runestone sets when it is read — so the allowed set is read out of the prefabs this world actually loaded, the same way structure validation reads buildable pieces out of piece tables. A modded boss with its own key is covered without anyone listing it. `activeBosses` and `AshlandsOcean` are set from code rather than a prefab field and are built in.
+
+`AllowedClientGlobalKeys` is the escape hatch: comma-separated key names, added on top of what the scan found. Matched on the key name alone, so `activeBosses` also permits `activeBosses 2`. When a legitimate key is refused, the log names it — that is what you paste in here.
+
+Removal is judged separately. Nothing in normal gameplay removes a global key; only console commands and world setup do. `BlockClientGlobalKeyRemoval` (on) refuses removal from non-admins outright rather than checking it against the allowlist, since otherwise a client could erase the very keys it is allowed to set.
+
+Nothing is filtered until the prefab scan has succeeded, and keys the server sets itself are never filtered.
+
+#### Client Contradictions
+
+Off by default. Set `ReportClientContradictions` to `true` and the server ties the two halves of this mod together.
+
+Every player who gets past the join gate is, by construction, running only mods this server approved - that is what the gate is for. So when one of the guards above refuses something they sent, an approved mod set has produced traffic the server does not sanction, and the guard is the half of that sentence that **cannot be forged**. The report names the player, the guard, and the mod list they claimed at join, which is what makes it something a moderator can act on rather than two unrelated log lines.
+
+**It does not decide who lied.** A guard trip cannot tell "the client lied about its mods" apart from "a mod you really did approve legitimately sends this", and nothing can work that out in general. Where the inference *is* tight - the client declared only mods this server itself requires, and the server offers no optional mods - the report says so explicitly, because there nothing they declared can account for it.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `ReportClientContradictions` | `false` | Correlate declarations with guard trips |
+| `ContradictionThreshold` | `2` | How many **distinct** guards before the action applies |
+| `ContradictionAction` | `Log` | What happens then. Separate from `RpcGuardAction` on purpose |
+
+Distinct guards rather than total trips: one player hitting the same guard four hundred times is a single behaviour the guard already stopped, while tripping the teleport, global-key and object-destroy guards once each is a toolkit. Run `enforcer-trust` to see who has tripped what before acting.
+
+Only *enforced* refusals count. A correction a guard made quietly - a rebound chat name - is not evidence, because an ordinary chat mod that decorates names produces exactly the same thing on the wire.
+
+#### Things worth knowing
+
+- **`GuardDamageRpc` is a sanity bound, not a damage model.** Deciding whether a *plausible* hit was earned would mean modelling every weapon, skill, buff and world modifier on the server, and getting that wrong deletes real combat. It catches the class that matters — non-finite values that corrupt a health bar for good, and the absurd totals used to one-shot players and bosses. Raise `MaxAllowedHitDamage` if a mod on your server legitimately hits harder than the 5000 default.
+- **`GuardZdoDestruction` filters, it does not drop.** A legitimate batch and a hostile id can arrive in the same packet, and cancelling the whole thing would leave destroyed objects alive on the server. Ownership is the real test; `ZdoDestroyProximityMetres` is the tolerance for the moment where a client has claimed something and the server has not caught up yet.
+- **`GuardPvpDamage` is off even with the guards on.** Vanilla already refuses player-on-player damage to somebody with PvP off — but it skips that check whenever the hit's ignore-PvP flag is set, and the attacker writes that flag. This re-decides it server side. Self-damage is always allowed, since standing in your own fire is exactly the case vanilla sets the flag for. The cost: an area-effect prefab that sets the flag deliberately loses its pass-through, and a PvP arena mod may rely on it. Watch the log first.
+- **Chat name mismatches are never kicked.** The rewrite is the whole fix, and a chat mod that decorates names looks identical on the wire. It is logged as a correction and left there.
 
 ### One Character Per Account
 

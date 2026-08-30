@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using ValheimEnforcer;
@@ -67,26 +67,50 @@ namespace ValheimEnforcer.modules.character {
             return PackedItem.From(item);
         }
 
-        internal static List<ItemDelta> BuildCharacterItemDeltas() {
+        /// <summary>
+        /// One walk of the live inventory, packed. Kept separate so a flush can reuse the same snapshot
+        /// for the diff and for the baseline refresh instead of packing every item twice - packing
+        /// copies each item's custom data dictionary, so the second walk was pure waste.
+        /// </summary>
+        internal static List<PackedItem> PackCurrentInventory() {
+            List<PackedItem> packedItems = new List<PackedItem>();
+            foreach (ItemDrop.ItemData item in Player.m_localPlayer.GetInventory().GetAllItems()) {
+                PackedItem packed = BuildPackedItem(item);
+                if (packed == null) { continue; } // untrackable (no ItemDrop prefab) - never entered the baseline either
+                packedItems.Add(packed);
+            }
+            return packedItems;
+        }
+
+        internal static List<ItemDelta> BuildCharacterItemDeltas(List<PackedItem> currentItems) {
             List<ItemDelta> itemDeltas = new List<ItemDelta>();
             if (CharacterManager.PlayerCharacter == null) return itemDeltas;
 
-            List<PackedItem> unmatched = new List<PackedItem>();
-            foreach(ItemDrop.ItemData item in Player.m_localPlayer.GetInventory().GetAllItems()) {
-                PackedItem packed = BuildPackedItem(item);
-                if (packed == null) { continue; } // untrackable (no ItemDrop prefab) - never entered the baseline either
-                unmatched.Add(packed);
-            }
-
             // Multiset diff: pair every baseline entry off against at most one entry in the current snapshot.
-            // Both lists routinely hold several equal PackedItems (two identical wood stacks), so matching has to
+            // Both sides routinely hold several equal PackedItems (two identical wood stacks), so matching has to
             // consume its match - a whole-list Contains would let one surviving stack cancel every baseline copy,
             // or let one lost stack report every copy as removed.
+            //
+            // Bucketed by value rather than scanned with IndexOf. The scan was O(n*m) and every probe ran
+            // PackedItem.Equals, which walks both items' custom data in both directions - on a full inventory of
+            // modded items that comparison was the bulk of a flush. GetHashCode is built from exactly the fields
+            // Equals compares, with the same quality normalisation and the same ignored custom-data keys, so
+            // hashing agrees with equality here. A queue per bucket keeps the old first-match-wins behaviour:
+            // equal items can still differ in the fields identity ignores (durability, grid position, equipped),
+            // and the delta must carry the same instance IndexOf would have picked.
+            Dictionary<PackedItem, Queue<PackedItem>> unmatched = new Dictionary<PackedItem, Queue<PackedItem>>();
+            foreach (PackedItem packed in currentItems) {
+                if (!unmatched.TryGetValue(packed, out Queue<PackedItem> bucket)) {
+                    bucket = new Queue<PackedItem>();
+                    unmatched[packed] = bucket;
+                }
+                bucket.Enqueue(packed);
+            }
+
             foreach (PackedItem baselineItem in CharacterManager.PlayerCharacter.PlayerItems) {
                 if (baselineItem == null) { continue; } // corrupt save; never put a null on the wire
-                int match = unmatched.IndexOf(baselineItem); // value equality via IEquatable<PackedItem>
-                if (match >= 0) {
-                    unmatched.RemoveAt(match);
+                if (unmatched.TryGetValue(baselineItem, out Queue<PackedItem> bucket) && bucket.Count > 0) {
+                    bucket.Dequeue();
                     continue;
                 }
                 itemDeltas.Add(new ItemDelta {
@@ -96,11 +120,13 @@ namespace ValheimEnforcer.modules.character {
             }
 
             // Whatever the baseline could not account for is new.
-            foreach (PackedItem newItem in unmatched) {
-                itemDeltas.Add(new ItemDelta {
-                    Item = newItem,
-                    Op = ItemDeltaChangeType.Added
-                });
+            foreach (Queue<PackedItem> bucket in unmatched.Values) {
+                foreach (PackedItem newItem in bucket) {
+                    itemDeltas.Add(new ItemDelta {
+                        Item = newItem,
+                        Op = ItemDeltaChangeType.Added
+                    });
+                }
             }
 
             return itemDeltas;
@@ -125,13 +151,23 @@ internal class DeltaChangeTracker : MonoBehaviour {
 
         CharacterDeltaTracker.LastDeltaSyncTime = Time.unscaledTime + ValConfig.DeltaSynchronizationFrequencyInSeconds.Value;
         CharacterDeltaTracker.ClearDirty();
-        SyncChangesToServer();
+
+        // Every one of these runs on the main thread, and it fires after any inventory change - which
+        // includes taking a hit, so it lands in the middle of combat. Timed so a slow flush shows up
+        // as itself rather than as an unexplained hitch.
+        StallWatch timer = StallWatch.Start("Character delta flush");
+        try {
+            SyncChangesToServer();
+        } finally {
+            timer.Stop();
+        }
     }
 
     private static void SyncChangesToServer() {
         Logger.LogDebug("Checking for character changes to sync to server...");
-        // Take all of the deltas off the queue
-        List<ItemDelta> itemDeltas = CharacterDeltaTracker.BuildCharacterItemDeltas();
+        // One inventory walk, reused below for the baseline refresh.
+        List<PackedItem> currentPlayerItems = CharacterDeltaTracker.PackCurrentInventory();
+        List<ItemDelta> itemDeltas = CharacterDeltaTracker.BuildCharacterItemDeltas(currentPlayerItems);
 
         // This comparison only started producing results once the two dictionaries stopped being the same
         // object (they used to be aliased, so it diffed a dictionary against itself and never saw a change).
@@ -173,18 +209,15 @@ internal class DeltaChangeTracker : MonoBehaviour {
         // which meant a singleplayer or listen-host session never refreshed it at all: the baseline stayed frozen
         // at whatever the player had when they logged in, which is what made the post-death item restore hand
         // back a full duplicate of a pre-death inventory that was already sitting in the tombstone.
-        List<PackedItem> currentPlayerItems = new List<PackedItem>();
-        foreach (ItemDrop.ItemData item in Player.m_localPlayer.GetInventory().GetAllItems()) {
-            PackedItem packed = CharacterDeltaTracker.BuildPackedItem(item);
-            if (packed == null) { continue; } // untrackable (no ItemDrop prefab)
-            currentPlayerItems.Add(packed);
-        }
         CharacterManager.PlayerCharacter.PlayerItems = currentPlayerItems;
         // Copy, never alias. currentCustomData IS Player.m_localPlayer.m_customData; storing the reference
         // would make the baseline and the live dictionary the same object, and the comparison above would
         // then be comparing a dictionary with itself - which is why custom data changes were never detected.
         CharacterManager.PlayerCharacter.PlayerCustomData = CompatCustomData.SnapshotForTracking(currentCustomData);
-        CharacterManager.PlayerCharacter.SkillLevels = Player.m_localPlayer.GetSkills().GetSkillList().ToDictionary(s => s.m_info.m_skill, s => s.m_level);
+        // Built once and used for both the baseline and the payload below. The payload is serialized and
+        // dropped inside this method, so the two sharing one dictionary cannot outlive the flush.
+        var skillLevels = Player.m_localPlayer.GetSkills().GetSkillList().ToDictionary(s => s.m_info.m_skill, s => s.m_level);
+        CharacterManager.PlayerCharacter.SkillLevels = skillLevels;
 
         Dictionary<string, PackedStatusEffect> currentActiveEffects = new Dictionary<string, PackedStatusEffect>();
         foreach (StatusEffect se in Player.m_localPlayer.GetSEMan().GetStatusEffects()) {
@@ -205,12 +238,15 @@ internal class DeltaChangeTracker : MonoBehaviour {
         DeltaSummaryUpdate payload = new DeltaSummaryUpdate {
             Name = CharacterManager.PlayerCharacter.Name,
             HostID = CharacterManager.PlayerCharacter.HostID,
+            // The id this character stamps on everything it crafts. Sent so the server can tell a crafter it
+            // has seen from one somebody made up; see worldintegrity/KnownPlayerIds.
+            PlayerID = Player.m_localPlayer != null ? Player.m_localPlayer.GetPlayerID() : 0L,
             // A routine delta is emitted mid-session, so the server save is only current as of this update:
             // if the player disappears without a clean logout it is a dirty (stale) disconnect. A clean logout
             // sends a full save with LastDisconnect = Clean, which is the last write and wins.
             DisconnectionState = DisconnectionState.DirtyDisconnect,
             ItemModifications = itemDeltas,
-            SkillLevels = Player.m_localPlayer.GetSkills().GetSkillList().ToDictionary(s => s.m_info.m_skill, s => s.m_level),
+            SkillLevels = skillLevels,
             PlayerCustomDataModifications = customDataModifications,
             RemovedCustomDataKeys = customDataRemovedKeys,
             ActiveCharacterEffects = currentActiveEffects,

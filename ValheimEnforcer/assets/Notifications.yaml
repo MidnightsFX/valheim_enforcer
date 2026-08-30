@@ -171,3 +171,40 @@ structureFlagged: |
       ]
     }]
   }
+
+clientContradiction: |
+  {
+    "embeds": [{
+      "title": "Client Contradiction",
+      "description": "{reason}",
+      "color": {colorRed},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "Player", "value": "{player}", "inline": true},
+        {"name": "Guard", "value": "{guard}", "inline": true},
+        {"name": "Guards Tripped", "value": "{guardCount}", "inline": true},
+        {"name": "Declared Mods", "value": "{declaredMods}", "inline": true},
+        {"name": "Declared Patchers", "value": "{declaredPatchers}", "inline": true},
+        {"name": "Baseline Only", "value": "{baselineOnly}", "inline": true},
+        {"name": "All Guards", "value": "{guards}", "inline": false},
+        {"name": "Host ID", "value": "{playerId}", "inline": false}
+      ]
+    }]
+  }
+
+itemOriginFlagged: |
+  {
+    "embeds": [{
+      "title": "Suspect Item Origin",
+      "description": "{reason}",
+      "color": {colorAmber},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "Player", "value": "{player}", "inline": true},
+        {"name": "Item", "value": "{prefab}", "inline": true},
+        {"name": "Quality", "value": "{quality}", "inline": true},
+        {"name": "Items", "value": "{count}", "inline": true},
+        {"name": "Account", "value": "{playerId}", "inline": false}
+      ]
+    }]
+  }
