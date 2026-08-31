@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -57,6 +57,10 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             if (instance == null) { return; }
             UnityEngine.Object.Destroy(instance.gameObject);
             instance = null;
+            // Not a direct clear of the module cache: a scan may still be running on a worker thread and
+            // holding that set. Bumping the generation makes the NEXT scan's captured policy key differ, so the
+            // worker clears it itself - keeping every write to that set on the one thread that owns it.
+            sessionGeneration++;
             Logger.LogDebug("CheatDetector torn down.");
         }
 
@@ -98,7 +102,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// </summary>
         internal static List<CheatToolDetection> ScanProcesses(List<CheatToolSignature> signatures, bool genericTrainers) {
             List<CheatToolDetection> found = new List<CheatToolDetection>();
-            StallWatch timer = StallWatch.Start("Cheat scan: process enumeration");
+            StallWatch timer = StallWatch.StartBackground("Cheat scan: process enumeration");
             Process[] procs = null;
             try {
                 procs = Process.GetProcesses();
@@ -137,20 +141,24 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// a cheat which has already injected and then closed its launcher, and it is unaffected by
         /// renaming the tool's executable.
         /// </summary>
-        internal static List<CheatToolDetection> ScanLoadedModules(List<CheatToolSignature> signatures) {
+        internal static List<CheatToolDetection> ScanLoadedModules(List<CheatToolSignature> signatures, string policyKey) {
             List<CheatToolDetection> found = new List<CheatToolDetection>();
-            StallWatch timer = StallWatch.Start("Cheat scan: loaded module enumeration");
+            StallWatch timer = StallWatch.StartBackground("Cheat scan: loaded module enumeration");
             try {
-                using (Process self = Process.GetCurrentProcess()) {
-                    foreach (ProcessModule m in self.Modules) {
-                        string name;
-                        try { name = m.ModuleName ?? ""; } catch { continue; }
-                        if (name.Length == 0 || CheatToolCatalog.IsIgnored(name)) { continue; }
+                // A change to the catalog or the allowlist means every module has to be reconsidered, because a
+                // module skipped under the old policy might match under the new one. Anything else - the same
+                // policy, the same modules - is a no-op after the first pass.
+                if (moduleScanPolicy != policyKey) {
+                    seenModules.Clear();
+                    moduleScanPolicy = policyKey;
+                }
 
-                        foreach (CheatToolSignature sig in signatures) {
-                            if (CheatToolCatalog.Matches(name, sig.ModuleNames, MatchMode.Prefix)) {
-                                Add(found, sig.Tool, "module", name);
-                            }
+                foreach (string name in NewlyLoadedModuleNames()) {
+                    if (name.Length == 0 || CheatToolCatalog.IsIgnored(name)) { continue; }
+
+                    foreach (CheatToolSignature sig in signatures) {
+                        if (CheatToolCatalog.Matches(name, sig.ModuleNames, MatchMode.Prefix)) {
+                            Add(found, sig.Tool, "module", name);
                         }
                     }
                 }
@@ -160,6 +168,104 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 timer.Stop();
             }
             return found;
+        }
+
+        // Module handles already examined, and the catalog+allowlist they were examined under. Worker-thread
+        // only: the scan task is never allowed to overlap itself (RunPeriodicScan skips a tick while one is in
+        // flight), so no lock is needed. Cleared on Teardown so a new session re-examines everything - a
+        // detection latch is per-session, and carrying the seen-set across would let a module reported to one
+        // server go unreported to the next.
+        private static readonly HashSet<IntPtr> seenModules = new HashSet<IntPtr>();
+        private static string moduleScanPolicy;
+
+        /// <summary>
+        /// Incremented on teardown, and folded into the policy key the main thread hands each scan. A session
+        /// boundary has to invalidate the seen-set - the per-session detection latch resets there, so a module
+        /// reported to one server would otherwise go unreported to the next - but the main thread must not
+        /// touch the set to do it.
+        /// </summary>
+        private static int sessionGeneration;
+
+
+        /// <summary>
+        /// The base names of modules loaded into this process that have not been examined yet.
+        ///
+        /// This used to be <c>Process.Modules</c>, which was measured at ~116ms on a modded install and is the
+        /// reason this method exists. That property does not just list modules: for every one of the several
+        /// hundred a modded Valheim loads, .NET resolves the full file path and builds a ProcessModule holding
+        /// base address, memory size and entry point - none of which is used here, since the only thing read is
+        /// the name.
+        ///
+        /// Two changes. The enumeration asks the OS for module handles only, which is one call returning an
+        /// array of pointers, and a name is resolved only for a handle not seen before. Modules are loaded at
+        /// startup and essentially never after, so the steady state is a single syscall and a set comparison
+        /// with no string work at all.
+        ///
+        /// Nothing about what gets detected changes: a cheat that injects mid-session appears as a new handle
+        /// on the next tick, which is exactly the case this vector exists for.
+        /// </summary>
+        private static IEnumerable<string> NewlyLoadedModuleNames() {
+            // psapi is Windows-only, and the managed path still works everywhere else. Not a Unity API, so it
+            // is safe to read from the worker thread.
+            bool windows = Environment.OSVersion.Platform == PlatformID.Win32NT;
+            return windows ? NativeModuleNames() : ManagedModuleNames();
+        }
+
+        private static IEnumerable<string> NativeModuleNames() {
+            List<string> names = new List<string>();
+            IntPtr self = NativeWin32.GetCurrentProcess(); // pseudo-handle; nothing to close
+
+            IntPtr[] handles = new IntPtr[512];
+            uint needed;
+            if (!NativeWin32.EnumProcessModules(self, handles, (uint)(handles.Length * IntPtr.Size), out needed)) {
+                Logger.LogDebug("EnumProcessModules failed; falling back to the managed module list.");
+                return ManagedModuleNames();
+            }
+
+            // The first call also reports how much space the full list wants. Grow once and re-ask rather than
+            // looping: the count only moves when something loads mid-enumeration, and missing a straggler
+            // costs nothing because the next tick picks it up as a new handle anyway.
+            int count = (int)(needed / IntPtr.Size);
+            if (count > handles.Length) {
+                handles = new IntPtr[count];
+                if (!NativeWin32.EnumProcessModules(self, handles, (uint)(handles.Length * IntPtr.Size), out needed)) {
+                    return ManagedModuleNames();
+                }
+                count = Math.Min((int)(needed / IntPtr.Size), handles.Length);
+            }
+
+            StringBuilder buffer = new StringBuilder(260);
+            for (int i = 0; i < count; i++) {
+                IntPtr handle = handles[i];
+                if (handle == IntPtr.Zero || !seenModules.Add(handle)) { continue; }
+
+                buffer.Length = 0;
+                uint written = NativeWin32.GetModuleBaseName(self, handle, buffer, (uint)buffer.Capacity);
+                if (written == 0) { continue; } // unloaded between the two calls
+                names.Add(buffer.ToString());
+            }
+            return names;
+        }
+
+        /// <summary>
+        /// The original implementation, kept for anything that is not Windows. Deduped by name rather than by
+        /// handle, since that is what this path exposes; the saving is only in the signature matching, but the
+        /// enumeration cost is not worth optimising for a platform Valheim has no native client on.
+        /// </summary>
+        private static IEnumerable<string> ManagedModuleNames() {
+            List<string> names = new List<string>();
+            using (Process self = Process.GetCurrentProcess()) {
+                foreach (ProcessModule m in self.Modules) {
+                    string name;
+                    try { name = m.ModuleName ?? ""; } catch { continue; }
+                    if (name.Length == 0) { continue; }
+                    // A synthetic handle per distinct name: this path has no real ones, and the seen-set is
+                    // what makes a repeat scan cheap either way.
+                    if (!seenModules.Add(new IntPtr(name.GetStableHashCode()))) { continue; }
+                    names.Add(name);
+                }
+            }
+            return names;
         }
 
         /// <summary>
@@ -177,7 +283,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 .Where(s => s.WindowClasses.Length > 0 || s.WeakWindowClasses.Length > 0 || s.WindowTitles.Length > 0).ToList();
             if (windowed.Count == 0) { return found; }
 
-            StallWatch timer = StallWatch.Start("Cheat scan: window enumeration");
+            StallWatch timer = StallWatch.StartBackground("Cheat scan: window enumeration");
             try {
                 // Held in a local so the delegate cannot be collected while EnumWindows is running.
                 NativeWin32.EnumWindowsProc callback = (hWnd, _) => {
@@ -277,6 +383,18 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
             [DllImport("kernel32.dll")]
             public static extern bool IsDebuggerPresent();
+
+            // Module enumeration, used instead of Process.Modules - see NewlyLoadedModuleNames for why.
+            // psapi.dll's exports forward to kernel32 on every supported Windows, so this is the portable
+            // spelling rather than an old one.
+            [DllImport("kernel32.dll")]
+            public static extern IntPtr GetCurrentProcess();
+
+            [DllImport("psapi.dll", SetLastError = true)]
+            public static extern bool EnumProcessModules(IntPtr hProcess, [Out] IntPtr[] lphModule, uint cb, out uint lpcbNeeded);
+
+            [DllImport("psapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            public static extern uint GetModuleBaseName(IntPtr hProcess, IntPtr hModule, StringBuilder lpBaseName, uint nSize);
 
             [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
             public static extern bool CheckRemoteDebuggerPresent(IntPtr hProcess, ref bool isDebuggerPresent);
@@ -447,6 +565,10 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 // list is an immutable published snapshot, and RefreshIgnoreList republishes the
                 // allowlist so IsIgnored only ever reads it.
                 CheatToolCatalog.RefreshIgnoreList();
+                // Captured here with the rest, so the worker never reads catalog state that the main thread
+                // could be rewriting underneath it. The module scan uses it to decide whether the modules it
+                // has already examined still need re-examining.
+                string policyKey = $"{CheatToolCatalog.PolicyKey()}|{sessionGeneration}";
                 int phase = scanPhase++ % 3;
                 bool scanModules = ValConfig.ScanLoadedModules.Value;
                 bool scanWindows = ValConfig.ScanWindowTitles.Value
@@ -461,7 +583,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                         case 0:
                             return ScanProcesses(signatures, genericTrainers);
                         case 1:
-                            return scanModules ? ScanLoadedModules(signatures) : new List<CheatToolDetection>();
+                            return scanModules ? ScanLoadedModules(signatures, policyKey) : new List<CheatToolDetection>();
                         default:
                             return scanWindows ? ScanWindows(signatures) : new List<CheatToolDetection>();
                     }

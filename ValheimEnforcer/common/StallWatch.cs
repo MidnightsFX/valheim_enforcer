@@ -26,14 +26,31 @@ namespace ValheimEnforcer.common {
 
         private readonly string label;
         private readonly Stopwatch watch;
+        private readonly bool background;
 
-        private StallWatch(string label) {
+        private StallWatch(string label, bool background) {
             this.label = label;
+            this.background = background;
             watch = Stopwatch.StartNew();
         }
 
+        /// <summary>
+        /// Times an operation on the main thread, where elapsed time is felt as a frame hitch.
+        /// </summary>
         internal static StallWatch Start(string label) {
-            return new StallWatch(label);
+            return new StallWatch(label, background: false);
+        }
+
+        /// <summary>
+        /// Times an operation that runs on a worker thread.
+        ///
+        /// Reported differently, and the distinction is not cosmetic: work off the main thread costs no frame
+        /// time at all, so telling an admin their 116ms module scan "is long enough to show as a frame hitch"
+        /// sends them looking for a stutter that cannot exist. It is still worth a warning - it is a thread and
+        /// real IO, and a regression here is still a regression - but it must say what it actually is.
+        /// </summary>
+        internal static StallWatch StartBackground(string label) {
+            return new StallWatch(label, background: true);
         }
 
         /// <summary>
@@ -59,8 +76,14 @@ namespace ValheimEnforcer.common {
                     return;
                 }
                 lastWarned[label] = now;
-                Logger.LogWarning($"{label} took {ms}ms, which is long enough to show as a frame hitch. " +
-                                  "Further warnings for this operation are suppressed for a minute.");
+                if (Logger.DebugEnabled) {
+                    Logger.LogDebug(background
+                        ? $"{label} took {ms}ms on a background thread. This does not stall the game - no frame " +
+                          "time is spent on it - but it is slower than it should be. Further warnings for this " +
+                          "operation are suppressed for a minute."
+                        : $"{label} took {ms}ms, which is long enough to show as a frame hitch. " +
+                          "Further warnings for this operation are suppressed for a minute.");
+                }
             } catch (Exception e) {
                 Logger.LogDebug($"StallWatch could not report {label}: {e.Message}");
             }

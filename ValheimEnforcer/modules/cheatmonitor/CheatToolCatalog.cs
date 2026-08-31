@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 
@@ -268,6 +268,16 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
         private static List<string> IgnoreList() {
             return ignoreListParsed;
+        }
+
+        /// <summary>
+        /// A value that changes whenever anything about what counts as a detection changes.
+        ///
+        /// The module scan remembers which modules it has already examined, and that memory is only valid for
+        /// as long as the rules it examined them under are. Main thread only, alongside RefreshIgnoreList.
+        /// </summary>
+        internal static string PolicyKey() {
+            return $"{enabledCacheKey}|{ignoreListRaw}";
         }
 
         // Window classes whose captions show content being VIEWED rather than software being RUN:
