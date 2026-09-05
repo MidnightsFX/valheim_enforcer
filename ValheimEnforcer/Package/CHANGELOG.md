@@ -1,4 +1,4 @@
-﻿**0.22.0**
+**0.22.0**
 ---
 ```
 - Adds the Player Activity Audit (EnableAuditLog, on by default): a record of what players do, stored and monitored server side.
