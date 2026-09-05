@@ -42,9 +42,18 @@ namespace ValheimEnforcer.modules.network {
 
         /// <summary>
         /// True when at least one of the relay filters is live. Checked before the header of a packet is even
-        /// read, so an untouched server pays nothing for this file existing.
+        /// read, so a server with all of them off pays nothing for this file existing.
+        ///
+        /// Note that a default server is not one of those: the audit is on by default and reads the damage
+        /// payload, so the damage branch below is live out of the box even with every RPC guard off. That is
+        /// the intended trade - it is what makes enforcer-audit-damage have anything to report - but it is
+        /// worth knowing that turning EnableAuditLog off is what actually silences this file.
         /// </summary>
         internal static bool AnyEnabled() {
+            // Checked BEFORE the guard master switch, not after. The audit reads the damage payload without
+            // being an RPC guard and must not depend on EnableRpcGuards being on - putting this below the
+            // early return would make switching the audit on do nothing at all on most servers.
+            if (modules.audit.AuditPolicy.Active()) { return true; }
             if (!RpcGuardPolicy.Active()) { return false; }
             return ValConfig.GuardChatSenderName.Value
                 || ValConfig.GuardPlayerTeleportRpc.Value
@@ -54,12 +63,139 @@ namespace ValheimEnforcer.modules.network {
         /// <summary>
         /// Whether this method is one we inspect. An int comparison against three constants, run on every
         /// routed packet; everything expensive happens only after this says yes.
+        ///
+        /// Each guard branch tests RpcGuardPolicy.Active() itself rather than leaning on AnyEnabled() having
+        /// established it. That used to be safe because AnyEnabled() could only be true when the guards were
+        /// on; now that the audit can make it true on its own, an inherited assumption here would quietly
+        /// switch the chat-name and teleport guards back on for a server that has EnableRpcGuards off.
         /// </summary>
         internal static bool IsWatched(int methodHash) {
-            if (methodHash == ChatMessageHash) { return ValConfig.GuardChatSenderName.Value; }
-            if (methodHash == TeleportPlayerHash) { return ValConfig.GuardPlayerTeleportRpc.Value; }
-            if (methodHash == DamageHash) { return ValConfig.GuardDamageRpc.Value; }
+            bool guards = RpcGuardPolicy.Active();
+            if (methodHash == ChatMessageHash) { return guards && ValConfig.GuardChatSenderName.Value; }
+            if (methodHash == TeleportPlayerHash) { return guards && ValConfig.GuardPlayerTeleportRpc.Value; }
+            if (methodHash == DamageHash) {
+                return (guards && ValConfig.GuardDamageRpc.Value) || modules.audit.AuditPolicy.Active();
+            }
             return false;
+        }
+
+        /// <summary>
+        /// Whether judging this method can end in <see cref="RpcVerdict.Rewritten"/>, and therefore needs the
+        /// packet materialised as a RoutedRPCData that can be re-serialized.
+        ///
+        /// Only the chat rebind edits anything. The other two read and then either pass or drop, and for those
+        /// <see cref="InspectInPlace"/> answers off the caller's own read cursor - which matters because
+        /// vanilla's ZRoutedRpc.RPC_RoutedRPC parses this package into a RoutedRPCData of its own straight
+        /// afterwards, so a parse here to reach a payload we never change is the same work done twice and
+        /// thrown away. On a busy server RPC_Damage is the highest-rate routed message there is.
+        /// </summary>
+        internal static bool MayRewrite(int methodHash) {
+            return methodHash == ChatMessageHash;
+        }
+
+        // ---- Deferred observation -------------------------------------------------------------------------
+
+        /// <summary>
+        /// Whether the only thing left to do with this packet is write down that it happened.
+        ///
+        /// True for a hit on a server that is auditing but would never refuse this peer: the audit switched on
+        /// with the RPC guards off, which is the shape a server turning the audit on actually runs, or the
+        /// guards on with this peer exempt. When it is true the payload does not have to be read before the
+        /// packet is forwarded, because there is no verdict for the relay to wait on.
+        ///
+        /// It has to be false whenever the guard could refuse the hit. ZRoutedRpc.RouteRPC hands the bytes to
+        /// the socket inside the original method - ZSteamSocket.Send pushes them to Steam then and there
+        /// rather than queueing them for the next frame - so a packet that has been relayed cannot be
+        /// unrelayed, and a decision to drop has to be made in front of it.
+        /// </summary>
+        internal static bool RecordsOnly(ZNetPeer peer, int methodHash) {
+            if (methodHash != DamageHash) { return false; }
+            if (!modules.audit.AuditPolicy.Active()) { return false; }
+            if (!RpcGuardPolicy.Active() || !ValConfig.GuardDamageRpc.Value) { return true; }
+            return RpcGuardPolicy.IsExempt(peer);
+        }
+
+        // What the guard's prefix armed for its finalizer to read once the packet has gone. One slot is
+        // enough: RPC_RoutedRPC is driven from ZRpc's socket receive loop and nothing it calls re-enters it,
+        // so a second packet cannot start while one is armed. The finalizer clears it unconditionally,
+        // including when vanilla threw - an armed slot surviving into the next packet would attribute a hit
+        // to whoever sent the one after it.
+        private static ZNetPeer deferredPeer;
+        private static ZDOID deferredVictim;
+        private static ZPackage deferredSource;
+        private static int deferredOffset;
+
+        /// <summary>
+        /// Remembers where to find a hit that is being relayed now and read afterwards.
+        /// <paramref name="offset"/> is the position of the parameters package, which is where the caller's
+        /// cursor already sits once it has read the header.
+        /// </summary>
+        internal static void ArmDeferredRead(ZNetPeer peer, ZDOID victim, ZPackage pkg, int offset) {
+            deferredPeer = peer;
+            deferredVictim = victim;
+            deferredSource = pkg;
+            deferredOffset = offset;
+        }
+
+        /// <summary>
+        /// Reads and records the armed hit, now that the packet has been forwarded. Costs nothing at all when
+        /// nothing is armed, which is every routed packet that is not a hit on an auditing server.
+        ///
+        /// Reads the package the prefix was handed rather than whatever the original method finished with: the
+        /// question an audit answers is what this client sent, and the cursor is put back afterwards so this
+        /// stays invisible to anything else looking at the same packet.
+        /// </summary>
+        internal static void RunDeferredRead() {
+            ZNetPeer peer = deferredPeer;
+            ZPackage pkg = deferredSource;
+            ZDOID victim = deferredVictim;
+            deferredPeer = null;
+            deferredSource = null;
+            if (peer == null || pkg == null) { return; }
+
+            int restore = pkg.GetPos();
+            try {
+                pkg.SetPos(deferredOffset);
+                pkg.ReadInt(); // the parameters package's length prefix; the hit is the bytes after it
+                HitData hit = ScratchHit;
+                hit.Deserialize(ref pkg);
+                modules.audit.DamageAudit.Observe(peer, hit, victim);
+            } catch (Exception e) {
+                // Past the relay, so there is nothing left to protect but the rest of the packet loop.
+                Logger.LogDebug($"RoutedRpcFilter could not record a relayed hit: {e.Message}");
+            }
+            try { pkg.SetPos(restore); } catch (Exception) { /* the package is finished with either way */ }
+        }
+
+        /// <summary>
+        /// Judges a packet the caller has read the header of, without materialising a RoutedRPCData.
+        ///
+        /// <paramref name="pkg"/>'s cursor must sit immediately after the method hash, which is where the
+        /// parameters package begins (RoutedRPCData.Serialize writes it last, length-prefixed). Only ever
+        /// called for methods <see cref="MayRewrite"/> says nothing rewrites, so the cursor is left wherever
+        /// this stopped and the caller resets it.
+        ///
+        /// Never throws, for the same reason <see cref="Inspect"/> does not: a filter that cannot make sense
+        /// of a payload passes it, and a truncated package here is one vanilla's own parse will reject.
+        /// </summary>
+        internal static RpcVerdict InspectInPlace(ZNetPeer peer, int methodHash, ZDOID targetZdo, ZPackage pkg) {
+            try {
+                if (methodHash == TeleportPlayerHash) { return JudgeTeleport(peer); }
+                if (methodHash == DamageHash) {
+                    bool auditing = modules.audit.AuditPolicy.Active();
+                    // Nobody wants this payload: the audit is off and the guard would exempt this peer anyway.
+                    // Checked before the read so an exempt admin in a long fight costs exactly what they did
+                    // before the audit existed - which is nothing.
+                    if (!auditing && RpcGuardPolicy.IsExempt(peer)) { return RpcVerdict.Pass; }
+                    pkg.ReadInt(); // the parameters package's length prefix; the hit is the bytes after it
+                    HitData hit = ScratchHit;
+                    hit.Deserialize(ref pkg);
+                    return JudgeParsedDamage(peer, hit, targetZdo, auditing);
+                }
+            } catch (Exception e) {
+                Logger.LogDebug($"RoutedRpcFilter could not inspect method {methodHash}: {e.Message}");
+            }
+            return RpcVerdict.Pass;
         }
 
         /// <summary>
@@ -178,17 +314,53 @@ namespace ValheimEnforcer.modules.network {
         /// values that corrupt a health bar permanently, negative components that heal the attacker's target
         /// into an unkillable state, and the absurd totals used to one-shot players and bosses.
         /// </summary>
+        /// <summary>
+        /// The one HitData every relayed hit is read into.
+        ///
+        /// Reused rather than allocated per packet. This is only safe because of what a hit is used for here:
+        /// it is read on the server's main thread, inside one prefix, and nothing keeps a reference past the
+        /// return - DamageAudit copies out the numbers it wants and the guard turns it into a string. Nothing
+        /// on that path dispatches another routed RPC, so no second read can begin while one is live.
+        ///
+        /// HitData.Deserialize assigns every field this file and DamageAudit read, taking the wire value or an
+        /// explicit default for each, so no value ever carries over from the previous hit.
+        /// </summary>
+        private static readonly HitData ScratchHit = new HitData();
+
         private static RpcVerdict JudgeDamage(ZNetPeer peer, ZRoutedRpc.RoutedRPCData data) {
-            if (RpcGuardPolicy.IsExempt(peer)) { return RpcVerdict.Pass; }
+            bool auditing = modules.audit.AuditPolicy.Active();
+            // Nobody wants this payload: the audit is off and the guard would exempt this peer anyway. Kept
+            // as an early return so an exempt admin in a long fight costs exactly what it did before the
+            // audit existed - which is nothing.
+            if (!auditing && RpcGuardPolicy.IsExempt(peer)) { return RpcVerdict.Pass; }
 
             ZPackage pkg = data.m_parameters;
             pkg.SetPos(0);
 
-            HitData hit = new HitData();
+            HitData hit = ScratchHit;
             hit.Deserialize(ref pkg);
             pkg.SetPos(0); // the caller forwards this package untouched when we pass
 
-            string fault = FaultIn(hit) ?? PvpFaultIn(hit, data.m_targetZDO);
+            return JudgeParsedDamage(peer, hit, data.m_targetZDO, auditing);
+        }
+
+        /// <summary>
+        /// What to do about a hit that has already been read, whichever way it was read. The exemption checks
+        /// that bracket it are the point of the split: reading the payload is what the audit needed, refusing
+        /// is what the guard exemption is about, and the two now have independent switches.
+        /// </summary>
+        private static RpcVerdict JudgeParsedDamage(ZNetPeer peer, HitData hit, ZDOID victim, bool auditing) {
+            // Observation first, and deliberately ahead of the exemption below. The guard exemption exists so
+            // an admin is not refused; it is not a reason to stop recording them, and an audit that skipped
+            // admins would have its blind spot in the accounts most worth accounting for.
+            if (auditing) {
+                modules.audit.DamageAudit.Observe(peer, hit, victim);
+            }
+
+            if (!RpcGuardPolicy.Active() || !ValConfig.GuardDamageRpc.Value) { return RpcVerdict.Pass; }
+            if (RpcGuardPolicy.IsExempt(peer)) { return RpcVerdict.Pass; }
+
+            string fault = FaultIn(hit) ?? PvpFaultIn(hit, victim);
             if (fault == null) { return RpcVerdict.Pass; }
 
             RpcGuardPolicy.Refuse(peer, "damage", $"sent a hit that {fault}");

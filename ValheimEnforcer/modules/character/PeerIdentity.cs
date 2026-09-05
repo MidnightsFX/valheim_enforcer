@@ -21,17 +21,122 @@ namespace ValheimEnforcer.modules.character {
     internal static class PeerIdentity {
 
         /// <summary>
+        /// The connection-to-peer map behind <see cref="PeerFor"/>, maintained from ZNet's own connect and
+        /// disconnect seams (see PeerIdentityPatches).
+        ///
+        /// ZRpc declares no Equals or GetHashCode, so this keys on reference identity - the exact comparison
+        /// the scan it replaces was doing, just resolved once per connection instead of once per packet.
+        ///
+        /// No lock. Everything that touches this - the ZNet patches that fill it and every RPC handler that
+        /// reads it - runs on Unity's main thread inside ZNet.Update, and putting a monitor on the hottest
+        /// path in the game to serialise a single thread against itself would give back the win.
+        /// </summary>
+        private static readonly Dictionary<ZRpc, ZNetPeer> PeersByRpc = new Dictionary<ZRpc, ZNetPeer>();
+
+        /// <summary>
+        /// The account id behind each tracked connection, resolved once instead of per packet - see
+        /// <see cref="AccountFor"/>. Keyed on the peer by reference (ZNetPeer declares no equality of its own),
+        /// and under the same no-lock rule as the map above.
+        ///
+        /// Entries are created ONLY by <see cref="Remember"/> and destroyed only by <see cref="Forget"/> and
+        /// <see cref="Reset"/>. That is deliberate: AccountFor is called from a ZNet.Disconnect prefix, which
+        /// races Forget's own prefix, and a lookup that inserted on a miss would re-add an entry for a peer
+        /// that has just left and keep it - and its socket - alive until the session ended.
+        /// </summary>
+        private static readonly Dictionary<ZNetPeer, string> AccountsByPeer = new Dictionary<ZNetPeer, string>();
+
+        /// <summary>
         /// The peer a connection belongs to, matched on the live ZRpc. Vanilla's ZNet.GetPeer(ZRpc) does the
-        /// same but is private; this mirrors StructureValidator.PeerFor so both share one definition of "the
-        /// peer behind this socket". Server side; returns null when nothing matches.
+        /// same but is private, and is a linear walk of the peer list; this is the one definition of "the peer
+        /// behind this socket" for the whole mod. Server side; returns null when nothing matches.
+        ///
+        /// This is called for every routed RPC the server relays (RoutedRpcGuard) and every ZDOData packet it
+        /// receives (StructureValidator, ContainerAudit), so a scan here costs packets x connected players -
+        /// and both of those numbers rise together in exactly the dense fight where the main thread can least
+        /// afford it. The dictionary makes it a hash lookup that does not care how full the server is.
         /// </summary>
         internal static ZNetPeer PeerFor(ZRpc rpc) {
             if (rpc == null || ZNet.instance == null) { return null; }
+
+            if (PeersByRpc.TryGetValue(rpc, out ZNetPeer cached)) {
+                // Re-checked rather than trusted. Nothing here owns ZNetPeer.m_rpc, and attributing a packet
+                // to the wrong player is the one failure this whole file exists to prevent - so a cached
+                // answer that no longer matches the connection is thrown away rather than returned. One
+                // reference compare, on a branch that is true for every honest packet.
+                if (cached != null && cached.m_rpc == rpc) { return cached; }
+                PeersByRpc.Remove(rpc);
+            }
+
+            // A miss means the cache never saw this connection (Enforcer patched in mid-session, or another
+            // mod skipped ZNet.OnNewConnection) or the entry was just evicted above. Fall back to what this
+            // method always did, then remember it: an unresolvable rpc costs exactly what it did before, and a
+            // real one pays for the scan once instead of on every packet it ever sends.
+            ZNetPeer found = Scan(rpc);
+            if (found != null) { Remember(found); }
+            return found;
+        }
+
+        private static ZNetPeer Scan(ZRpc rpc) {
             List<ZNetPeer> peers = ZNet.instance.GetPeers();
             for (int i = 0; i < peers.Count; i++) {
                 if (peers[i] != null && peers[i].m_rpc == rpc) { return peers[i]; }
             }
             return null;
+        }
+
+        /// <summary>
+        /// The account id behind a connection: the socket's host name, resolved once and kept for the life of
+        /// the connection.
+        ///
+        /// The caching is the whole point. ISocket.GetHostName builds a fresh string on every call - on a Steam
+        /// socket it is literally SteamID.ToString() - and this value is wanted once per ZDOData packet
+        /// (ContainerAudit) and once per relayed hit (DamageAudit), which on a full server is thousands of
+        /// throwaway strings a second for an answer that cannot change while the socket is open.
+        ///
+        /// A peer this has never been told about - Enforcer patched in mid-session, or one already forgotten -
+        /// is answered from the socket without filing anything, so the table never outlives the connections it
+        /// describes. An id that is not readable yet (PlayFab learns it from the first data message, unlike
+        /// Steam which has it at construction) is not cached, so the next call tries again.
+        /// </summary>
+        internal static string AccountFor(ZNetPeer peer) {
+            if (peer == null) { return null; }
+
+            if (!AccountsByPeer.TryGetValue(peer, out string cached)) {
+                return peer.m_socket != null ? peer.m_socket.GetHostName() : null;
+            }
+            if (!string.IsNullOrEmpty(cached)) { return cached; }
+
+            string host = peer.m_socket != null ? peer.m_socket.GetHostName() : null;
+            if (!string.IsNullOrEmpty(host)) { AccountsByPeer[peer] = host; }
+            return host;
+        }
+
+        /// <summary>Records a connection as it joins. Safe to call twice for the same peer.</summary>
+        internal static void Remember(ZNetPeer peer) {
+            ZRpc rpc = peer?.m_rpc;
+            if (rpc == null) { return; }
+            PeersByRpc[rpc] = peer;
+            // Only ever adds the key. Overwriting would throw away an account id already resolved for a
+            // connection that is simply being re-filed after a scan.
+            if (!AccountsByPeer.ContainsKey(peer)) { AccountsByPeer[peer] = null; }
+        }
+
+        /// <summary>
+        /// Drops a connection as it leaves. Must run before ZNet.Disconnect disposes the peer, while m_rpc is
+        /// still the key it was filed under.
+        /// </summary>
+        internal static void Forget(ZNetPeer peer) {
+            if (peer == null) { return; }
+            AccountsByPeer.Remove(peer);
+            ZRpc rpc = peer.m_rpc;
+            if (rpc == null) { return; }
+            PeersByRpc.Remove(rpc);
+        }
+
+        /// <summary>Empties the maps between sessions, so nothing survives a shutdown into the next world.</summary>
+        internal static void Reset() {
+            PeersByRpc.Clear();
+            AccountsByPeer.Clear();
         }
 
         /// <summary>

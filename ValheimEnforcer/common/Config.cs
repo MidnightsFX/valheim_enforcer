@@ -123,6 +123,17 @@ namespace ValheimEnforcer {
         public static ConfigEntry<int> ContradictionThreshold;
         public static ConfigEntry<string> ContradictionAction;
 
+        // Audit. Records what players do so a report can be investigated afterwards; never enforces anything.
+        public static ConfigEntry<bool> EnableAuditLog;
+        public static ConfigEntry<int> AuditRetentionDays;
+        public static ConfigEntry<int> AuditFlushIntervalSeconds;
+        public static ConfigEntry<int> AuditDamageWindowSeconds;
+        public static ConfigEntry<float> AuditHighDamageThreshold;
+        public static ConfigEntry<float> AuditHighDamagePerWindow;
+        public static ConfigEntry<int> AuditContainerTrackingLimit;
+        public static ConfigEntry<int> AuditMaxDownloadDays;
+        public static ConfigEntry<bool> AuditExemptAdmins;
+
         public static ConfigEntry<string> DiscordWebhookUrl;
         public static ConfigEntry<string> DiscordWebhookUrlPlayerActivity;
         public static ConfigEntry<string> DiscordWebhookUrlServerStatus;
@@ -167,6 +178,13 @@ namespace ValheimEnforcer {
         internal static CustomRPC ClientCommandRequestRPC;
         internal static CustomRPC CommandOutputRPC;
 
+        // The audit history channel. A pair rather than two, on the same reasoning as the command pair above:
+        // listing and downloading share one server handler and therefore one admin gate. It cannot reuse the
+        // command pair - that one carries console lines with a 256 line ceiling, and a week of one player's
+        // activity is a file.
+        internal static CustomRPC AuditRequestRPC;
+        internal static CustomRPC AuditDataRPC;
+
         public ValConfig(ConfigFile cf) {
             // ensure all the config values are created
             cfg = cf;
@@ -184,6 +202,8 @@ namespace ValheimEnforcer {
             FullSyncRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_FULLSYNC_REQ", OnServerReceiveFullSyncRequest, OnClientReceiveFullSyncRequest);
             ClientCommandRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_CMD_REQ", OnServerReceiveCommandRequest, NoClientHandler);
             CommandOutputRPC = NetworkManager.Instance.AddRPC("VENFORCE_CMD_OUT", NoServerHandler, OnClientReceiveCommandOutput);
+            AuditRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_AUDIT_REQ", OnServerReceiveAuditRequest, NoClientHandler);
+            AuditDataRPC = NetworkManager.Instance.AddRPC("VENFORCE_AUDIT_OUT", NoServerHandler, OnClientReceiveAuditData);
 
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
@@ -281,7 +301,7 @@ namespace ValheimEnforcer {
             EnableStructureValidation = BindServerConfig("World Integrity", "EnableStructureValidation", false, "Master switch for server-side validation of the structures clients place. When enabled, the server inspects the objects arriving from each client and reports the ones no legitimate client can produce: geometry that is not in any build menu, and pieces whose health is above what the prefab was designed to hold. This is the check for somebody spawning dungeon rooms, dvergr towns and ruins into a world - the structures that show a nameplate with no crafter on it, cannot be destroyed, and flatten the ground where they land. Off by default; every part of the feature is inert until this is on.");
             DetectNonBuildableStructures = BindServerConfig("World Integrity", "DetectNonBuildableStructures", true, "Flag a client that creates a structure which is in no build menu. Membership of a piece table is what makes a prefab placeable at all - by the hammer, the hoe, the cultivator, and by every blueprint or bulk-building mod, which all place out of those same tables - so a mod's own pieces are covered automatically and a large blueprint cannot trip this.");
             BlockSpawnObjectRPC = BindServerConfig("World Integrity", "BlockSpawnObjectRPC", true, "Block ZNetScene's SpawnObject RPC, an unused routed call that nothing in the game legitimately sends but which lets any client have the server instantiate any prefab by hash - creatures and items, not just structures. When on (the default), every client-originated SpawnObject is refused, reported to the moderation Discord channel (the structureFlagged notification, controlled by Discord.NotifyStructureFlagged) and follows StructureValidationAction for what happens to the player - which defaults to Log, so the default is 'block it and post to Discord' without kicking or banning. A structure spawned this way is reported as a structure detection either way. Requires EnableStructureValidation. Turn this off to fall back to blocking only non-buildable structures via SpawnObject, in case a mod on your server legitimately uses this RPC.");
-            DetectExcessiveStructureHealth = BindServerConfig("World Integrity", "DetectExcessiveStructureHealth", true, "Flag a client that writes a piece's health above the maximum its prefab allows, which is how an indestructible structure is actually made - there is no separate invulnerability flag in Valheim, just an absurd number in the health field. The ceiling accounts for world modifiers that raise building health, and repairing a piece to full is never flagged. Health that was already too high before the client touched it is attributed to nobody, so walking past a cheated structure cannot get an innocent player reported; use Enforcer-Scan-Structures to find those.");
+            DetectExcessiveStructureHealth = BindServerConfig("World Integrity", "DetectExcessiveStructureHealth", true, "Flag a client that writes a piece's health above the maximum its prefab allows, which is how an indestructible structure is actually made - there is no separate invulnerability flag in Valheim, just an absurd number in the health field. The ceiling accounts for world modifiers that raise building health, and repairing a piece to full is never flagged. Health that was already too high before the client touched it is attributed to nobody, so walking past a cheated structure cannot get an innocent player reported; use Enforcer-Scan-Structures to find those. This is the one check that needs a hook on every ZDO the server deserializes - it compares against the health the object held before the client's write, which no longer exists once the packet is done - so the hook is only installed when this and EnableStructureValidation are both on at startup, and turning either on in a running server takes a restart before this check begins working. The other checks, and the server-side death handling under ServerSideJoinEnforcement, are unaffected either way.");
             StructureHealthAllowedMultiplier = BindServerConfig("World Integrity", "StructureHealthAllowedMultiplier", 1f, "Headroom on the health ceiling, for servers running a mod that raises piece health at runtime rather than on the prefab (a building-strength skill, for example). 1 means the prefab's own maximum, which is correct for vanilla and for mods that edit the prefab. Raise it only if legitimate pieces are being flagged, and prefer IgnoredStructurePrefabs if only a few prefabs are affected.", advanced: true, valmin: 1f, valmax: 1000f);
             StructureValidationAction = BindServerConfig("World Integrity", "StructureValidationAction", "Log", "Server-side action taken against a player caught placing invalid structures. Detections are always written to the server log and posted to Discord regardless of this setting; this only controls what happens to the player. Defaults to Log so a server can watch the detector for a while before letting it remove anybody.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
             RemoveDetectedStructures = BindServerConfig("World Integrity", "RemoveDetectedStructures", false, "Destroy a flagged structure instead of only reporting it. Deliberately separate from the action above, and off by default, because a false positive here deletes something rather than merely naming it - run with this off first and read the log. Note this removes the structure, not the terrain flattening that came with it; that arrives as separate objects and still needs re-terraforming by hand.");
@@ -310,6 +330,28 @@ namespace ValheimEnforcer {
             ContradictionThreshold = BindServerConfig("Network Integrity", "ContradictionThreshold", 2, "How many DISTINCT guards one player must trip in a session before ContradictionAction applies. Distinct rather than total on purpose: one player hitting the same guard four hundred times is a single behaviour the guard already stopped, while tripping the teleport, global-key and object-destroy guards once each is a toolkit. Every trip is reported regardless of this number; it only gates the action.", advanced: true, valmin: 1, valmax: 20);
             ContradictionAction = BindServerConfig("Network Integrity", "ContradictionAction", "Log", "What happens to a player who reaches ContradictionThreshold. Separate from RpcGuardAction on purpose, so a server can leave the individual guards on Log - blocking the packet and saying so - while still treating the pattern of several different guards from one player as something to act on. Applied at most once per connection.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
             RpcGuardAction = BindServerConfig("Network Integrity", "RpcGuardAction", "Log", "What happens to a player whose packet a guard refused. The packet is always dropped or corrected and always written to the server log regardless of this setting; this only decides whether the player is also kicked or banned. Defaults to Log so a server can watch the guards for a while before letting them remove anybody - do that first, because a mod doing something unusual shows up here as a refusal.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
+
+            EnableAuditLog = BindServerConfig("Audit", "EnableAuditLog", true, "Master switch for the player activity audit, and the only switch it has: the audit records all three of the things below, or it records nothing. When enabled, the server writes three things to BepInEx/config/ValheimEnforcer/Audit, one file per day, deleted once they pass AuditRetentionDays. (1) Items gained and lost, read from the character delta stream the server already receives, so it costs nothing extra - but it inherits that stream's shape: the client coalesces changes over a couple of seconds before sending them, so a timestamp is when the server heard about it rather than when it happened, and it is a NET diff, so picking something up and dropping it again within one window produces no entry at all. It is also the one part that is client-reported. (2) What players take out of and put into chests, ships, carts and graves, read from the container's own world data rather than from any message the client sends, so it catches every route in - taking, storing, Take All, and a modified client writing the item list directly - and cannot be avoided by a client that stays quiet. Items are matched by prefab and quality with stacks summed, so tidying a chest is not reported as a flurry of takes. Graves are containers too, so this also records somebody looting a grave that is not theirs. (3) How much damage each player is dealing, and the spikes. The figure is the PRE-MITIGATION damage the attacking client claimed, before the victim applies armour, resistances and difficulty scaling - the right number for spotting the impossible, the wrong number for comparing builds. Only hits from a player's own character count; damage from their tamed creatures does not. When GuardDamageRpc is also on the damage message is read once and used for both, so running the two together is cheaper than it looks. This records and reports only - it never kicks, bans, confiscates or blocks anything, and it is not a detector. ON by default, which means a server that installs this mod and changes nothing is keeping a log of what its players do on disk. That is the point of the feature and it is why the default is on - an audit you have to have known to switch on beforehand is no use on the day you need it - but it is a decision to make deliberately, and to tell your players about if that is how you run your server. Set this to false to record nothing. Turning it OFF takes effect immediately; turning it back ON takes a server restart, because the container half has to watch every object a client replicates and its hook is only installed at startup.");
+            AuditRetentionDays = BindServerConfig("Audit", "AuditRetentionDays", 7, "How many days of history to keep. Older day-files are deleted, one file per pass every five minutes, so a server that has been offline for a month drains its backlog gradually instead of stalling on a single large sweep. Anything an admin has downloaded with enforcer-audit-download is their own copy and is not covered by this.", false, 1, 90);
+            AuditFlushIntervalSeconds = BindServerConfig("Audit", "AuditFlushIntervalSeconds", 30, "Seconds between writes of buffered events to disk. Writing happens on a background thread, so this trades how much is held in memory against how much a hard crash could lose - a clean shutdown always flushes first, and a report always reads the buffer as well as the files, so this never affects what a command shows you.", true, 5, 600);
+            AuditDamageWindowSeconds = BindServerConfig("Audit", "AuditDamageWindowSeconds", 60, "Length of the rolling window enforcer-audit-damage reports over, in seconds. The default of one minute is long enough to show a sustained rate and short enough that a fight from ten minutes ago is not still in the numbers. Requires EnableAuditLog.", false, 10, 600);
+            AuditHighDamageThreshold = BindServerConfig("Audit", "AuditHighDamageThreshold", 200f, "Damage on a SINGLE hit above which an entry is written to the audit log. Deliberately far below MaxAllowedHitDamage: that setting drops packets carrying impossible numbers, while this one only notes hits that are merely suspicious, which is the range a careful cheater actually operates in. Expect legitimate late-game hits to reach this; it is a thing to look at, not an accusation. Requires EnableAuditLog.", true, 1f, 1000000f);
+            AuditHighDamagePerWindow = BindServerConfig("Audit", "AuditHighDamagePerWindow", 5000f, "Total damage across one window above which an entry is written, for the case that matters more than any single hit: a stream of individually plausible hits arriving far faster than a player can swing. At most one entry per player per window either way, so a long boss fight cannot flood the log. Requires EnableAuditLog.", true, 1f, 10000000f);
+            AuditContainerTrackingLimit = BindServerConfig("Audit", "AuditContainerTrackingLimit", 5000, "How many containers the server remembers the previous contents of at once, so it can tell what changed. Beyond this the least recently touched are forgotten; a forgotten container is not lost from the audit, but the first change after it is forgotten re-establishes a baseline instead of being recorded. Raise it on a server with a very large number of chests in active use. Requires EnableAuditLog.", true, 64, 200000);
+            AuditMaxDownloadDays = BindServerConfig("Audit", "AuditMaxDownloadDays", 7, "Largest number of days one enforcer-audit-download request may ask for. A request for more is clamped to this rather than refused, so an admin asking for everything gets everything there is.", true, 1, 90);
+            // The writer is otherwise started from the ZNet.Start patch, which has already run by the time an
+            // admin switches this on from a client. Without this hook the audit would record into a buffer
+            // nothing ever flushed until the next server restart.
+            EnableAuditLog.SettingChanged += (sender, eventArgs) => {
+                if (ZNet.instance == null || !ZNet.instance.IsServer()) { return; }
+                if (EnableAuditLog.Value) {
+                    modules.audit.AuditLog.Initialize();
+                } else {
+                    modules.audit.AuditLog.Shutdown();
+                }
+            };
+
+            AuditExemptAdmins = BindServerConfig("Audit", "AuditExemptAdmins", false, "Whether anyone on the server's adminlist is left out of the audit. OFF by default, unlike every other admin exemption in this mod - and the difference is deliberate. The other exemptions exist because those features punish, and an admin using devcommands should not be kicked for it. This feature only records, so exempting admins buys nothing and puts a blind spot in exactly the accounts that can do the most damage and are the most worth impersonating. Turn it on only if you have a specific reason to stop recording your own staff.");
 
             // Discord notifications. These are intentionally LOCAL (non-synced) configs: the webhook URL is a secret and must not be synced to clients
             DiscordWebhookUrl = BindLocalConfig("Discord", "WebhookUrl", "", "Discord webhook URL the server posts notifications to. This is a server-only secret and is never synced to clients. Leave empty to disable. Note: player names are sent to Discord when enabled. Every category falls back to this URL unless it has one of its own, so a server that wants everything in one channel only needs this setting.");
@@ -583,6 +625,10 @@ namespace ValheimEnforcer {
         internal const int MaxCheatReportBytes = 64 * 1024;
         internal const int MaxModListBytes = 2 * 1024 * 1024;
         internal const int MaxCommandArgs = 32;
+        // An audit request names a player and two dates; nothing legitimate in one is large. The download
+        // ceiling doubles as the decompression bound on the receiving client.
+        internal const int MaxAuditRequestBytes = 4 * 1024;
+        internal const int MaxAuditDownloadBytes = 16 * 1024 * 1024;
 
         /// <summary>True when a received package is within a size limit; logs and returns false when it is not.</summary>
         internal static bool WithinLimit(ZPackage package, int limitBytes, long sender, string what) {
@@ -1117,6 +1163,41 @@ namespace ValheimEnforcer {
 
         private const int MaxCommandOutputLines = 256;
 
+        /// <summary>
+        /// Server handler: an admin is asking what audit history exists for a player, or for a copy of it.
+        ///
+        /// This is the one place in the mod where data leaves the server for an admin's own machine, so the
+        /// gate order matters and is the same one the command relay uses: size, then identity, then content.
+        /// Everything that validates the request body - the account, the character, the dates - lives in
+        /// AuditTransfer.Serve, which composes its own filenames from parsed dates and never takes one from
+        /// the wire.
+        /// </summary>
+        public static IEnumerator OnServerReceiveAuditRequest(long sender, ZPackage package) {
+            if (ZNet.instance == null || ZNet.instance.IsServer() == false) { yield break; }
+            if (!WithinLimit(package, MaxAuditRequestBytes, sender, "audit request")) { yield break; }
+
+            if (SenderIsAdmin(sender) == false) {
+                // Named and logged rather than silently dropped: somebody asking for another player's
+                // history without being an admin is exactly the thing a moderator wants to know happened.
+                Logger.LogWarning($"Rejecting an audit history request from non-admin peer {PeerHostId(sender)}.");
+                yield break;
+            }
+
+            modules.audit.AuditTransfer.Serve(sender, package);
+            yield break;
+        }
+
+        /// <summary>
+        /// Client handler: the server's answer to this machine's audit request. Bounded on the way in and
+        /// again when it is decompressed - see AuditTransfer.
+        /// </summary>
+        public static IEnumerator OnClientReceiveAuditData(long sender, ZPackage package) {
+            if (!FromServer(sender)) { Logger.LogWarning($"Ignoring audit data not from the server (sender {sender})."); yield break; }
+            if (!WithinLimit(package, MaxAuditDownloadBytes, sender, "audit history")) { yield break; }
+            modules.audit.AuditTransfer.Receive(package);
+            yield break;
+        }
+
         private static string PeerHostId(long sender) {
             ZNetPeer peer = ZNet.instance?.GetPeer(sender);
             return peer?.m_socket?.GetHostName() ?? sender.ToString();
@@ -1145,17 +1226,39 @@ namespace ValheimEnforcer {
 
         internal static IEnumerator OnServerRecieveDeltaItemUpdate(long sender, ZPackage package) {
             if (!WithinLimit(package, MaxDeltaPayloadBytes, sender, "delta update")) { yield break; }
-            string yaml = package.ReadString();
+            string yaml = package.ReadString(); // must run on the main thread (consumes the ZPackage); cheap
+
+            // Timed, because this is the most frequent piece of main-thread work the mod does on a server: one
+            // per player per rate-limit window, and the payload carries the whole skill list and every active
+            // status effect as well as the item deltas, all of it parsed here by YamlDotNet. The client's own
+            // flush and the character save have been measured for a long time; the receiving half was the gap,
+            // and it is the half whose cost rises with the player count.
+            StallWatch timer = StallWatch.Start("Delta update (server receive)");
+            try {
+                HandleDeltaItemUpdate(sender, yaml);
+            } finally {
+                timer.Stop();
+            }
+            yield break;
+        }
+
+        /// <summary>
+        /// Everything the delta handler does once the package has been read off the wire.
+        ///
+        /// Split out of the coroutine so it can be timed as a unit - an iterator cannot be wrapped in a
+        /// try/finally around its own yields. Every step is synchronous; the coroutine above never suspends.
+        /// </summary>
+        private static void HandleDeltaItemUpdate(long sender, string yaml) {
             DeltaSummaryUpdate deltaUpdate;
             try {
                 deltaUpdate = DataObjects.yamldeserializer.Deserialize<DeltaSummaryUpdate>(yaml);
             } catch (Exception e) {
                 Logger.LogWarning($"Failed to deserialize delta update from {sender}: {e.Message}");
-                yield break;
+                return;
             }
             if (string.IsNullOrEmpty(deltaUpdate.Name) || string.IsNullOrEmpty(deltaUpdate.HostID)) {
                 Logger.LogWarning($"Malformed delta update from {sender}: missing CharacterName or HostName.");
-                yield break;
+                return;
             }
 
             // A delta mutates the save named in its own payload. Bind that to the connection it arrived on -
@@ -1165,13 +1268,13 @@ namespace ValheimEnforcer {
             if (!modules.character.PeerIdentity.TryResolve(sender, out string deltaAccount, out string deltaName)
                 || !modules.character.PeerIdentity.Owns(deltaAccount, deltaName, deltaUpdate.HostID, deltaUpdate.Name)) {
                 Logger.LogWarning($"Refusing a delta update from {sender}: it targets character '{deltaUpdate.Name}' ({deltaUpdate.HostID}), which is not the character that connection is playing.");
-                yield break;
+                return;
             }
             // Defence in depth: the name/id are used as path segments below. Owns already implies the sender's
             // own (safe) identity matches, but check the payload values directly before they reach the disk.
             if (!modules.character.PeerIdentity.IsSafeToken(deltaUpdate.HostID) || !modules.character.PeerIdentity.IsSafeToken(deltaUpdate.Name)) {
                 Logger.LogWarning($"Refusing a delta update from {sender}: unsafe account id or character name.");
-                yield break;
+                return;
             }
 
             // Runs after the identity binding above, so the report names the character the connection is
@@ -1180,20 +1283,26 @@ namespace ValheimEnforcer {
             modules.worldintegrity.ItemOriginValidator.InspectDelta(
                 deltaUpdate, deltaUpdate.HostID, deltaUpdate.Name, SenderIsAdmin(sender));
 
+            // Same placement, and for the same two reasons: after the identity binding above, so a recorded
+            // event names the character this connection is really playing rather than whatever the payload
+            // claimed; and before the merge below, so what a player gained is written down whether or not the
+            // save that follows succeeds.
+            modules.audit.ItemAudit.Record(sender, deltaUpdate);
+
             if (ValConfig.InternalStorageMode.Value) {
                 // Internal storage reads/writes touch a registry ZDO and must stay on the main thread.
                 Logger.LogInfo("Loading character for delta update with internal storage mode.");
                 DataObjects.Character character = InternalDataStore.GetAccountCharacter(deltaUpdate.HostID, deltaUpdate.Name);
                 if (character == null) {
                     RequestFullSync(sender, deltaUpdate);
-                    yield break;
+                    return;
                 }
                 Logger.LogInfo($"Received delta update from {deltaUpdate.Name} ({deltaUpdate.HostID}): {deltaUpdate.ItemModifications?.Count ?? 0} item delta(s).");
                 if (UpdatePlayerSaveWithDeltaData(deltaUpdate, character)) {
                     // Our copy no longer matches the client's baseline, so no later delta can repair it.
                     RequestFullSyncForDrift(sender, deltaUpdate.HostID, deltaUpdate.Name);
                 }
-                yield break;
+                return;
             }
 
             // Disk mode: apply and persist on the background store. We can only decide "no save exists"
@@ -1205,13 +1314,12 @@ namespace ValheimEnforcer {
                 string fullpath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, deltaUpdate.HostID, $"{deltaUpdate.Name}.yaml");
                 if (!File.Exists(fullpath)) {
                     RequestFullSync(sender, deltaUpdate);
-                    yield break;
+                    return;
                 }
             }
 
             Logger.LogInfo($"Received delta update from {deltaUpdate.Name} ({deltaUpdate.HostID}): {deltaUpdate.ItemModifications?.Count ?? 0} item delta(s).");
             modules.character.CharacterStore.SubmitDelta(deltaUpdate, sender);
-            yield break;
         }
 
         // No authoritative save exists yet (e.g. the connect-time full push was skipped or a delta beat it

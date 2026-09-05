@@ -1,3 +1,20 @@
+﻿**0.22.0**
+---
+```
+- Adds the Player Activity Audit (EnableAuditLog, on by default): a record of what players do, stored and monitored server side.
+    - Item gains and losses
+    - Container takes and stores
+    - A rolling window of damage dealt per player
+    - One file per UTC day under BepInEx/config/ValheimEnforcer/Audit, kept for 7 days (AuditRetentionDays) by default
+    - EnableAuditLog is the only switch: AuditItemChanges, AuditContainerAccess and AuditDamage are gone. Three of the four ways to configure it produced a record with a hole in it that nothing in the output announced.
+    - Container auditing has to watch every object a client replicates, so its hook is only installed when EnableAuditLog is on at startup. Turning the audit on in a running server takes a restart; turning it off takes effect immediately.
+    - Trimming the container snapshot table no longer copies and sorts the whole table with a comparison delegate, which it did on the main thread inside the packet loop.
+- Adds five commands: enforcer-audit-inventory, -history, -damage, -available and -download.
+- Resolves the peer behind a connection from a cached map instead of walking the peer list, so routed RPC sender verification (EnforceRoutedRpcSender) and ZDOData inspection no longer cost more per packet as the server fills up.
+- Server-side death recording no longer inspects every object a client replicates. It now looks only at the objects a packet newly created, once the packet is done, so a server running it with structure validation off - the default - carries no hook on ZDO deserialization at all.
+    - The excessive-health check still needs that hook, since it compares against the value an object held before the client's write. It is now only installed when EnableStructureValidation and DetectExcessiveStructureHealth are both on at startup, so turning either on in a running server takes a restart before that one check begins working. The log says so if it happens.
+```
+
 **0.21.0**
 ---
 ```

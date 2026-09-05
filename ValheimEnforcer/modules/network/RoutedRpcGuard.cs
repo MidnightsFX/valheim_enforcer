@@ -59,6 +59,7 @@ namespace ValheimEnforcer.modules.network {
 
             int startPos = pkg.GetPos();
             long senderId;
+            ZDOID targetZdo;
             int methodHash;
             try {
                 // RoutedRPCData layout: m_msgID (long), m_senderPeerID (long), m_targetPeerID (long),
@@ -66,11 +67,11 @@ namespace ValheimEnforcer.modules.network {
                 // hash is enough to answer both questions and allocates nothing - the parameters package, which
                 // is the only allocating read, is left alone. This runs on every routed packet the server
                 // handles, so it must stay cheap.
-                pkg.ReadLong();              // m_msgID
-                senderId = pkg.ReadLong();   // m_senderPeerID
-                pkg.ReadLong();              // m_targetPeerID
-                pkg.ReadZDOID();             // m_targetZDO
-                methodHash = pkg.ReadInt();  // m_methodHash
+                pkg.ReadLong();                 // m_msgID
+                senderId = pkg.ReadLong();      // m_senderPeerID
+                pkg.ReadLong();                 // m_targetPeerID
+                targetZdo = pkg.ReadZDOID();    // m_targetZDO
+                methodHash = pkg.ReadInt();     // m_methodHash
             } catch {
                 pkg.SetPos(startPos);
                 return true; // malformed; let vanilla's own parsing deal with it
@@ -83,9 +84,35 @@ namespace ValheimEnforcer.modules.network {
                 return true;
             }
 
-            // One of the two has something to do, and both need the payload. Re-serialize from a full parse
+            // Nothing here can refuse or rewrite this packet - the only thing left is to write down that it
+            // happened - so it is armed and read in the finalizer instead, which runs after the original
+            // method has forwarded it. That ordering is worth the bracket: RouteRPC hands the bytes to the
+            // socket synchronously (ZSteamSocket.Send pushes to Steam then and there, it does not wait for
+            // the next frame), so everything this prefix does sits directly in front of a hit reaching the
+            // player it lands on, and a recording has no business being there.
+            if (!forgedSender && RoutedRpcFilter.RecordsOnly(peer, methodHash)) {
+                RoutedRpcFilter.ArmDeferredRead(peer, targetZdo, pkg, pkg.GetPos());
+                pkg.SetPos(startPos); // untouched - the original bytes are forwarded exactly as they arrived
+                return true;
+            }
+
+            // Nothing here will edit the packet: the sender is honest and this is one of the filters that only
+            // reads, but its answer is needed before the packet moves. The cursor is already sitting on the
+            // parameters, so the filter works straight off it and no RoutedRPCData is built at all - which
+            // matters because vanilla's RPC_RoutedRPC parses this same package into one of its own the moment
+            // we return.
+            if (!forgedSender && !RoutedRpcFilter.MayRewrite(methodHash)) {
+                RpcVerdict readOnly = RoutedRpcFilter.InspectInPlace(peer, methodHash, targetZdo, pkg);
+                // Skipping the original method means the server neither handles nor relays it, so the message
+                // reaches nobody; otherwise the original bytes are forwarded exactly as they arrived.
+                if (readOnly == RpcVerdict.Drop) { return false; }
+                pkg.SetPos(startPos);
+                return true;
+            }
+
+            // A rewrite is possible, so the payload has to be materialised. Re-serialize from a full parse
             // rather than patching bytes, so this is robust to the exact wire layout; only packets that are
-            // actually forged or actually watched pay the cost.
+            // actually forged, or carry a method that can be rewritten, pay the cost.
             pkg.SetPos(startPos);
             ZRoutedRpc.RoutedRPCData data = new ZRoutedRpc.RoutedRPCData();
             try {
@@ -124,6 +151,19 @@ namespace ValheimEnforcer.modules.network {
             corrected.SetPos(0);
             pkg = corrected;
             return true;
+        }
+
+        /// <summary>
+        /// Reads whatever the prefix armed, after the original method has relayed the packet.
+        ///
+        /// A finalizer rather than a postfix so it runs on the exception path too. That is not about
+        /// recording the hit - it is about the armed slot never surviving into the next packet, which would
+        /// attribute one player's hit to whoever sent the message after it. Costs a null check on every
+        /// routed packet that armed nothing, which is all of them unless the audit is on.
+        /// </summary>
+        [HarmonyFinalizer]
+        private static void Finalizer() {
+            RoutedRpcFilter.RunDeferredRead();
         }
 
         private static string Describe(ZNetPeer peer) {

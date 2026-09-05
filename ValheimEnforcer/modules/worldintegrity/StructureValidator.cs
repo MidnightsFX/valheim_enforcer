@@ -47,6 +47,19 @@ namespace ValheimEnforcer.modules.worldintegrity {
     ///
     /// Attribution is always the peer's socket host id, never a character name and never the ZDO's "creator"
     /// field - both are client-supplied, and the creator on a cheated piece is zero anyway.
+    ///
+    /// There are two inspection points, and which one a check uses is a cost decision:
+    ///
+    ///   - End of packet (InspectCreated), for anything that only concerns objects the packet CREATED: the
+    ///     non-buildable check above, and the tombstone that death observation watches for. RPC_ZDOData
+    ///     creates a ZDO only for an id the server has never seen, so this runs over a handful of objects
+    ///     rather than every object replicated to the server.
+    ///   - Inside ZDO.Deserialize (CaptureHealth / Inspect), for the health check alone, because it needs the
+    ///     value the ZDO held BEFORE the client's write and that is gone by the time the packet ends. That
+    ///     hook is only installed when the health check is actually configured on - see the patch class.
+    ///
+    /// The split is what lets a server run death observation, which is gated on ServerSideJoinEnforcement
+    /// rather than on this feature, without instrumenting every deserialized ZDO.
     /// </summary>
     internal static class StructureValidator {
 
@@ -67,33 +80,75 @@ namespace ValheimEnforcer.modules.worldintegrity {
         // keys off it being non-null, which is what keeps world load, server-local writes and an exempt
         // admin's packets out of the inspection path entirely.
         private static ZNetPeer inboundPeer;
-        private static ZDOID lastCreated = ZDOID.None;
-        private static bool createdThisPacket;
+
+        /// <summary>
+        /// The ZDOs this packet created, inspected once the packet is done rather than as each one is
+        /// deserialized. RPC_ZDOData creates a ZDO only for an id the server has never seen, so this is the
+        /// small minority of what a packet carries - the rest are updates to objects that already exist.
+        ///
+        /// A set rather than the single "last created" slot this used to keep, because the inspection no
+        /// longer happens in the Deserialize that immediately follows CreateNewZDO.
+        /// </summary>
+        private static readonly HashSet<ZDOID> createdZdos = new HashSet<ZDOID>();
         private static readonly List<StructureOffence> pending = new List<StructureOffence>();
 
-        // Which of the two jobs this packet is being watched for. Structure detection respects the admin
-        // exemption and the master switch; death observation applies to everyone whenever server-side join
-        // enforcement is on, because a death is a fact to record, not a detection to act on.
-        private static bool structureWatch;
+        // Which of the jobs this packet is being watched for, decided once per packet instead of re-read per
+        // ZDO. Structure detection respects the admin exemption and the master switch; death observation
+        // applies to everyone whenever server-side join enforcement is on, because a death is a fact to
+        // record, not a detection to act on.
         private static bool deathWatch;
+        private static bool nonBuildableWatch;
+        private static bool healthWatch;
+
+        /// <summary>Whether created ids are worth collecting at all this packet - see <see cref="NoteCreated"/>.</summary>
+        private static bool collectCreated;
+
+        /// <summary>
+        /// Whether the ZDO.Deserialize hook is present in this process, decided once at patch time by
+        /// <see cref="WantsHealthHook"/>. Only the excessive-health check needs it, and it is the one check
+        /// that cannot be answered after the packet: it compares the value against what the ZDO held BEFORE
+        /// the client's write, which no longer exists once Deserialize has returned.
+        /// </summary>
+        internal static bool HealthHookInstalled { get; private set; }
+
+        private static bool warnedHealthHookMissing;
 
         private static readonly int TombstoneHash = "Player_tombstone".GetStableHashCode();
 
+        /// <summary>
+        /// Whether to install the ZDO.Deserialize hook, called from that patch's Harmony Prepare. Reads config
+        /// bound in the plugin's Awake, which runs before PatchAll.
+        ///
+        /// The point of asking at all: ZDO.Deserialize is the hottest method a server runs, called for every
+        /// replicated object of every packet, and a Harmony wrapper on it is paid whether or not the body does
+        /// anything. Death observation and the non-buildable check both work from the packet's created ZDOs
+        /// and want nothing from this hook, so a server with structure validation off - the default - should
+        /// not carry it. Changing either setting takes effect on the next restart; BeginPacket says so once if
+        /// somebody turns the health check on in a running server.
+        /// </summary>
+        internal static bool WantsHealthHook() {
+            try {
+                HealthHookInstalled = ValConfig.EnableStructureValidation != null && ValConfig.EnableStructureValidation.Value
+                    && ValConfig.DetectExcessiveStructureHealth != null && ValConfig.DetectExcessiveStructureHealth.Value;
+            } catch (Exception e) {
+                // Patch time. Losing the health check is survivable; failing to patch is not.
+                HealthHookInstalled = false;
+                Logger.LogWarning($"Could not read the structure validation settings while patching; the excessive-health check is off for this session: {e.Message}");
+            }
+            return HealthHookInstalled;
+        }
+
         /// <summary>Opens the bracket around one client's ZDOData packet.</summary>
         internal static void BeginPacket(ZRpc rpc) {
-            inboundPeer = null;
-            createdThisPacket = false;
-            lastCreated = ZDOID.None;
-            structureWatch = false;
-            deathWatch = false;
-            if (pending.Count > 0) { pending.Clear(); }
+            ClearPacketState();
 
             // Everything from here down runs inside the ZDO stream, which is the one thing on a server that
             // must not be allowed to throw - a broken packet loop desyncs or disconnects everybody. The
             // detector going quiet is always the better failure.
             try {
-                bool structureOn = ValConfig.EnableStructureValidation.Value
-                    && (ValConfig.DetectNonBuildableStructures.Value || ValConfig.DetectExcessiveStructureHealth.Value);
+                bool nonBuildableOn = ValConfig.DetectNonBuildableStructures.Value;
+                bool healthOn = ValConfig.DetectExcessiveStructureHealth.Value;
+                bool structureOn = ValConfig.EnableStructureValidation.Value && (nonBuildableOn || healthOn);
                 bool deathOn = ValConfig.ServerSideJoinEnforcement != null && ValConfig.ServerSideJoinEnforcement.Value;
                 if (!structureOn && !deathOn) { return; }
                 if (ZNet.instance == null || !ZNet.instance.IsServer()) { return; }
@@ -103,32 +158,58 @@ namespace ValheimEnforcer.modules.worldintegrity {
 
                 // Structure detection skips exempt admins; death observation does not - an admin dying still
                 // creates a grave, and recording it is not a detection to be exempt from.
-                structureWatch = structureOn && !IsExempt(peer);
-                deathWatch = deathOn;
-                if (!structureWatch && !deathWatch) { return; }
+                bool structureWatch = structureOn && !IsExempt(peer);
+
+                bool wantHealth = structureWatch && healthOn;
+                if (wantHealth && !HealthHookInstalled) {
+                    WarnHealthHookMissing();
+                    wantHealth = false;
+                }
+
+                bool wantNonBuildable = structureWatch && nonBuildableOn;
+                if (!deathOn && !wantNonBuildable && !wantHealth) { return; }
+
                 inboundPeer = peer;
+                deathWatch = deathOn;
+                nonBuildableWatch = wantNonBuildable;
+                healthWatch = wantHealth;
+                collectCreated = deathOn || wantNonBuildable;
             } catch (Exception e) {
-                inboundPeer = null;
-                structureWatch = false;
-                deathWatch = false;
+                ClearPacketState();
                 Logger.LogDebug($"Structure validation could not open a packet: {e.Message}");
             }
         }
 
         /// <summary>
-        /// Closes the bracket and acts on anything found. Runs as a Harmony finalizer rather than a postfix so
-        /// an exception out of vanilla cannot leave the watch flag set, which would then have us inspecting
-        /// ZDOs the server wrote itself.
+        /// Closes the bracket, inspects what the packet created and acts on anything found. Runs as a Harmony
+        /// finalizer rather than a postfix so an exception out of vanilla cannot leave the watch flags set,
+        /// which would then have us inspecting ZDOs the server wrote itself.
         /// </summary>
         internal static void EndPacket() {
             ZNetPeer peer = inboundPeer;
-            inboundPeer = null;
-            createdThisPacket = false;
-            lastCreated = ZDOID.None;
-            structureWatch = false;
-            deathWatch = false;
-            if (pending.Count == 0) { return; }
+            bool death = deathWatch;
+            bool nonBuildable = nonBuildableWatch;
 
+            // Cleared before the scan below, not after. Nothing from here on is part of the client's packet,
+            // so nothing it touches may be attributed to the peer - and with collectCreated already false, a
+            // ZDO created as a side effect of acting on a detection cannot land in the set the scan is
+            // enumerating.
+            inboundPeer = null;
+            deathWatch = false;
+            nonBuildableWatch = false;
+            healthWatch = false;
+            collectCreated = false;
+
+            try {
+                if (peer != null && (death || nonBuildable) && createdZdos.Count > 0) {
+                    InspectCreated(peer, death, nonBuildable);
+                }
+            } catch (Exception e) {
+                Logger.LogDebug($"Structure validation could not inspect the objects a packet created: {e.Message}");
+            }
+            createdZdos.Clear();
+
+            if (pending.Count == 0) { return; }
             List<StructureOffence> offences = new List<StructureOffence>(pending);
             pending.Clear();
             if (peer == null) { return; }
@@ -140,11 +221,77 @@ namespace ValheimEnforcer.modules.worldintegrity {
             }
         }
 
-        /// <summary>Records the id of a ZDO the peer's packet just created, for the Deserialize that follows it.</summary>
+        /// <summary>
+        /// Inspects the ZDOs the packet created, once, after it has finished.
+        ///
+        /// This is where the two checks that only ever concerned NEW objects live - a death (the grave did not
+        /// exist a moment ago) and a structure no build tool can place. Doing it here rather than inside
+        /// ZDO.Deserialize is what lets a server run death observation without a hook on every deserialized
+        /// object: RPC_ZDOData creates a ZDO only for an id the server has never seen, so this loop runs over
+        /// a handful of objects where the old path ran over every object the packet carried.
+        ///
+        /// The prefab hash is read once per created ZDO and everything branches off it, so a packet that
+        /// created nothing interesting costs one dictionary lookup and one comparison each.
+        /// </summary>
+        private static void InspectCreated(ZNetPeer peer, bool death, bool nonBuildable) {
+            ZDOMan man = ZDOMan.instance;
+            if (man == null) { return; }
+
+            bool indexReady = false;
+            bool indexChecked = false;
+            bool deathRecorded = false;
+
+            foreach (ZDOID id in createdZdos) {
+                // Normally still here: ZDOMan.DestroyZDO only queues the id, and the removal itself happens
+                // in a later frame, so even the ZDO vanilla kills on the spot for being a resurrected dead id
+                // is still readable now. The check is for anything else that removed it inside the packet.
+                ZDO zdo = man.GetZDO(id);
+                if (zdo == null) { continue; }
+
+                int prefabHash = zdo.GetPrefab();
+                if (prefabHash == 0) { continue; }
+
+                // Death observation: a Player_tombstone this peer's packet created means this peer just died.
+                // Record it server-side so the grave cannot be duplicated by a client that skips its own death
+                // handling (ClearTrackedItemsOnDeath). A raw hash compare, so no prefab index is needed and a
+                // server running only this check never builds one.
+                // Once per packet: a player dies once, and a packet carrying several graves - a client
+                // re-sending a whole sector, say - must not repeat the store write behind this.
+                if (death && !deathRecorded && prefabHash == TombstoneHash) {
+                    deathRecorded = true;
+                    ObserveDeath(peer);
+                }
+
+                if (!nonBuildable) { continue; }
+                if (!indexChecked) {
+                    indexReady = StructureIndex.EnsureBuilt();
+                    indexChecked = true;
+                }
+                if (!indexReady) { continue; }
+                if (!StructureIndex.IsNonBuildableStructure(prefabHash)) { continue; }
+
+                // One report per piece: a non-buildable structure is the louder finding, so it supersedes any
+                // excessive-health offence the deserialize path already queued for the same object.
+                DropPending(id);
+                Queue(zdo, prefabHash, "placed a structure no build tool can place", float.NaN);
+            }
+        }
+
+        /// <summary>Removes an already-queued offence for one object, so it is not reported twice.</summary>
+        private static void DropPending(ZDOID id) {
+            for (int i = pending.Count - 1; i >= 0; i--) {
+                if (pending[i].Id == id) { pending.RemoveAt(i); }
+            }
+        }
+
+        /// <summary>
+        /// Records the id of a ZDO the peer's packet just created, for <see cref="InspectCreated"/> to look at
+        /// once the packet is done. The prefab is not readable yet - RPC_ZDOData creates the ZDO with a hash of
+        /// zero and fills it in from the Deserialize that follows - so nothing can be decided here.
+        /// </summary>
         internal static void NoteCreated(ZDOID uid) {
-            if (inboundPeer == null) { return; }
-            lastCreated = uid;
-            createdThisPacket = true;
+            if (!collectCreated) { return; }
+            createdZdos.Add(uid);
         }
 
         /// <summary>
@@ -152,11 +299,13 @@ namespace ValheimEnforcer.modules.worldintegrity {
         /// that was already there is not blamed on whoever happens to own the ZDO now - ownership migrates to
         /// the nearest player every couple of seconds, so without this an innocent passer-by who hits a
         /// cheated structure once would be the one reported.
+        ///
+        /// The reason the ZDO.Deserialize hook exists at all: this value is gone by the time the hook returns.
         /// </summary>
         internal static float CaptureHealth(ZDO zdo) {
-            if (inboundPeer == null || !structureWatch || zdo == null) { return float.NaN; }
+            // healthWatch implies a watched peer and the health check being on, both settled in BeginPacket.
+            if (!healthWatch || zdo == null) { return float.NaN; }
             try {
-                if (!ValConfig.DetectExcessiveStructureHealth.Value) { return float.NaN; }
                 return zdo.GetFloat(ZDOVars.s_health, float.NaN);
             } catch (Exception e) {
                 Logger.LogDebug($"Structure validation could not read a health value: {e.Message}");
@@ -164,40 +313,21 @@ namespace ValheimEnforcer.modules.worldintegrity {
             }
         }
 
-        /// <summary>Evaluates one fully-populated ZDO that arrived in the current packet.</summary>
+        /// <summary>Evaluates the health one fully-populated ZDO arrived carrying.</summary>
         internal static void Inspect(ZDO zdo, float previousHealth) {
-            if (inboundPeer == null || zdo == null) { return; }
+            if (!healthWatch || zdo == null) { return; }
             try {
-                Evaluate(zdo, previousHealth);
+                EvaluateHealth(zdo, previousHealth);
             } catch (Exception e) {
                 Logger.LogDebug($"Structure validation could not inspect an object: {e.Message}");
             }
         }
 
-        private static void Evaluate(ZDO zdo, float previousHealth) {
-            bool isNew = createdThisPacket && zdo.m_uid == lastCreated;
-            createdThisPacket = false;
-
-            // Death observation: a newly created Player_tombstone in this peer's packet means this peer just
-            // died. Record it server-side so the grave cannot be duplicated by a client that skips its own
-            // death handling (ClearTrackedItemsOnDeath). Only fires on the created ZDO, so the GetPrefab cost
-            // lands on new ZDOs only, and deaths are rare.
-            if (deathWatch && isNew) {
-                if (zdo.GetPrefab() == TombstoneHash) { ObserveDeath(); }
-            }
-
-            if (!structureWatch) { return; }
-
+        private static void EvaluateHealth(ZDO zdo, float previousHealth) {
             int prefabHash = zdo.GetPrefab();
             if (prefabHash == 0) { return; }
             if (!StructureIndex.EnsureBuilt()) { return; }
 
-            if (isNew && ValConfig.DetectNonBuildableStructures.Value && StructureIndex.IsNonBuildableStructure(prefabHash)) {
-                Queue(zdo, prefabHash, "placed a structure no build tool can place", float.NaN);
-                return;
-            }
-
-            if (!ValConfig.DetectExcessiveStructureHealth.Value) { return; }
             float authored;
             if (!StructureIndex.TryGetDesignedHealth(prefabHash, out authored) || authored <= 0f) { return; }
 
@@ -214,6 +344,29 @@ namespace ValheimEnforcer.modules.worldintegrity {
         }
 
         /// <summary>
+        /// Says once that the health check is configured on but its hook was not installed, because the
+        /// setting was off when the process started. Once per session: this is inside the packet loop.
+        /// </summary>
+        private static void WarnHealthHookMissing() {
+            if (warnedHealthHookMissing) { return; }
+            warnedHealthHookMissing = true;
+            Logger.LogWarning("DetectExcessiveStructureHealth is on but its hook was not installed, because EnableStructureValidation "
+                              + "or DetectExcessiveStructureHealth was off when the server started. Restart the server to enable it. "
+                              + "The non-buildable structure check and death observation are unaffected.");
+        }
+
+        /// <summary>Drops everything scoped to one packet.</summary>
+        private static void ClearPacketState() {
+            inboundPeer = null;
+            deathWatch = false;
+            nonBuildableWatch = false;
+            healthWatch = false;
+            collectCreated = false;
+            if (createdZdos.Count > 0) { createdZdos.Clear(); }
+            if (pending.Count > 0) { pending.Clear(); }
+        }
+
+        /// <summary>
         /// Records that the peer whose packet is being processed just died: clears the item list on their
         /// stored character and marks it a dirty disconnect, so the pre-death inventory can no longer be
         /// replayed onto the server as authoritative. This is the server-side twin of the client's
@@ -221,11 +374,11 @@ namespace ValheimEnforcer.modules.worldintegrity {
         /// keep the pre-death items live on the server and dupe the grave on the next join.
         ///
         /// Attribution is always the packet's own peer, so a forged tombstone can only ever clear the SENDER's
-        /// own character - never another player's. Runs on the main thread (inside ZDO deserialize), so it does
-        /// its own load/write rather than using the async store; deaths are rare, so the synchronous I/O is fine.
+        /// own character - never another player's. Runs on the main thread (at the end of the packet), so it
+        /// does its own load/write rather than using the async store; deaths are rare, so the synchronous I/O
+        /// is fine.
         /// </summary>
-        private static void ObserveDeath() {
-            ZNetPeer peer = inboundPeer;
+        private static void ObserveDeath(ZNetPeer peer) {
             if (peer == null || peer.m_socket == null) { return; }
             string endpoint = peer.m_socket.GetEndPointString();
             string name = peer.m_playerName;
@@ -343,17 +496,13 @@ namespace ValheimEnforcer.modules.worldintegrity {
         }
 
         /// <summary>
-        /// The peer a connection belongs to. Vanilla's own ZNet.GetPeer(ZRpc) does exactly this but is private,
-        /// and this runs on every ZDOData packet - not somewhere to lean on skipped access checks. GetPeers()
-        /// hands back the live list rather than a copy, so the loop is the same work vanilla would have done.
+        /// The peer a connection belongs to. This used to be a private copy of the peer-list walk; it now
+        /// defers to PeerIdentity, which keeps a connection-to-peer map and answers in one hash lookup. This
+        /// runs on every ZDOData packet, so the walk cost packets x connected players on a busy server - and
+        /// having two definitions of "the peer behind this socket" was never worth the duplication either.
         /// </summary>
         private static ZNetPeer PeerFor(ZRpc rpc) {
-            if (rpc == null) { return null; }
-            List<ZNetPeer> peers = ZNet.instance.GetPeers();
-            for (int i = 0; i < peers.Count; i++) {
-                if (peers[i] != null && peers[i].m_rpc == rpc) { return peers[i]; }
-            }
-            return null;
+            return modules.character.PeerIdentity.PeerFor(rpc);
         }
 
         /// <summary>
@@ -482,12 +631,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
 
         /// <summary>Drops per-world state. Called from the ZNet.Shutdown teardown.</summary>
         internal static void Reset() {
-            inboundPeer = null;
-            createdThisPacket = false;
-            lastCreated = ZDOID.None;
-            structureWatch = false;
-            deathWatch = false;
-            pending.Clear();
+            ClearPacketState();
             lastNotified.Clear();
         }
     }

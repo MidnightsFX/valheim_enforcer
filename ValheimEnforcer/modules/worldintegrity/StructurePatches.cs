@@ -30,8 +30,10 @@ namespace ValheimEnforcer.modules.worldintegrity {
     }
 
     /// <summary>
-    /// Notes the id of a ZDO the packet just created. RPC_ZDOData calls this immediately before deserializing
-    /// that same ZDO, so one id is enough to answer "was this new" without tracking a set.
+    /// Notes the id of a ZDO the packet just created, which is what the inspection at the end of the packet
+    /// works from. RPC_ZDOData only reaches here for an id the server has never seen, so this fires for a
+    /// small fraction of what a packet carries - and the prefab is still zero at this point, filled in by the
+    /// Deserialize that follows, so nothing can be decided until the packet is done.
     /// </summary>
     [HarmonyPatch(typeof(ZDOMan), nameof(ZDOMan.CreateNewZDO), new Type[] { typeof(ZDOID), typeof(Vector3), typeof(int) })]
     internal static class ZDOMan_CreateNewZDO_StructureValidation {
@@ -43,12 +45,28 @@ namespace ValheimEnforcer.modules.worldintegrity {
     }
 
     /// <summary>
-    /// The inspection point: the ZDO is fully populated here, prefab and all. The prefix keeps the health the
-    /// ZDO held beforehand so an over-limit value that was already there is not blamed on the peer that merely
-    /// owns it now.
+    /// The excessive-health check, and nothing else.
+    ///
+    /// This hook exists only because that one check needs a value that stops existing: the prefix keeps the
+    /// health the ZDO held BEFORE the client's write, so an over-limit value that was already there is not
+    /// blamed on the peer that merely owns it now. Every other check this module runs concerns objects the
+    /// packet CREATED, and those are inspected once the packet is done - see StructureValidator.InspectCreated.
+    ///
+    /// So it is installed conditionally. ZDO.Deserialize is the hottest method a Valheim server runs, called
+    /// for every replicated object in every packet, and a Harmony wrapper on it costs the same whether the
+    /// body does anything or returns immediately. A server with structure validation off - the default - has
+    /// no reason to carry that, and death observation used to drag it in because it shared this path.
+    ///
+    /// Prepare is evaluated once, at PatchAll in the plugin's Awake, which runs after the config is bound.
+    /// Turning the health check on in a running server therefore takes a restart; StructureValidator says so
+    /// in the log the first time it sees the setting on without the hook.
     /// </summary>
     [HarmonyPatch(typeof(ZDO), nameof(ZDO.Deserialize))]
     internal static class ZDO_Deserialize_StructureValidation {
+
+        private static bool Prepare() {
+            return StructureValidator.WantsHealthHook();
+        }
 
         [HarmonyPrefix]
         private static void Prefix(ZDO __instance, ref float __state) {

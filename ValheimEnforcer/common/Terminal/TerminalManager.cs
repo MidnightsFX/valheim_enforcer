@@ -39,6 +39,7 @@ namespace ValheimEnforcer.common {
             RegisterStructureCommands();
             RegisterNetworkCommands();
             RegisterItemOriginCommands();
+            RegisterAuditCommands();
 
             Logger.LogDebug($"Registered {Registry.Count} ValheimEnforcer console commands.");
         }
@@ -62,6 +63,11 @@ namespace ValheimEnforcer.common {
 
             string[] args = consoleArgs.Args.Skip(1).ToArray();
             TerminalOutput output = TerminalOutput.Local(consoleArgs.Context);
+
+            // Remembered for every command, not just relayed ones. The audit list/download commands run
+            // locally and get their answer back over their own RPC later, and that answer has to land in the
+            // console the admin actually typed into rather than always in the main one.
+            responseTerminal = consoleArgs.Context;
 
             if (command.ServerAuthoritative == false) {
                 Invoke(command, args, output);
@@ -90,7 +96,6 @@ namespace ValheimEnforcer.common {
                 return;
             }
 
-            responseTerminal = consoleArgs.Context;
             output.Info($"Asked the server to run {command.Canonical}; its output follows.");
             ValConfig.ClientCommandRequestRPC.SendPackage(server.m_uid, BuildRequest(command.Canonical, args));
         }

@@ -40,8 +40,13 @@ namespace ValheimEnforcer.modules.network {
             return !string.IsNullOrEmpty(hostId) && ZNet.instance.IsAdmin(hostId);
         }
 
+        /// <summary>
+        /// The account id behind a connection. Resolved through PeerIdentity, which keeps it for the life of
+        /// the connection: ISocket.GetHostName builds a fresh string on every call, and IsExempt asks for this
+        /// on the relay path, once or twice per packet the filters look at.
+        /// </summary>
         internal static string HostIdOf(ZNetPeer peer) {
-            return peer != null && peer.m_socket != null ? peer.m_socket.GetHostName() : null;
+            return modules.character.PeerIdentity.AccountFor(peer);
         }
 
         /// <summary>Name and host id together, for a log line a moderator can act on.</summary>
