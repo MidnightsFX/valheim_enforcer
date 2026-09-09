@@ -227,6 +227,9 @@ namespace ValheimEnforcer.modules {
             }
         }
 
+        /// <summary>Patcher count the last "Detected N patcher(s)" line reported. -1 until the first rebuild.</summary>
+        private static int lastAnnouncedPatcherCount = -1;
+
         /// <summary>
         /// Rebuilds <see cref="DataObjects.Mods.ActivePatchers"/> from the patcher directory, and on the server
         /// adopts anything new into <see cref="DataObjects.Mods.AllowedPatchers"/>.
@@ -238,19 +241,23 @@ namespace ValheimEnforcer.modules {
         /// The adopt step is what makes this feature need no manual work on a normal server. A patcher already
         /// installed when the feature arrives is allowlisted on the next start, and only a patcher that appears
         /// on a client without being on the server is ever refused.
+        ///
+        /// Also runs on every Mods.yaml re-read, which is why the "detected" line is only announced once per
+        /// change: a config poll that rewrites the same list must not put a line in the log every time.
         /// </summary>
         private static void RebuildActivePatchers() {
             if (ModSettings == null) { ModSettings = new DataObjects.Mods(); }
             ModSettings.ActivePatchers = PatcherIndex.Snapshot();
             if (ModSettings.AllowedPatchers == null) { ModSettings.AllowedPatchers = new Dictionary<string, DataObjects.PatcherEntry>(); }
 
-            if (ModSettings.ActivePatchers.Count > 0) {
+            if (ModSettings.ActivePatchers.Count > 0 && ModSettings.ActivePatchers.Count != lastAnnouncedPatcherCount) {
                 Logger.LogInfo($"Detected {ModSettings.ActivePatchers.Count} BepInEx patcher(s).");
             }
+            lastAnnouncedPatcherCount = ModSettings.ActivePatchers.Count;
 
             // Server-side adoption only. A client doing this would be allowlisting its own patchers, which is
             // not a thing a client gets to do - and on a client the list is never consulted anyway.
-            if (!ValConfig.AutoAddPatchersToAllowed.Value) { return; }
+            if (ValConfig.AutoAddPatchersToAllowed == null || !ValConfig.AutoAddPatchersToAllowed.Value) { return; }
             if (ZNet.instance != null && !ZNet.instance.IsServer()) { return; }
 
             foreach (KeyValuePair<string, DataObjects.PatcherEntry> patcher in ModSettings.ActivePatchers) {
@@ -305,12 +312,16 @@ namespace ValheimEnforcer.modules {
         /// <summary>
         /// Applies an edited Mods.yaml to the in-memory settings.
         ///
-        /// Only the four policy lists are taken from the file. ActiveMods is deliberately NOT adopted and is
+        /// Only the policy lists are taken from the file. ActiveMods is deliberately NOT adopted and is
         /// re-derived from the loaded plugins instead: ActiveMods is the list this peer *reports* about itself
         /// during the handshake, and this method runs from the config file watcher, whose admin gate
         /// (SynchronizationManager.PlayerIsAdmin) defaults to true before login. Adopting it from file text
         /// would let any player hand-edit their own Mods.yaml, wait one poll interval, and connect claiming to
         /// be running whatever set of mods - and, once file verification exists, whatever hashes - they liked.
+        ///
+        /// ActivePatchers is re-derived for the same reason, and that also puts the server's own patchers back
+        /// into AllowedPatchers: without it, a re-read left the allowlist as whatever the file happened to say,
+        /// so a patcher this server actually runs stopped being allowed the moment an admin touched Mods.yaml.
         /// </summary>
         internal static void UpdateModSettingConfigs(string yamlstring) {
             try {
@@ -321,6 +332,7 @@ namespace ValheimEnforcer.modules {
                 }
                 ModSettings = fromFile;
                 RebuildActiveMods();
+                RebuildActivePatchers();
             } catch (System.Exception e) {
                 Logger.LogWarning($"Failed to deserialize mod configurations: {e.Message}");
             }

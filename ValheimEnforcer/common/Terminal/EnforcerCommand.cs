@@ -59,7 +59,7 @@ namespace ValheimEnforcer.common {
             CommandAction action,
             CommandArea area,
             OptionProvider options = null,
-            bool isCheat = true,
+            bool isCheat = false,
             bool serverAuthoritative = false,
             bool requiresAdmin = false,
             bool hideFromHelp = false,

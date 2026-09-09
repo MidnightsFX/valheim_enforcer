@@ -69,6 +69,15 @@ namespace ValheimEnforcer.common {
             // console the admin actually typed into rather than always in the main one.
             responseTerminal = consoleArgs.Context;
 
+            // Admin gate for the local path too. The check below only covers commands relayed to the
+            // server; a command that runs on this client would otherwise be open to anyone. A solo
+            // player or host is always an admin (PlayerIsAdmin is true whenever ZNet.IsServer), a
+            // client only once the server's admin RPC says so.
+            if (SynchronizationManager.Instance.PlayerIsAdmin == false) {
+                output.Error($"Only server admins can run {command.Canonical}.");
+                return;
+            }
+
             if (command.ServerAuthoritative == false) {
                 Invoke(command, args, output);
                 return;

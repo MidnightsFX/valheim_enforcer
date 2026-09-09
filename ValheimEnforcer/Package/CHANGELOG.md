@@ -1,3 +1,12 @@
+**0.23.1**
+---
+```
+- Console commands no longer flagged as cheats, but do require admin
+- Prepatchers detected on the server stay in activePatchers and allowedPatchers when Mods.yaml is re-read.
+  Previously only startup did that, so an edit to the file replaced the detected list with whatever the file
+  said and dropped the server's own patchers out of the allowlist until the next restart.
+```
+
 **0.23.0**
 ---
 ```
