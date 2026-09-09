@@ -758,22 +758,41 @@ Tab completion works past the first argument: tab through the account ids the se
 
 Older command names — `Enforcer-List-Players`, `Enforcer-Return-Confiscated` and the rest — still work and are listed beside their replacement in `enforcer-help`.
 
+#### adminlist.txt changed format — old files grant nobody admin
+
+A Valheim update changed the spelling `adminlist.txt` requires, and it is now the **only** spelling accepted for an account whose id is a number:
+
+| Platform | Line to write |
+| --- | --- |
+| Steam | `V_<steamid>` |
+| Nintendo Switch 2 | `N_<in-game id>` |
+| Xbox | `X_<in-game id>` |
+| PlayStation | `S_<in-game id>` |
+| GameCenter | `A_<in-game id>` |
+
+A bare `76561198…`, or the older `Steam_76561198…`, is no longer honoured. The game says nothing when this happens — the file still looks exactly as correct as it always did, and every admin on the server simply stops being one. If admin commands stopped working after an update and you changed nothing, this is why.
+
+On consoles the number is not your platform account id either: the game derives the in-game id from it, so you cannot work the line out by hand. Run `enforcer-whoami` and it prints the exact line for you.
+
 #### When the server does not think you are an admin
 
-Every command above except `enforcer-help` and `enforcer-whoami` is refused with "Only server admins can run …" when the server does not recognise you. Run `enforcer-whoami` — it works whether or not you are an admin, from the console or from chat as `/enforcer-whoami`, and it answers from both ends of the connection:
+Every command above except `enforcer-help` and `enforcer-whoami` is refused with "Only server admins can run …" when the server does not recognise you. Run `enforcer-whoami` — it works whether or not you are an admin, from the console or from chat as `/enforcer-whoami`:
 
 ```
 enforcer-whoami
 ```
 
-Your client reports the platform account it is signed in as, and whether this mod's admin gate currently passes. The server then reports the id it actually sees for your connection — which is the one thing that decides anything, and is not always the same string your client knows itself by — whether it treats that id as an admin, and where its `adminlist.txt` lives.
+Only the server answers. It reports the id it actually sees for your connection — which is the one thing that decides anything, and is not always the same string your client knows itself by — whether it treats that id as an admin, how many entries in the list use the pre-update spelling, and where the file lives. Your own client is deliberately not asked: it holds a copy of the admin list from the moment you connected and a synced admin flag from just after login, and either can be out of date, so quoting them beside the real answer would only give you two things to believe.
 
-When the answer is no, the server also tells you which of the two cases you are in:
+When the answer is no, it tells you which case you are in:
 
+- **Your id is in the file in the pre-update spelling.** The most likely one right now, and the one that looks like a mystery: the file plainly contains your SteamID and the server still says no. It names that line and prints the `V_…` text to replace it with.
 - **Your id is not in the file at all.** It prints the exact line to add.
-- **Your id is in the file but was not accepted.** This is the one that looks like a mystery: the file plainly contains your SteamID and the server still says no. Almost always the line has a trailing space, or an editor saved the file as UTF-16 or left a byte order mark on the first line. The command names how many lines are unusable and prints the exact text to replace yours with.
+- **The line has stray whitespace or a byte order mark.** Valheim compares the text exactly as written and does not trim, so one trailing space costs you admin. The command counts the lines this applies to.
 
-`adminlist.txt` is re-read within about ten seconds of being saved, so there is no need to restart the server to test a fix. Neither command reveals anything about other players: `enforcer-whoami` reports how many entries the admin list holds and how many of them are malformed, but never names an admin other than you.
+`adminlist.txt` is re-read within about ten seconds of being saved, so there is no need to restart the server to test a fix. Neither command reveals anything about other players: `enforcer-whoami` reports how many entries the admin list holds and how many are broken, but never names an admin other than you.
+
+Because a client can be wrong about its own standing — Valheim sends the admin list once when you connect, and Jotunn syncs its admin flag once after login — this mod no longer lets your own client refuse a command outright. If it thinks you are not an admin it says so and asks the server anyway, and the refusal, if there is one, comes from the side that actually decides.
 
 #### Restoring user Items
 Someone brought on their priceless Epicloot Askavin cloak? Some Prestine +InfinitePower Jewels? You can restore confiscated items!

@@ -10,6 +10,13 @@
       add or replace.
 - enforcer-help also runs without admin now, which is what the documentation already claimed.
 - Adds AllowPublicDiagnosticCommands (Advanced, on): set it false to make those two admin-only again.
+- Handles the adminlist.txt format change. A Valheim update made the one-letter platform prefix - V_ Steam,
+  N_ Nintendo, X_ Xbox, S_ PlayStation, A_ GameCenter - the ONLY spelling accepted for a numeric account id:
+  ZNet.ListContainsId computes the old answer and then overwrites it with a lookup of the filtered form
+  alone. Every adminlist.txt written before that update silently stopped granting anybody admin, and nothing
+  in the game says so.
+    - enforcer-whoami prints the exact line to write, including for console accounts, where the in-game id is
+      derived from the platform id and cannot be worked out by hand.
 ```
 
 **0.23.1**

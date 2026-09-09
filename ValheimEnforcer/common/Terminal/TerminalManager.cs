@@ -73,22 +73,28 @@ namespace ValheimEnforcer.common {
             // admin (PlayerIsAdmin is true whenever ZNet.IsServer), a client only once the server's admin RPC
             // says so. A command marked open to everyone deliberately skips this - see OpenToEveryone.
             if (OpenToEveryone(command) == false && LocallyAdmin() == false) {
-                output.Error($"Only server admins can run {command.Canonical}.");
-                // Being refused here is exactly the symptom somebody who believes they ARE an admin reports,
-                // so point at the command that says why rather than leaving them with a flat no. Not when
-                // that command is the one being refused, or when the operator has closed it off - a pointer
-                // to something that will refuse them too is worse than no pointer.
-                if (command.Canonical != WhoAmICommand && OpenToEveryone(WhoAmICommand)) {
-                    output.Detail($"Run {WhoAmICommand} to see what this server makes of your connection.", log: false);
+                // A command that travels is not refused here. This machine is not the authority on who is an
+                // admin and can be wrong in the one direction that matters - Jotunn's flag and the pushed
+                // admin list are both sent once and can be stale, so a genuine admin can be told no by their
+                // own client while the server would have said yes. Send it and let the server answer; it
+                // checks the sender itself, and its refusal is the one worth printing.
+                if (command.ServerAuthoritative) {
+                    output.Warning($"This client does not think you are an admin, but it does not decide - asking the server.");
+                } else {
+                    output.Error($"Only server admins can run {command.Canonical}.");
+                    // Being refused is exactly the symptom somebody who believes they ARE an admin reports, so
+                    // point at the command that says why rather than leaving them with a flat no. Not when
+                    // that command is the one being refused, or when the operator has closed it off - a
+                    // pointer to something that will refuse them too is worse than no pointer.
+                    if (command.Canonical != WhoAmICommand && OpenToEveryone(WhoAmICommand)) {
+                        output.Detail($"Run {WhoAmICommand} to see what this server makes of your connection.", log: false);
+                    }
+                    return;
                 }
-                return;
             }
 
             if (command.ServerAuthoritative == false) {
                 Invoke(command, args, output);
-                // A command that holds only half its answer here asks the server for the other half. The
-                // local half has already printed, so the two arrive in the order they were produced.
-                if (command.AlsoRunsOnServer) { AskServerForItsHalf(command, args, output); }
                 return;
             }
 
@@ -116,22 +122,6 @@ namespace ValheimEnforcer.common {
         }
 
         /// <summary>
-        /// Sends a command the client has already run here to the server as well, for the half of the answer
-        /// only the server holds. Nothing is relayed from a listen host, which is its own server and has just
-        /// answered both halves itself.
-        /// </summary>
-        private static void AskServerForItsHalf(EnforcerCommand command, string[] args, TerminalOutput output) {
-            if (ZNet.instance == null || ZNet.instance.IsServer()) { return; }
-            ZNetPeer server = ZNet.instance.GetServerPeer();
-            if (server == null) {
-                output.Warning("Not connected to a server, so only the local half of this answer is available.");
-                return;
-            }
-            output.Info($"Asked the server for its side of {command.Canonical}; its answer follows.", log: false);
-            ValConfig.ClientCommandRequestRPC.SendPackage(server.m_uid, BuildRequest(command.Canonical, args));
-        }
-
-        /// <summary>
         /// Server side of the relay. The caller has already established that the sender is either an admin or
         /// asking for something <see cref="OpenToEveryone"/> allows anybody to ask.
         /// </summary>
@@ -139,7 +129,7 @@ namespace ValheimEnforcer.common {
             EnforcerCommand command = Lookup(name);
             // Never dispatch a name the client picked that is not one of ours, and never let the relay reach
             // a command that was not built to run server-side.
-            if (command == null || (command.ServerAuthoritative == false && command.AlsoRunsOnServer == false)) {
+            if (command == null || command.ServerAuthoritative == false) {
                 output.Error($"'{name}' is not a server-runnable ValheimEnforcer command.");
                 output.Flush();
                 return;

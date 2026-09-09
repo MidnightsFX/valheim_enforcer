@@ -17,7 +17,7 @@ namespace ValheimEnforcer.common {
 
             _ = new EnforcerCommand(WhoAmICommand,
                 "Says whether this server treats you as an admin and, when it does not, what to change so that it does. Runs for anybody.",
-                WhoAmI, CommandArea.Meta, isCheat: false, allowNonAdmin: true, alsoRunsOnServer: true);
+                WhoAmI, CommandArea.Meta, isCheat: false, serverAuthoritative: true, allowNonAdmin: true);
         }
 
         private static List<string> HelpOptions(string[] input) {
@@ -97,67 +97,35 @@ namespace ValheimEnforcer.common {
         /// Every other command here refuses a non-admin, which is precisely why this one must not: somebody
         /// whose id sits in adminlist.txt in a spelling the game will not accept looks, from in-game,
         /// identical to somebody who was never added at all, and the usual answer - ask an admin - is no help
-        /// when the person asking IS the operator. It runs on both sides because the two sides do not check
-        /// the same thing: a client knows the platform account it is signed in as, while the server compares
-        /// the host name of the socket the connection actually arrived on. Those two can disagree, and that
-        /// disagreement is the thing this command exists to find.
+        /// when the person asking IS the operator.
+        ///
+        /// Only the server answers. A client holds two opinions about its own standing - Jotunn's synced flag
+        /// and the admin list Valheim pushes once on connect - and both are snapshots that can be stale, so
+        /// printing them next to the real answer only gives somebody two things to believe and a reason to
+        /// trust the wrong one. <c>ZNet.IsAdmin</c> against the host name of the socket the request arrived on
+        /// is what every gate in this mod, and in the game itself, ultimately comes down to; that is the whole
+        /// of the answer and nothing else is worth saying.
         /// </summary>
         private static void WhoAmI(EnforcerCommandArgs args) {
-            if (args.FromNetwork) { WhoAmIOnServer(args); return; }
-            WhoAmIHere(args);
-        }
-
-        /// <summary>The half this machine can answer on its own, before the server is asked for the rest.</summary>
-        private static void WhoAmIHere(EnforcerCommandArgs args) {
-            string qualified = LocalPlatformId(out string bare);
-            args.Output.Info(qualified == null
-                ? "No platform account is signed in on this machine, which is normal for a dedicated server."
-                : $"Signed in here as {qualified} (an admin list accepts that, or the bare {bare}).", log: false);
-
-            if (ZNet.instance == null) {
-                args.Output.Warning("You are not in a world, so there is no server to be an admin of. Join one and run this again.", log: false);
+            // Execute only dispatches a server-authoritative command locally when this machine is the server,
+            // so this is unreachable today; answer rather than print nothing if that ever changes.
+            if (ZNet.instance == null || ZNet.instance.IsServer() == false) {
+                args.Output.Error("Only the server can answer this, and this machine is not it.");
                 return;
             }
 
-            if (ZNet.instance.IsServer()) {
+            // Typed on the server's own console, or on a listen host: there is no connection to look up, and
+            // the server never checks itself.
+            if (args.FromNetwork == false) {
                 args.Output.Info("This machine IS the server, so every ValheimEnforcer command runs here with full rights - there is no admin check to fail.", log: false);
                 ReportAdminList(args, ZNet.instance.GetAdminList(), "adminlist.txt");
                 return;
             }
 
-            // Jotunn's flag is what Execute gates on, so name it as the thing that refuses a command rather
-            // than as an opinion. The server sets it over its own RPC after login.
-            args.Output.Detail($"This mod's admin gate says you are {(LocallyAdmin() ? "an admin" : "NOT an admin")}; that is the check that refuses a command on this machine.", log: false);
-
-            List<string> list = ZNet.instance.GetAdminList() ?? new List<string>();
-            args.Output.Detail($"The server has sent this client {list.Count} admin list entry(ies).", log: false);
-            if (bare == null) { return; }
-
-            // Only ever reports the caller's own line back to them: an entry that matches is by definition
-            // their own account, and nothing else in the list is named.
-            string exact = list.FirstOrDefault(entry => entry == qualified || entry == bare);
-            if (exact != null) {
-                args.Output.Detail($"Your account is in that list, written as '{exact}'.", log: false);
-                return;
-            }
-            string near = list.FirstOrDefault(entry => PlatformIds.Matches((entry ?? string.Empty).Trim(), bare));
-            args.Output.Detail(near != null
-                ? $"Your account appears in that list as '{near}', which is close but not a form the game accepts as written."
-                : "Your account is not in that list in any spelling, so this server has not been told you are an admin.", log: false);
-        }
-
-        /// <summary>
-        /// The half only the server can answer. <c>ZNet.IsAdmin</c> against the socket's host name is what
-        /// every gate in this mod and in the game itself ultimately comes down to, so this is the verdict;
-        /// everything the client said is context for it.
-        /// </summary>
-        private static void WhoAmIOnServer(EnforcerCommandArgs args) {
-            if (ZNet.instance == null || ZNet.instance.IsServer() == false) { return; }
-
             ZNetPeer peer = ZNet.instance.GetPeer(args.Sender);
             string host = peer != null && peer.m_socket != null ? peer.m_socket.GetHostName() : null;
             if (string.IsNullOrEmpty(host)) {
-                args.Output.Error("Server: could not identify the connection this question arrived on.");
+                args.Output.Error("The server could not identify the connection this question arrived on.");
                 return;
             }
 
@@ -165,20 +133,35 @@ namespace ValheimEnforcer.common {
             // Worth a log line on the server: an operator reading the log afterwards wants the verdict, and
             // this is the only line of the answer that is neither context nor advice.
             args.Output.Info(admin
-                ? $"Server: your connection is {host}, and this server treats it as an admin."
-                : $"Server: your connection is {host}, and this server does NOT treat it as an admin.");
+                ? $"The server sees your connection as {host} and treats it as an admin."
+                : $"The server sees your connection as {host} and does NOT treat it as an admin.");
 
             List<string> list = ZNet.instance.GetAdminList();
-            ReportAdminList(args, list, "the server's adminlist.txt");
+            ReportAdminList(args, list, "adminlist.txt");
             if (admin) { return; }
 
-            string near = (list ?? new List<string>())
-                .FirstOrDefault(entry => PlatformIds.Matches((entry ?? string.Empty).Trim(), host));
-            args.Output.Warning(near != null
-                ? $"Server: the line reading '{near}' is your account, but the server did not accept it as written. Replace that line with exactly: {host}"
-                : $"Server: add this to adminlist.txt on a line of its own: {host}", log: false);
-            args.Output.Detail($"Server: that file is {AdminListPath()}, and it is re-read within about ten seconds of being saved - no restart needed.", log: false);
+            string canonical = AdminIds.Canonical(host);
+            if (canonical == null) {
+                args.Output.Warning($"The admin list spelling for {host} could not be worked out, so there is no line to suggest.", log: false);
+                return;
+            }
+
+            // The two cases look identical from in-game and have completely different fixes, which is most of
+            // the reason this command exists.
+            string stale = (list ?? new List<string>()).FirstOrDefault(entry => AdminIds.SameAccount(entry, host));
+            args.Output.Warning(stale != null
+                ? $"The line reading '{stale.Trim()}' is your account written the way the game wanted before the update, and is no longer honoured. Replace that line with exactly: {canonical}"
+                : $"Add this to adminlist.txt on a line of its own: {canonical}", log: false);
+            args.Output.Detail($"Admin ids now carry a one-letter platform prefix - {PlatformPrefixes}.", log: false);
+            args.Output.Detail($"That file is {AdminListPath()}, and it is re-read within about ten seconds of being saved - no restart needed.", log: false);
         }
+
+        /// <summary>
+        /// The prefixes the game's own filtering produces. Spelled out rather than derived because the table
+        /// behind it is private, and an operator staring at a file of bare SteamID64s needs to be told what
+        /// changed, not just handed one corrected line.
+        /// </summary>
+        private const string PlatformPrefixes = "V_ Steam, N_ Nintendo, X_ Xbox, S_ PlayStation, A_ GameCenter";
 
         /// <summary>
         /// Reports the shape of the admin list without naming anybody in it. How many entries there are, and
@@ -188,6 +171,13 @@ namespace ValheimEnforcer.common {
         private static void ReportAdminList(EnforcerCommandArgs args, List<string> list, string what) {
             list = list ?? new List<string>();
             args.Output.Detail($"{what} holds {list.Count} entry(ies).", log: false);
+
+            // The one worth leading on after the update that changed the format: a server whose file predates
+            // it has no admins at all and nothing anywhere says so.
+            int stale = list.Count(entry => AdminIds.IsPreUpdateSpelling(entry, out _));
+            if (stale > 0) {
+                args.Output.Warning($"{stale} of those line(s) use the pre-update spelling - a bare id, or one prefixed with the platform's full name - and no longer grant admin to anybody. Admin ids now need a one-letter prefix: {PlatformPrefixes}.", log: false);
+            }
 
             int unusable = list.Count(Unusable);
             if (unusable > 0) {
@@ -206,22 +196,35 @@ namespace ValheimEnforcer.common {
             return entry.Trim() != entry || entry.IndexOf('\uFEFF') >= 0;
         }
 
-        /// <summary>Whether this machine currently passes the gate every other command is held to.</summary>
+        /// <summary>
+        /// This machine's best guess at its own standing, and deliberately a union of every source it has:
+        /// being the server, Jotunn's synced flag, and the server's own admin list matched by the game's own
+        /// rule. Any one of them saying yes is enough.
+        ///
+        /// A union because the failure that matters here is the false negative. Jotunn's flag is pushed once
+        /// after login and the pushed admin list is sent once on connect, so either can be stale or absent
+        /// while the server would happily accept the command - and that is precisely the state somebody
+        /// reports as "the mod says I am not an admin but kick works". Nothing is lost by being generous:
+        /// every command this gates is checked again by the server, which is the only side that decides.
+        /// </summary>
         private static bool LocallyAdmin() {
-            return SynchronizationManager.Instance != null && SynchronizationManager.Instance.PlayerIsAdmin;
+            if (ZNet.instance != null && ZNet.instance.IsServer()) { return true; }
+            if (SynchronizationManager.Instance != null && SynchronizationManager.Instance.PlayerIsAdmin) { return true; }
+
+            string local = LocalPlatformId();
+            return local != null && ZNet.instance != null && AdminIds.Accepts(ZNet.instance.GetAdminList(), local);
         }
 
         /// <summary>
-        /// The platform account signed in on this machine, in both the spellings an admin list is written
-        /// with. Null when there is none, which is the normal state of a dedicated server.
+        /// The platform account signed in on this machine, as the platform layer spells it - which is the
+        /// form the game identifies a connection by, not the form the admin list wants. Run it through
+        /// <see cref="AdminIds.Canonical"/> for that. Null when there is none, which is the normal state of a
+        /// dedicated server.
         /// </summary>
-        private static string LocalPlatformId(out string bare) {
-            bare = null;
+        private static string LocalPlatformId() {
             try {
                 PlatformUserID local = PlatformManager.DistributionPlatform?.LocalUser?.PlatformUserID ?? default;
-                if (string.IsNullOrEmpty(local.m_userID)) { return null; }
-                bare = local.m_userID;
-                return local.ToString();
+                return string.IsNullOrEmpty(local.m_userID) ? null : local.ToString();
             } catch (Exception e) {
                 Logger.LogDebug($"Platform layer could not supply a local user id: {e.Message}");
                 return null;

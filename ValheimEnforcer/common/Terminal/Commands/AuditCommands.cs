@@ -1,5 +1,4 @@
-﻿using Jotunn.Managers;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -281,10 +280,11 @@ namespace ValheimEnforcer.common {
                 args.Output.Error("You must be in a world to ask the server for audit history.");
                 return false;
             }
-            // For a clear message only; the server checks the sender itself and is the gate that counts.
-            if (SynchronizationManager.Instance.PlayerIsAdmin == false) {
-                args.Output.Error("Only server admins can request audit history.");
-                return false;
+            // Advisory only; OnServerReceiveAuditRequest checks the sender and is the gate that counts. This
+            // client can be wrong in the one direction that locks a real admin out - see LocallyAdmin - so it
+            // says what it thinks and sends the request regardless.
+            if (LocallyAdmin() == false) {
+                args.Output.Warning("This client does not think you are an admin, but it does not decide - asking the server.");
             }
             ZNetPeer server = ZNet.instance.GetServerPeer();
             if (server == null) {

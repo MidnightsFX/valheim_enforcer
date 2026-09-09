@@ -62,14 +62,6 @@ namespace ValheimEnforcer.common {
         /// </summary>
         internal readonly bool AllowNonAdmin;
 
-        /// <summary>
-        /// The command runs on this machine AND asks the server to run its own half, so the two answers can
-        /// be put side by side. Distinct from <see cref="ServerAuthoritative"/>, where the client does not run
-        /// the command at all and only relays it: here both sides genuinely hold a different piece of the
-        /// answer, which is the whole point of enforcer-whoami.
-        /// </summary>
-        internal readonly bool AlsoRunsOnServer;
-
         internal EnforcerCommand(
             string command,
             string description,
@@ -81,7 +73,6 @@ namespace ValheimEnforcer.common {
             bool requiresAdmin = false,
             bool hideFromHelp = false,
             bool allowNonAdmin = false,
-            bool alsoRunsOnServer = false,
             string canonical = null,
             params string[] aliases)
             : base(command, description,
@@ -102,7 +93,6 @@ namespace ValheimEnforcer.common {
             ServerAuthoritative = serverAuthoritative;
             RequiresAdmin = requiresAdmin;
             AllowNonAdmin = allowNonAdmin;
-            AlsoRunsOnServer = alsoRunsOnServer;
 
             // Vanilla asks for the option list before our tabCycle/updateSearch prefixes get a chance to
             // replace it, so the fetcher has to exist and has to be safe when there is no Console yet. The
@@ -123,7 +113,6 @@ namespace ValheimEnforcer.common {
                     requiresAdmin: requiresAdmin,
                     hideFromHelp: true,
                     allowNonAdmin: allowNonAdmin,
-                    alsoRunsOnServer: alsoRunsOnServer,
                     canonical: Canonical);
             }
         }
