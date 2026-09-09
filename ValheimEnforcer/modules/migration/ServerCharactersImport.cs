@@ -185,9 +185,16 @@ namespace ValheimEnforcer.modules.migration {
             // (the ExtraSlots inventory backup) that must never enter the tracked record.
             compat.CompatCustomData.StripPassthroughKeys(character.PlayerCustomData);
 
+            int unresolved = 0;
             foreach (FchItem item in profile.Items) {
+                string prefabName = ResolvePrefabName(item);
+                // A hash no longer in ObjectDB is an item from a mod this server does not load. Vanilla drops
+                // such an item on load, and the store keys everything on the prefab name, so there is nothing
+                // truthful to record - it is counted and reported rather than guessed at.
+                if (string.IsNullOrEmpty(prefabName)) { unresolved++; continue; }
+
                 character.PlayerItems.Add(new DataObjects.PackedItem {
-                    prefabName = item.PrefabName,
+                    prefabName = prefabName,
                     m_stack = item.Stack,
                     // Taken verbatim. The clamp in Character.AddItemToPlayerItems needs item.m_shared, which is
                     // not reachable without ObjectDB, and this is the value the client itself was carrying.
@@ -206,13 +213,36 @@ namespace ValheimEnforcer.modules.migration {
                     m_gridpos = item.GridPos
                 });
             }
+            if (unresolved > 0) {
+                Logger.LogWarning($"Import: dropped {unresolved} item(s) from {characterName} ({accountId}) whose prefab this server does not have.");
+            }
 
             return character;
         }
 
         /// <summary>
+        /// The prefab name for an inventory entry, whichever way the file recorded it.
+        ///
+        /// Up to Version.Item.AbandonedDN the name is in the file; from Version.Item.Smaller only a stable hash
+        /// is, and turning that back into a name needs the running game's prefab tables - which is why
+        /// <see cref="FchReader"/> hands the hash over untouched instead of resolving it itself.
+        ///
+        /// ObjectDB is asked first because these are items, with ZNetScene as the fallback for anything it does
+        /// not list. Both are plain dictionary lookups. Returns null when nothing resolves.
+        /// </summary>
+        private static string ResolvePrefabName(FchItem item) {
+            if (!string.IsNullOrEmpty(item.PrefabName)) { return item.PrefabName; }
+            if (item.PrefabHash == 0) { return null; }
+
+            UnityEngine.GameObject prefab = null;
+            if (ObjectDB.instance != null) { ObjectDB.instance.TryGetItemPrefab(item.PrefabHash, out prefab); }
+            if (prefab == null && ZNetScene.instance != null) { prefab = ZNetScene.instance.GetPrefab(item.PrefabHash); }
+            return prefab != null ? prefab.name : null;
+        }
+
+        /// <summary>
         /// Where ServerCharacters keeps its files. Defaults to the game's own local character folder, which is
-        /// what ServerCharacters uses (<c>PlayerProfile.GetCharacterFolderPath(FileHelpers.FileSource.Local)</c>)
+        /// what ServerCharacters uses (<c>SaveSystem.GetCharacterFolderPath(FileHelpers.FileSource.Local)</c>)
         /// and which honours Valheim's -savedir argument for free.
         /// </summary>
         internal static string ResolveSourceDirectory() {
@@ -220,7 +250,7 @@ namespace ValheimEnforcer.modules.migration {
             if (!string.IsNullOrWhiteSpace(configured)) { return configured.Trim(); }
 
             try {
-                return PlayerProfile.GetCharacterFolderPath(FileHelpers.FileSource.Local);
+                return SaveSystem.GetCharacterFolderPath(FileHelpers.FileSource.Local);
             } catch (Exception e) {
                 Logger.LogWarning($"Import: could not resolve the game's character folder ({e.Message}). Set ServerCharactersImportPath.");
                 return null;

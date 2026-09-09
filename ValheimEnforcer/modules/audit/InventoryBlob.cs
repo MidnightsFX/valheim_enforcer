@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using UnityEngine;
 using Logger = ValheimEnforcer.Logger;
 
 namespace ValheimEnforcer.modules.audit {
@@ -11,7 +12,7 @@ namespace ValheimEnforcer.modules.audit {
     /// (Container.Save). The obvious way to read that back is Inventory.Load - but Load resolves every entry
     /// through ObjectDB.GetItemPrefab and Instantiates then Destroys a GameObject per item, which is far too
     /// expensive to do inside the ZDO stream and pointless when all that is wanted is names and counts. This
-    /// walks the same wire format directly, mirroring Inventory.Load's version handling (100-106) field for
+    /// walks the same wire format directly, mirroring Inventory.Load's version handling (100-109) field for
     /// field, and allocates nothing but the result.
     ///
     /// Every failure returns null rather than a partial answer. A container this cannot parse is skipped:
@@ -26,6 +27,14 @@ namespace ValheimEnforcer.modules.audit {
         /// prefix - which would otherwise have us loop allocating strings until the server died.
         /// </summary>
         private const int MaxItems = 4096;
+
+        // Valheim's Version.Item values, named here rather than read from the game on purpose: the point of the
+        // ceiling is that a format this was never written against is refused, and reading the game's live value
+        // would hand a new layout to old parsing code instead.
+        private const int ItemVersionAbandonedDN = 107;    // Version.Item.AbandonedDN - adds m_cheated
+        private const int ItemVersionSmaller = 108;        // Version.Item.Smaller - the packed layout starts here
+        private const int ItemVersionChunksNCheats = 109;  // Version.Item.ChunksNCheats - m_cheated again
+        private const int ItemVersionMax = ItemVersionChunksNCheats;
 
         /// <summary>One stack line as recorded, aggregated by prefab and quality.</summary>
         internal sealed class Slot {
@@ -78,14 +87,18 @@ namespace ValheimEnforcer.modules.audit {
             try {
                 ZPackage pkg = new ZPackage(base64);
                 int version = pkg.ReadInt();
-                int count = pkg.ReadInt();
 
-                // Versions below 100 are not a format this has ever seen; above 106 is a game newer than the
-                // one this was written against. Guessing at either is how a parser starts inventing events.
-                if (version < 100 || version > 106) {
+                // Versions below 100 are not a format this has ever seen; above ItemVersionMax is a game newer
+                // than the one this was written against. Guessing at either is how a parser starts inventing
+                // events.
+                if (version < 100 || version > ItemVersionMax) {
                     Logger.LogDebug($"Audit skipped a container blob with unknown inventory version {version}.");
                     return null;
                 }
+
+                // Two layouts, and even the length prefix differs between them: flat is int-counted, packed is
+                // ushort-counted.
+                int count = version >= ItemVersionSmaller ? pkg.ReadUShort() : pkg.ReadInt();
                 if (count < 0 || count > MaxItems) {
                     Logger.LogDebug($"Audit skipped a container blob claiming {count} items.");
                     return null;
@@ -93,45 +106,23 @@ namespace ValheimEnforcer.modules.audit {
 
                 Dictionary<string, Slot> slots = new Dictionary<string, Slot>(StringComparer.Ordinal);
                 for (int i = 0; i < count; i++) {
-                    string name = pkg.ReadString();
-                    int stack = pkg.ReadInt();
-                    pkg.ReadSingle();      // m_durability
-                    pkg.ReadVector2i();    // m_gridPos - a move is not a take, so this is read past deliberately
-                    pkg.ReadBool();        // m_equipped
+                    Slot entry = version >= ItemVersionSmaller ? ReadPacked(pkg, version) : ReadFlat(pkg, version);
+                    if (entry == null) { return null; }
 
-                    int quality = 1;
-                    if (version >= 101) { quality = pkg.ReadInt(); }
-                    if (version >= 102) { pkg.ReadInt(); }   // m_variant
-
-                    long crafterId = 0L;
-                    string crafterName = "";
-                    if (version >= 103) {
-                        crafterId = pkg.ReadLong();
-                        crafterName = pkg.ReadString();
-                    }
-
-                    if (version >= 104) {
-                        int customCount = pkg.ReadInt();
-                        if (customCount < 0 || customCount > MaxItems) { return null; }
-                        for (int c = 0; c < customCount; c++) {
-                            pkg.ReadString();
-                            pkg.ReadString();
-                        }
-                    }
-
-                    if (version >= 105) { pkg.ReadInt(); }    // m_worldLevel
-                    if (version >= 106) { pkg.ReadBool(); }   // m_pickedUp
-
-                    // Vanilla writes "" for an item whose prefab was lost and skips it on load; so do we.
-                    if (string.IsNullOrEmpty(name)) { continue; }
+                    // Vanilla writes "" - or, packed, no prefab at all - for an item whose prefab was lost, and
+                    // skips it on load; so do we.
+                    if (string.IsNullOrEmpty(entry.Prefab)) { continue; }
 
                     Slot slot;
-                    string key = name + "|" + quality;
+                    string key = entry.Key;
                     if (!slots.TryGetValue(key, out slot)) {
-                        slot = new Slot { Prefab = name, Quality = quality, CrafterId = crafterId, CrafterName = crafterName };
+                        slot = new Slot {
+                            Prefab = entry.Prefab, Quality = entry.Quality,
+                            CrafterId = entry.CrafterId, CrafterName = entry.CrafterName
+                        };
                         slots[key] = slot;
                     }
-                    slot.Qty += stack;
+                    slot.Qty += entry.Qty;
                 }
                 return slots;
             } catch (Exception e) {
@@ -140,6 +131,109 @@ namespace ValheimEnforcer.modules.audit {
                 Logger.LogDebug($"Audit could not parse a container blob: {e.Message}");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// One entry in the layout Valheim wrote up to and including <see cref="ItemVersionAbandonedDN"/>: a
+        /// flat run of fields led by the prefab name. Mirrors Inventory.LoadOld. Null means the entry was not
+        /// plausible, which fails the whole blob.
+        /// </summary>
+        private static Slot ReadFlat(ZPackage pkg, int version) {
+            string name = pkg.ReadString();
+            int stack = pkg.ReadInt();
+            pkg.ReadSingle();      // m_durability
+            pkg.ReadVector2i();    // m_gridPos - a move is not a take, so this is read past deliberately
+            pkg.ReadBool();        // m_equipped
+
+            int quality = 1;
+            if (version >= 101) { quality = pkg.ReadInt(); }
+            if (version >= 102) { pkg.ReadInt(); }   // m_variant
+
+            long crafterId = 0L;
+            string crafterName = "";
+            if (version >= 103) {
+                crafterId = pkg.ReadLong();
+                crafterName = pkg.ReadString();
+            }
+
+            if (version >= 104) {
+                int customCount = pkg.ReadInt();
+                if (customCount < 0 || customCount > MaxItems) { return null; }
+                for (int c = 0; c < customCount; c++) {
+                    pkg.ReadString();
+                    pkg.ReadString();
+                }
+            }
+
+            if (version >= 105) { pkg.ReadInt(); }    // m_worldLevel
+            if (version >= 106) { pkg.ReadBool(); }   // m_pickedUp
+            // Vanilla reads m_cheated for AbandonedDN and again from ChunksNCheats on. Only the first is
+            // reachable here - everything from Smaller up is written in the packed layout instead.
+            if (version == ItemVersionAbandonedDN) { pkg.ReadBool(); }
+
+            return new Slot { Prefab = name, Quality = quality, Qty = stack, CrafterId = crafterId, CrafterName = crafterName };
+        }
+
+        /// <summary>
+        /// One entry in the layout from <see cref="ItemVersionSmaller"/> on, mirroring ItemDrop.ItemData.Load:
+        /// the small fields are single bytes, every field still at its default is elided behind a bit in a flag
+        /// byte, and the prefab arrives as a stable hash rather than as a name.
+        /// </summary>
+        private static Slot ReadPacked(ZPackage pkg, int version) {
+            pkg.ReadInt();      // m_durability, in hundredths
+            pkg.ReadByte();     // m_gridPos.x - a move is not a take, so this is read past deliberately
+            pkg.ReadByte();     // m_gridPos.y
+            pkg.ReadByte();     // m_worldLevel
+
+            byte flags = pkg.ReadByte();
+            int quality = (flags & 4) == 0 ? 1 : pkg.ReadUShort();
+            int stack = (flags & 8) == 0 ? 1 : pkg.ReadUShort();
+            if ((flags & 16) != 0) { pkg.ReadInt(); }   // m_variant
+
+            long crafterId = 0L;
+            string crafterName = "";
+            if ((flags & 32) != 0) {
+                crafterId = pkg.ReadLong();
+                crafterName = pkg.ReadString();
+            }
+
+            // No prefab bit means nothing was recorded to resolve. Vanilla discards such an entry on load, so it
+            // is not part of the contents and must not show up in a diff.
+            int prefabHash = (flags & 64) != 0 ? pkg.ReadInt() : 0;
+
+            if ((flags & 128) != 0) {
+                int customCount = pkg.ReadNumItems();
+                if (customCount < 0 || customCount > MaxItems) { return null; }
+                for (int c = 0; c < customCount; c++) {
+                    pkg.ReadString();
+                    pkg.ReadString();
+                }
+            }
+
+            if (version >= ItemVersionChunksNCheats) { pkg.ReadByte(); }   // m_cheated, as its own flag byte
+
+            return new Slot {
+                Prefab = prefabHash == 0 ? null : NameOf(prefabHash),
+                Quality = quality, Qty = stack, CrafterId = crafterId, CrafterName = crafterName
+            };
+        }
+
+        /// <summary>
+        /// The prefab name behind a stable hash, for the packed layout that no longer records names.
+        ///
+        /// Both lookups are plain dictionary reads - unlike ObjectDB.GetItemPrefab(string) followed by
+        /// Instantiate, which is the cost this whole file exists to avoid - so this stays affordable inside the
+        /// ZDO stream. ObjectDB is asked first because these are items; ZNetScene covers a container holding
+        /// something ObjectDB does not list.
+        ///
+        /// A hash that resolves nowhere still has to produce a stable key, or one unknown item would read as a
+        /// take on one scan and a store on the next, so it falls back to the number it was given.
+        /// </summary>
+        private static string NameOf(int prefabHash) {
+            GameObject prefab = null;
+            if (ObjectDB.instance != null) { ObjectDB.instance.TryGetItemPrefab(prefabHash, out prefab); }
+            if (prefab == null && ZNetScene.instance != null) { prefab = ZNetScene.instance.GetPrefab(prefabHash); }
+            return prefab != null ? prefab.name : "#" + prefabHash;
         }
 
         /// <summary>

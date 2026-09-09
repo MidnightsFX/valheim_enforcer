@@ -9,7 +9,16 @@ namespace ValheimEnforcer.modules.migration {
 
     /// <summary>One inventory entry as it appears on disk, before any prefab resolution.</summary>
     internal sealed class FchItem {
+        /// <summary>
+        /// Set only by the layouts that record a name. From Version.Item.Smaller on the file carries
+        /// <see cref="PrefabHash"/> instead and this is null; exactly one of the two is ever populated.
+        /// </summary>
         internal string PrefabName;
+        /// <summary>
+        /// The prefab's stable hash, for the layouts that no longer write its name. Resolving it needs
+        /// ObjectDB, which is the caller's job - see the class remarks on why this file stays Unity-free.
+        /// </summary>
+        internal int PrefabHash;
         internal int Stack;
         internal float Durability;
         internal Vector2i GridPos;
@@ -42,6 +51,11 @@ namespace ValheimEnforcer.modules.migration {
     /// on prefab resolution. Skipping that step leaves plain managed code that runs headless, and it also reads
     /// strictly more than the game does: vanilla silently drops an item whose prefab no longer resolves.
     ///
+    /// From <c>Version.Item.Smaller</c> the file stopped naming prefabs and records a stable hash instead, so
+    /// reading "more than the game does" no longer extends to those items - the name simply is not in the file.
+    /// The hash is handed to the caller on <see cref="FchItem.PrefabHash"/> rather than resolved here, which is
+    /// what keeps this reader Unity-free.
+    ///
     /// Two deliberate departures from what vanilla does with the same bytes, both because this is a migration
     /// and a wrong answer is worse than no answer:
     ///  - The SHA512 trailer is verified. <c>PlayerProfile.LoadPlayerDataFromDisk</c> reads it and throws it away.
@@ -54,10 +68,21 @@ namespace ValheimEnforcer.modules.migration {
         // rather than guessed at: a added field shifts every subsequent read, and importing a desynced parse
         // would write nonsense into a player's character save.
         private const int ProfileVersionMin = 27;  // Version.IsPlayerVersionCompatible lower bound
-        private const int ProfileVersionMax = 43;
-        private const int PlayerDataVersionMax = 29;  // Version.m_playerDataVersion
-        private const int ItemDataVersionMax = 106;   // Version.m_itemDataVersion
+        private const int ProfileVersionMax = 46;     // Version.c_PlayerVersion (Player.DeepNorth)
+        private const int PlayerDataVersionMax = 33;  // Version.c_PlayerDataVersion (PlayerData.ChunkedNorth)
+        private const int ItemDataVersionMax = 109;   // Version.c_ItemDataVersion (Item.ChunksNCheats)
         private const int SkillsVersionMax = 2;
+
+        // Individual layout milestones the readers below branch on, by their Version.cs names. Valheim shipped
+        // several of these as a one-off version that a later one re-adopted, so they are compared for equality
+        // as well as for "at least", exactly as the game's own loaders do.
+        private const int ProfileVersionAbandonedDN = 44;    // Version.Player.AbandonedDN
+        private const int ProfileVersionDeepNorth = 46;      // Version.Player.DeepNorth
+        private const int PlayerDataVersionAbandonedDN = 31; // Version.PlayerData.AbandonedDN
+        private const int PlayerDataVersionChunkedNorth = 33;// Version.PlayerData.ChunkedNorth
+        private const int ItemVersionAbandonedDN = 107;      // Version.Item.AbandonedDN - adds m_cheated
+        private const int ItemVersionSmaller = 108;          // Version.Item.Smaller - the packed layout starts here
+        private const int ItemVersionChunksNCheats = 109;    // Version.Item.ChunksNCheats - m_cheated again
 
         private const int MaxPlausibleHashLength = 1024;
 
@@ -136,7 +161,27 @@ namespace ValheimEnforcer.modules.migration {
                 throw new InvalidDataException($"player profile version {version} is newer than this build understands ({ProfileVersionMax}); the mod needs rebuilding against the current game");
             }
 
-            if (version >= 38) {
+            // DeepNorth moved every stat map up here and made the whole block per-profile: an outer loop over
+            // profiles, each holding its stat floats followed by nine string->float maps, one of which
+            // (enemy stats) is itself a list of maps. Before that the block was a flat run of floats and the
+            // maps lived after the start seed, which is where the tail below still reads them from.
+            if (version >= ProfileVersionDeepNorth || version == ProfileVersionAbandonedDN) {
+                int statCount = pkg.ReadInt();
+                int profileCount = pkg.ReadInt();
+                for (int i = 0; i < profileCount; i++) {
+                    for (int s = 0; s < statCount; s++) { pkg.ReadSingle(); }
+                    SkipStringFloatMap(pkg);                  // known worlds
+                    SkipStringFloatMap(pkg);                  // known world keys
+                    SkipStringFloatMap(pkg);                  // known commands
+                    int enemyGroups = pkg.ReadInt();
+                    for (int g = 0; g < enemyGroups; g++) { SkipStringFloatMap(pkg); }
+                    SkipStringFloatMap(pkg);                  // item pickup stats
+                    SkipStringFloatMap(pkg);                  // item craft stats
+                    SkipStringFloatMap(pkg);                  // pickable stats
+                    SkipStringFloatMap(pkg);                  // food eaten stats
+                    SkipStringFloatMap(pkg);                  // pieces placed stats
+                }
+            } else if (version >= 38) {
                 int statCount = pkg.ReadInt();
                 for (int i = 0; i < statCount; i++) { pkg.ReadSingle(); }
             } else if (version >= 28) {
@@ -164,13 +209,17 @@ namespace ValheimEnforcer.modules.migration {
             if (version >= 38) {
                 pkg.ReadBool();  // m_usedCheats
                 pkg.ReadLong();  // date created
-                SkipStringFloatMap(pkg); // known worlds
-                SkipStringFloatMap(pkg); // known world keys
-                SkipStringFloatMap(pkg); // known commands
-                if (version >= 42) {
-                    SkipStringFloatMap(pkg); // enemy stats
-                    SkipStringFloatMap(pkg); // item pickup stats
-                    SkipStringFloatMap(pkg); // item craft stats
+                // These maps moved into the per-profile stats block above as of DeepNorth, so they are only
+                // still here on the versions that predate it.
+                if (version < ProfileVersionDeepNorth && version != ProfileVersionAbandonedDN) {
+                    SkipStringFloatMap(pkg); // known worlds
+                    SkipStringFloatMap(pkg); // known world keys
+                    SkipStringFloatMap(pkg); // known commands
+                    if (version >= 42) {
+                        SkipStringFloatMap(pkg); // enemy stats
+                        SkipStringFloatMap(pkg); // item pickup stats
+                        SkipStringFloatMap(pkg); // item craft stats
+                    }
                 }
             }
 
@@ -211,7 +260,11 @@ namespace ValheimEnforcer.modules.migration {
             if (version < 19 || version >= 21) { SkipStringList(pkg); } // shown tutorials
             if (version >= 6) { SkipStringList(pkg); }                  // uniques
             if (version >= 9) { SkipStringList(pkg); }                  // trophies
-            if (version >= 18) {
+            // ChunkedNorth switched known biomes from the Heightmap.Biome enum to biome names, so the element
+            // width changes with it - four bytes per entry before, a length-prefixed string after.
+            if (version >= PlayerDataVersionChunkedNorth || version == PlayerDataVersionAbandonedDN) {
+                SkipStringList(pkg);
+            } else if (version >= 18) {
                 int biomes = pkg.ReadInt();
                 for (int i = 0; i < biomes; i++) { pkg.ReadInt(); }
             }
@@ -232,48 +285,100 @@ namespace ValheimEnforcer.modules.migration {
                     string key = pkg.ReadString();
                     profile.CustomData[key] = pkg.ReadString();
                 }
-                // stamina / max eitr / eitr follow, and are not modelled by the character store.
+                // stamina / max eitr / eitr follow, then the build UI blob on ChunkedNorth and AbandonedDN.
+                // None of it is modelled by the character store, and nothing is read after this, so the block
+                // is left unwalked rather than skipped field by field.
             }
         }
 
-        // Mirrors Inventory.Load.
+        // Mirrors Inventory.Load, which since Version.Item.Smaller picks between two entry layouts and two
+        // widths of length prefix.
         private static void ReadInventory(ZPackage pkg, FchProfile profile) {
             int version = pkg.ReadInt();
             if (version > ItemDataVersionMax) {
                 throw new InvalidDataException($"inventory version {version} is newer than this build understands ({ItemDataVersionMax}); the mod needs rebuilding against the current game");
             }
-            int count = pkg.ReadInt();
+            bool packed = version >= ItemVersionSmaller;
+            int count = packed ? pkg.ReadUShort() : pkg.ReadInt();
 
             for (int i = 0; i < count; i++) {
-                FchItem item = new FchItem {
-                    PrefabName = pkg.ReadString(),
-                    Stack = pkg.ReadInt(),
-                    Durability = pkg.ReadSingle(),
-                    GridPos = pkg.ReadVector2i(),
-                    Equipped = pkg.ReadBool()
-                };
-                item.Quality = version >= 101 ? pkg.ReadInt() : 1;
-                item.Variant = version >= 102 ? pkg.ReadInt() : 0;
-                if (version >= 103) {
-                    item.CrafterID = pkg.ReadLong();
-                    item.CrafterName = pkg.ReadString();
-                }
-                if (version >= 104) {
-                    int customEntries = pkg.ReadInt();
-                    for (int c = 0; c < customEntries; c++) {
-                        string key = pkg.ReadString();
-                        string value = pkg.ReadString();
-                        if (item.CustomData == null) { item.CustomData = new Dictionary<string, string>(); }
-                        item.CustomData[key] = value;
-                    }
-                }
-                item.WorldLevel = version >= 105 ? pkg.ReadInt() : 0;
-                if (version >= 106) { pkg.ReadBool(); } // picked up
+                FchItem item = packed ? ReadPackedItem(pkg, version) : ReadFlatItem(pkg, version);
 
-                // An empty prefab name means the item had no drop prefab when it was saved; vanilla discards
-                // these on load too.
-                if (!string.IsNullOrEmpty(item.PrefabName)) { profile.Items.Add(item); }
+                // No prefab means the item had no drop prefab when it was saved; vanilla discards these on
+                // load too.
+                if (!string.IsNullOrEmpty(item.PrefabName) || item.PrefabHash != 0) { profile.Items.Add(item); }
             }
+        }
+
+        // Version.Item 100-107, mirroring Inventory.LoadOld: a flat run of fields led by the prefab name.
+        private static FchItem ReadFlatItem(ZPackage pkg, int version) {
+            FchItem item = new FchItem {
+                PrefabName = pkg.ReadString(),
+                Stack = pkg.ReadInt(),
+                Durability = pkg.ReadSingle(),
+                GridPos = pkg.ReadVector2i(),
+                Equipped = pkg.ReadBool()
+            };
+            item.Quality = version >= 101 ? pkg.ReadInt() : 1;
+            item.Variant = version >= 102 ? pkg.ReadInt() : 0;
+            if (version >= 103) {
+                item.CrafterID = pkg.ReadLong();
+                item.CrafterName = pkg.ReadString();
+            }
+            if (version >= 104) {
+                int customEntries = pkg.ReadInt();
+                for (int c = 0; c < customEntries; c++) {
+                    string key = pkg.ReadString();
+                    string value = pkg.ReadString();
+                    if (item.CustomData == null) { item.CustomData = new Dictionary<string, string>(); }
+                    item.CustomData[key] = value;
+                }
+            }
+            item.WorldLevel = version >= 105 ? pkg.ReadInt() : 0;
+            if (version >= 106) { pkg.ReadBool(); }                       // picked up
+            // Vanilla reads m_cheated for AbandonedDN and again from ChunksNCheats on; only the first of those
+            // is reachable here, since everything from Smaller up is written packed instead.
+            if (version == ItemVersionAbandonedDN) { pkg.ReadBool(); }    // cheated
+
+            return item;
+        }
+
+        // Version.Item 108+, mirroring ItemDrop.ItemData.Load: the small fields are single bytes, every field
+        // still at its default is elided behind a bit in a flag byte, and the prefab is a stable hash. Durability
+        // is a hundredths-of-a-point int rather than a float, and quality and stack are ushorts defaulting to 1.
+        private static FchItem ReadPackedItem(ZPackage pkg, int version) {
+            FchItem item = new FchItem { Durability = pkg.ReadInt() * 0.01f };
+            // Read into locals first: these are three consecutive bytes and the order they come off the stream
+            // in is the whole contract, so it should not rest on C#'s argument evaluation order.
+            int gridX = pkg.ReadByte();
+            int gridY = pkg.ReadByte();
+            item.GridPos = new Vector2i(gridX, gridY);
+            item.WorldLevel = pkg.ReadByte();
+
+            byte flags = pkg.ReadByte();
+            item.Equipped = (flags & 2) != 0;
+            item.Quality = (flags & 4) == 0 ? 1 : pkg.ReadUShort();
+            item.Stack = (flags & 8) == 0 ? 1 : pkg.ReadUShort();
+            item.Variant = (flags & 16) != 0 ? pkg.ReadInt() : 0;
+            if ((flags & 32) != 0) {
+                item.CrafterID = pkg.ReadLong();
+                item.CrafterName = pkg.ReadString();
+            }
+            item.PrefabHash = (flags & 64) != 0 ? pkg.ReadInt() : 0;
+
+            if ((flags & 128) != 0) {
+                int customEntries = pkg.ReadNumItems();
+                for (int c = 0; c < customEntries; c++) {
+                    string key = pkg.ReadString();
+                    string value = pkg.ReadString();
+                    if (item.CustomData == null) { item.CustomData = new Dictionary<string, string>(); }
+                    item.CustomData[key] = value;
+                }
+            }
+
+            if (version >= ItemVersionChunksNCheats) { pkg.ReadByte(); }   // cheated, as its own flag byte
+
+            return item;
         }
 
         // Mirrors Skills.Load. Skill types are deliberately NOT filtered through Skills.IsSkillValid: modded

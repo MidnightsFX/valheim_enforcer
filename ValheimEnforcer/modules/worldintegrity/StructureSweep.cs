@@ -104,11 +104,11 @@ namespace ValheimEnforcer.modules.worldintegrity {
             ZoneSystem zones = ZoneSystem.instance;
             if (zones == null || zones.m_locationInstances == null || zones.m_locationInstances.Count == 0) { return true; }
 
-            Vector2i zone = ZoneSystem.GetZone(pos);
+            Vector2s zone = ZoneSystem.GetZone(pos);
             for (int dx = -1; dx <= 1; dx++) {
                 for (int dy = -1; dy <= 1; dy++) {
                     ZoneSystem.LocationInstance instance;
-                    if (!zones.m_locationInstances.TryGetValue(new Vector2i(zone.x + dx, zone.y + dy), out instance)) { continue; }
+                    if (!zones.m_locationInstances.TryGetValue(new Vector2s(zone.x + dx, zone.y + dy), out instance)) { continue; }
                     if (dx == 0 && dy == 0) { return true; }
                     if (instance.m_location == null) { continue; }
                     float radius = Mathf.Max(instance.m_location.m_exteriorRadius, instance.m_location.m_interiorRadius);

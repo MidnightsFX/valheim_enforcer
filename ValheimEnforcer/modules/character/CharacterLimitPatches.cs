@@ -101,7 +101,7 @@ namespace ValheimEnforcer.modules.character {
         /// and is about to be rejected on version anyway.
         ///
         /// The network version check is the guard against a future Valheim changing this package's layout under
-        /// us. Version.m_networkVersion is a const, so it is baked in at compile time rather than read from the
+        /// us. Version.c_networkVersion is a const, so it is baked in at compile time rather than read from the
         /// game at runtime - that is deliberate and is the whole point: if the wire format changes the number
         /// changes with it, our copy no longer matches, and the rule quietly stops enforcing until the mod is
         /// rebuilt against the new game. Reading the game's live value would defeat this and hand our old
@@ -119,7 +119,7 @@ namespace ValheimEnforcer.modules.character {
                     || version < Version.FirstVersionWithNetworkVersion) {
                     return false;
                 }
-                if (pkg.ReadUInt() != Version.m_networkVersion) {
+                if (pkg.ReadUInt() != Version.c_networkVersion) {
                     return false;                                   // let vanilla report the version mismatch
                 }
                 pkg.ReadVector3();                                  // reference position
