@@ -53,6 +53,23 @@ namespace ValheimEnforcer.common {
         /// <summary>Extra hint for enforcer-help. The real gate is SenderIsAdmin on the server side.</summary>
         internal readonly bool RequiresAdmin;
 
+        /// <summary>
+        /// The command answers a question the caller is entitled to ask without being trusted with anything:
+        /// what the commands are, and what this server makes of the connection they are sitting on. Those run
+        /// for everybody, because the person who most needs them is precisely the person the admin check is
+        /// currently refusing. Never set this on a command that reads or changes anything belonging to the
+        /// server or to another player. ValConfig.AllowPublicDiagnosticCommands closes even these off.
+        /// </summary>
+        internal readonly bool AllowNonAdmin;
+
+        /// <summary>
+        /// The command runs on this machine AND asks the server to run its own half, so the two answers can
+        /// be put side by side. Distinct from <see cref="ServerAuthoritative"/>, where the client does not run
+        /// the command at all and only relays it: here both sides genuinely hold a different piece of the
+        /// answer, which is the whole point of enforcer-whoami.
+        /// </summary>
+        internal readonly bool AlsoRunsOnServer;
+
         internal EnforcerCommand(
             string command,
             string description,
@@ -63,6 +80,8 @@ namespace ValheimEnforcer.common {
             bool serverAuthoritative = false,
             bool requiresAdmin = false,
             bool hideFromHelp = false,
+            bool allowNonAdmin = false,
+            bool alsoRunsOnServer = false,
             string canonical = null,
             params string[] aliases)
             : base(command, description,
@@ -82,6 +101,8 @@ namespace ValheimEnforcer.common {
             HideFromHelp = hideFromHelp;
             ServerAuthoritative = serverAuthoritative;
             RequiresAdmin = requiresAdmin;
+            AllowNonAdmin = allowNonAdmin;
+            AlsoRunsOnServer = alsoRunsOnServer;
 
             // Vanilla asks for the option list before our tabCycle/updateSearch prefixes get a chance to
             // replace it, so the fetcher has to exist and has to be safe when there is no Console yet. The
@@ -92,9 +113,18 @@ namespace ValheimEnforcer.common {
 
             TerminalManager.Register(this);
 
+            // Every argument is named: the constructor is a run of bools, so a parameter added in the middle
+            // would otherwise shift them all silently and an alias would quietly gain or lose a gate.
             foreach (string alias in aliases) {
-                _ = new EnforcerCommand(alias, description, action, area, options, isCheat, serverAuthoritative,
-                    requiresAdmin, hideFromHelp: true, canonical: Canonical);
+                _ = new EnforcerCommand(alias, description, action, area,
+                    options: options,
+                    isCheat: isCheat,
+                    serverAuthoritative: serverAuthoritative,
+                    requiresAdmin: requiresAdmin,
+                    hideFromHelp: true,
+                    allowNonAdmin: allowNonAdmin,
+                    alsoRunsOnServer: alsoRunsOnServer,
+                    canonical: Canonical);
             }
         }
 
@@ -125,10 +155,22 @@ namespace ValheimEnforcer.common {
         internal readonly string[] Args;
         internal readonly TerminalOutput Output;
 
-        internal EnforcerCommandArgs(string[] args, TerminalOutput output) {
+        /// <summary>
+        /// The peer uid this command was relayed from, or 0 when it was typed on this machine. Only a command
+        /// whose answer is about the caller rather than about the world needs it - enforcer-whoami has to
+        /// resolve the connection the question arrived on, because that connection, and not the platform
+        /// account the client believes it has, is what the server's admin check actually reads.
+        /// </summary>
+        internal readonly long Sender;
+
+        internal EnforcerCommandArgs(string[] args, TerminalOutput output, long sender = 0L) {
             Args = args ?? new string[0];
             Output = output;
+            Sender = sender;
         }
+
+        /// <summary>True when this is the server running a command a connected client asked it to run.</summary>
+        internal bool FromNetwork => Sender != 0L;
 
         internal int Length => Args.Length;
 

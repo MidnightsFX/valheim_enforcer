@@ -22,6 +22,7 @@ namespace ValheimEnforcer {
         public static ConfigFile cfg;
         public static ConfigEntry<bool> EnableDebugMode;
         public static ConfigEntry<bool> EnableTerminalColors;
+        public static ConfigEntry<bool> AllowPublicDiagnosticCommands;
         public static ConfigEntry<bool> UpdateLoadedModsOnStartup;
         public static ConfigEntry<bool> AutoAddModsToRequired;
         public static ConfigEntry<string> HashEnforcement;
@@ -230,6 +231,9 @@ namespace ValheimEnforcer {
             // person decides for themselves rather than inheriting the server's preference.
             EnableTerminalColors = BindLocalConfig("Client config", "EnableTerminalColors", true,
                 "Colour the output of this mod's console commands by severity - green for a result, blue for detail lines, amber for a warning, red for a failure. Turn it off if your console theme makes the colours hard to read, or if you are copying output somewhere that would show the markup.");
+
+            AllowPublicDiagnosticCommands = BindServerConfig("Advanced", "AllowPublicDiagnosticCommands", true,
+                "If enabled (the default), the two commands that tell somebody nothing but what they could already work out - 'enforcer-help', which lists the command names, and 'enforcer-whoami', which reports what this server makes of the connection the caller is sitting on - run for any player rather than admins only. This exists because the person who most needs to ask 'why am I not an admin here?' is by definition the person the admin check is refusing, and with the answer locked behind that same check an operator whose id is misspelled in adminlist.txt has no way to find out from in-game. Neither command reads or changes anything belonging to the server or to another player, and enforcer-whoami never names another admin. Turn it off if you would rather players could not see the command list at all; every other command stays admin-only regardless.", advanced: true);
 
             UpdateLoadedModsOnStartup = BindServerConfig("Mods", "UpdateLoadedModsOnStartup", true, "Whether or not the mod configuration file will update its loaded mods once they are detected.");
             AutoAddModsToRequired = BindServerConfig("Mods", "AutoAddModsToRequired", true, "If true, automatically adds mods not found in the optional, admin, or server-only mod lists.");
@@ -1115,7 +1119,10 @@ namespace ValheimEnforcer {
             if (ZNet.instance == null || ZNet.instance.IsServer() == false) { yield break; }
 
             string command = package.ReadString();
-            if (SenderIsAdmin(sender) == false) {
+            // A handful of commands answer only about the caller's own standing and are open to anybody the
+            // operator has not closed them off from - see TerminalManager.OpenToEveryone. Everything else is
+            // admin-only, and this is the check that decides it: the client-side one is only for wording.
+            if (SenderIsAdmin(sender) == false && TerminalManager.OpenToEveryone(command) == false) {
                 Logger.LogWarning($"Rejecting '{command}' from non-admin peer {sender}.");
                 // Answer rather than going quiet, so the sender sees a refusal instead of nothing at all.
                 TerminalOutput refusal = TerminalOutput.Remote(sender);
@@ -1135,8 +1142,8 @@ namespace ValheimEnforcer {
             string[] args = new string[argCount];
             for (int i = 0; i < argCount; i++) { args[i] = package.ReadString(); }
 
-            Logger.LogInfo($"Running '{command}' for admin {PeerHostId(sender)}.");
-            TerminalManager.ExecuteFromNetwork(command, args, TerminalOutput.Remote(sender));
+            Logger.LogInfo($"Running '{command}' for {PeerHostId(sender)}.");
+            TerminalManager.ExecuteFromNetwork(command, args, TerminalOutput.Remote(sender), sender);
             yield break;
         }
 

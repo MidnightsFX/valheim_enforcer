@@ -1,3 +1,17 @@
+**0.23.2**
+---
+```
+- Adds enforcer-whoami: says whether the server treats you as an admin and, when it does not, what to change.
+    - Runs for anybody, admin or not. The person who needs to ask why they are not an admin is by definition
+      the person every other command is refusing, so locking the answer behind the same check left an operator
+      whose id is misspelled in adminlist.txt with nothing to go on from in-game.
+    - Distinguishes "your id was never added" from "your id is in the file but has a trailing space or a byte
+      order mark on it", which look identical from in-game and are the usual cause. Prints the exact line to
+      add or replace.
+- enforcer-help also runs without admin now, which is what the documentation already claimed.
+- Adds AllowPublicDiagnosticCommands (Advanced, on): set it false to make those two admin-only again.
+```
+
 **0.23.1**
 ---
 ```

@@ -736,6 +736,7 @@ Type `enforcer-help` for the list, or `enforcer-help items` for one area of it. 
 | Command | What it does |
 | --- | --- |
 | `enforcer-help` | Lists the commands, grouped by area |
+| `enforcer-whoami` | Says whether the server treats you as an admin, and what to fix if it does not |
 | `enforcer-player-list` | Every account with a save, and the characters under it |
 | `enforcer-items-list` | What has been confiscated from one character |
 | `enforcer-items-return` | Gives confiscated items back |
@@ -749,13 +750,30 @@ Type `enforcer-help` for the list, or `enforcer-help items` for one area of it. 
 | `enforcer-audit-available` | What audit history the server still holds for a player |
 | `enforcer-audit-download` | Saves a player's history to your own machine |
 
-Everything except `enforcer-help` needs `devcommands`, which means being an admin on the server.
+Everything except `enforcer-help` and `enforcer-whoami` needs admin rights on the server. Those two run for anybody, because the person who needs them most is the one being refused everything else; see [When the server does not think you are an admin](#when-the-server-does-not-think-you-are-an-admin). If you would rather ordinary players could not even see the command list, set `AllowPublicDiagnosticCommands` (Advanced) to false and both go back to being admin-only.
 
 They run from the server console and from a connected admin's client alike. From a client, the server does the work and its output comes back into the console you typed in — so a dedicated server, which has no console of its own, is administered entirely from in-game. The server checks admin status itself on arrival, so a client that lies about being one is refused and told so.
 
 Tab completion works past the first argument: tab through the account ids the server actually has, then through that account's characters. `EnableTerminalColors` (on) colours the output by severity and is a local setting, so it is yours rather than the server's.
 
 Older command names — `Enforcer-List-Players`, `Enforcer-Return-Confiscated` and the rest — still work and are listed beside their replacement in `enforcer-help`.
+
+#### When the server does not think you are an admin
+
+Every command above except `enforcer-help` and `enforcer-whoami` is refused with "Only server admins can run …" when the server does not recognise you. Run `enforcer-whoami` — it works whether or not you are an admin, from the console or from chat as `/enforcer-whoami`, and it answers from both ends of the connection:
+
+```
+enforcer-whoami
+```
+
+Your client reports the platform account it is signed in as, and whether this mod's admin gate currently passes. The server then reports the id it actually sees for your connection — which is the one thing that decides anything, and is not always the same string your client knows itself by — whether it treats that id as an admin, and where its `adminlist.txt` lives.
+
+When the answer is no, the server also tells you which of the two cases you are in:
+
+- **Your id is not in the file at all.** It prints the exact line to add.
+- **Your id is in the file but was not accepted.** This is the one that looks like a mystery: the file plainly contains your SteamID and the server still says no. Almost always the line has a trailing space, or an editor saved the file as UTF-16 or left a byte order mark on the first line. The command names how many lines are unusable and prints the exact text to replace yours with.
+
+`adminlist.txt` is re-read within about ten seconds of being saved, so there is no need to restart the server to test a fix. Neither command reveals anything about other players: `enforcer-whoami` reports how many entries the admin list holds and how many of them are malformed, but never names an admin other than you.
 
 #### Restoring user Items
 Someone brought on their priceless Epicloot Askavin cloak? Some Prestine +InfinitePower Jewels? You can restore confiscated items!

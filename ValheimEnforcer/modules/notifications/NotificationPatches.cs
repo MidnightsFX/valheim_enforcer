@@ -104,8 +104,10 @@ namespace ValheimEnforcer.modules.notifications {
                     { "savedData", savedDataText },
                     { "deltaWindow", deltaWindow.ToString() },
                     // The default template uses this as its colour, which is how one template keeps the
-                    // green-on-clean / amber-on-dirty split the hard-coded embed had.
-                    { "statusColor", clean ? "Green" : "Amber" },
+                    // green-on-clean / amber-on-dirty split the hard-coded embed had. It has to be the decimal
+                    // Discord wants, not the name of the colour: the template writes it unquoted, so a word
+                    // here renders `"color": Amber` and Discord refuses the whole document.
+                    { "statusColor", (clean ? Green : Amber).ToString() },
                 });
             }
         }

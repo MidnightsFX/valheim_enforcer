@@ -1,5 +1,4 @@
 ﻿using HarmonyLib;
-using Jotunn.Managers;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -69,17 +68,27 @@ namespace ValheimEnforcer.common {
             // console the admin actually typed into rather than always in the main one.
             responseTerminal = consoleArgs.Context;
 
-            // Admin gate for the local path too. The check below only covers commands relayed to the
-            // server; a command that runs on this client would otherwise be open to anyone. A solo
-            // player or host is always an admin (PlayerIsAdmin is true whenever ZNet.IsServer), a
-            // client only once the server's admin RPC says so.
-            if (SynchronizationManager.Instance.PlayerIsAdmin == false) {
+            // The single admin gate for everything typed on this machine, relayed or not; the server checks
+            // the sender again on arrival for anything that does travel. A solo player or host is always an
+            // admin (PlayerIsAdmin is true whenever ZNet.IsServer), a client only once the server's admin RPC
+            // says so. A command marked open to everyone deliberately skips this - see OpenToEveryone.
+            if (OpenToEveryone(command) == false && LocallyAdmin() == false) {
                 output.Error($"Only server admins can run {command.Canonical}.");
+                // Being refused here is exactly the symptom somebody who believes they ARE an admin reports,
+                // so point at the command that says why rather than leaving them with a flat no. Not when
+                // that command is the one being refused, or when the operator has closed it off - a pointer
+                // to something that will refuse them too is worse than no pointer.
+                if (command.Canonical != WhoAmICommand && OpenToEveryone(WhoAmICommand)) {
+                    output.Detail($"Run {WhoAmICommand} to see what this server makes of your connection.", log: false);
+                }
                 return;
             }
 
             if (command.ServerAuthoritative == false) {
                 Invoke(command, args, output);
+                // A command that holds only half its answer here asks the server for the other half. The
+                // local half has already printed, so the two arrive in the order they were produced.
+                if (command.AlsoRunsOnServer) { AskServerForItsHalf(command, args, output); }
                 return;
             }
 
@@ -94,11 +103,8 @@ namespace ValheimEnforcer.common {
                 Invoke(command, args, output);
                 return;
             }
-            // The client-side check is for a clear message only; the server re-checks the sender either way.
-            if (SynchronizationManager.Instance.PlayerIsAdmin == false) {
-                output.Error($"Only server admins can run {command.Canonical} from a client.");
-                return;
-            }
+            // The admin gate at the top of this method covers the client side; the server re-checks the
+            // sender on arrival either way, and that check is the one that counts.
             ZNetPeer server = ZNet.instance.GetServerPeer();
             if (server == null) {
                 output.Error($"No server connection, so {command.Canonical} cannot be sent.");
@@ -109,22 +115,58 @@ namespace ValheimEnforcer.common {
             ValConfig.ClientCommandRequestRPC.SendPackage(server.m_uid, BuildRequest(command.Canonical, args));
         }
 
-        /// <summary>Server side of the relay. The caller has already established that the sender is an admin.</summary>
-        internal static void ExecuteFromNetwork(string name, string[] args, TerminalOutput output) {
+        /// <summary>
+        /// Sends a command the client has already run here to the server as well, for the half of the answer
+        /// only the server holds. Nothing is relayed from a listen host, which is its own server and has just
+        /// answered both halves itself.
+        /// </summary>
+        private static void AskServerForItsHalf(EnforcerCommand command, string[] args, TerminalOutput output) {
+            if (ZNet.instance == null || ZNet.instance.IsServer()) { return; }
+            ZNetPeer server = ZNet.instance.GetServerPeer();
+            if (server == null) {
+                output.Warning("Not connected to a server, so only the local half of this answer is available.");
+                return;
+            }
+            output.Info($"Asked the server for its side of {command.Canonical}; its answer follows.", log: false);
+            ValConfig.ClientCommandRequestRPC.SendPackage(server.m_uid, BuildRequest(command.Canonical, args));
+        }
+
+        /// <summary>
+        /// Server side of the relay. The caller has already established that the sender is either an admin or
+        /// asking for something <see cref="OpenToEveryone"/> allows anybody to ask.
+        /// </summary>
+        internal static void ExecuteFromNetwork(string name, string[] args, TerminalOutput output, long sender) {
             EnforcerCommand command = Lookup(name);
             // Never dispatch a name the client picked that is not one of ours, and never let the relay reach
             // a command that was not built to run server-side.
-            if (command == null || command.ServerAuthoritative == false) {
+            if (command == null || (command.ServerAuthoritative == false && command.AlsoRunsOnServer == false)) {
                 output.Error($"'{name}' is not a server-runnable ValheimEnforcer command.");
                 output.Flush();
                 return;
             }
-            Invoke(command, args, output);
+            Invoke(command, args, output, sender);
         }
 
-        private static void Invoke(EnforcerCommand command, string[] args, TerminalOutput output) {
+        /// <summary>
+        /// True when a command may run for somebody who is not an admin. Both halves have to agree: the
+        /// command must be built for it, and the server operator must have left the setting on. Asked on the
+        /// client for the wording of a refusal and on the server for the decision itself, so a client whose
+        /// synced copy of the setting is stale changes nothing that matters.
+        /// </summary>
+        internal static bool OpenToEveryone(EnforcerCommand command) {
+            if (command == null || command.AllowNonAdmin == false) { return false; }
+            return ValConfig.AllowPublicDiagnosticCommands == null
+                || ValConfig.AllowPublicDiagnosticCommands.Value;
+        }
+
+        /// <summary>Name-based overload for the RPC handler, which has the wire name and nothing else.</summary>
+        internal static bool OpenToEveryone(string name) {
+            return OpenToEveryone(Lookup(name));
+        }
+
+        private static void Invoke(EnforcerCommand command, string[] args, TerminalOutput output, long sender = 0L) {
             try {
-                command.Action(new EnforcerCommandArgs(args, output));
+                command.Action(new EnforcerCommandArgs(args, output, sender));
             } catch (Exception e) {
                 // A command that throws must not take the console or the RPC handler with it, and the admin
                 // must not be left staring at a console that printed nothing.
