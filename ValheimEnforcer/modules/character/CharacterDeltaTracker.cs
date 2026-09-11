@@ -51,7 +51,8 @@ namespace ValheimEnforcer.modules.character {
         }
 
         // Runs inside inventory mutation, so it stays trivial - the real work happens on the next Update tick.
-        private static void MarkBaselineDirty() {
+        // Internal so a change that never touches the inventory (ForsakenPower) can wake the flush the same way.
+        internal static void MarkBaselineDirty() {
             BaselineDirty = true;
             DirtySince = Time.unscaledTime;
         }
@@ -200,9 +201,14 @@ internal class DeltaChangeTracker : MonoBehaviour {
             }
         }
 
+        // Selecting a power at a boss stone never touches the inventory; ForsakenPower's SetGuardianPower postfix is
+        // what marks the tracker dirty for it. Null when the power is not being tracked.
+        string currentGuardianPower = ForsakenPower.Capture(Player.m_localPlayer);
+        bool guardianPowerChanged = currentGuardianPower != null && currentGuardianPower != CharacterManager.PlayerCharacter.GuardianPower;
+
         // No delta changes need to be sent
         // Skills are a lower priority update and will get updated when the next item, or custom data change happens
-        if (itemDeltas.Count == 0 && customDataModifications.Count == 0 && customDataRemovedKeys.Count == 0) { return; }
+        if (itemDeltas.Count == 0 && customDataModifications.Count == 0 && customDataRemovedKeys.Count == 0 && !guardianPowerChanged) { return; }
         Logger.LogDebug("Changes found, syncing deltas.");
 
         // Refresh the in-memory baseline first, and unconditionally. This used to sit behind a server-peer check,
@@ -218,6 +224,7 @@ internal class DeltaChangeTracker : MonoBehaviour {
         // dropped inside this method, so the two sharing one dictionary cannot outlive the flush.
         var skillLevels = Player.m_localPlayer.GetSkills().GetSkillList().ToDictionary(s => s.m_info.m_skill, s => s.m_level);
         CharacterManager.PlayerCharacter.SkillLevels = skillLevels;
+        CharacterManager.PlayerCharacter.GuardianPower = currentGuardianPower;
 
         Dictionary<string, PackedStatusEffect> currentActiveEffects = new Dictionary<string, PackedStatusEffect>();
         foreach (StatusEffect se in Player.m_localPlayer.GetSEMan().GetStatusEffects()) {
@@ -250,6 +257,7 @@ internal class DeltaChangeTracker : MonoBehaviour {
             PlayerCustomDataModifications = customDataModifications,
             RemovedCustomDataKeys = customDataRemovedKeys,
             ActiveCharacterEffects = currentActiveEffects,
+            GuardianPower = currentGuardianPower,
         };
 
         ZPackage package = new ZPackage();

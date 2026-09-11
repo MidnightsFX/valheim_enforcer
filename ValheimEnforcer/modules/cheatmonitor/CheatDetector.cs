@@ -100,16 +100,11 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// enumeration is used regardless of catalog size; the cost here is the syscall, not the
         /// string matching.
         /// </summary>
-        internal static List<CheatToolDetection> ScanProcesses(List<CheatToolSignature> signatures, bool genericTrainers) {
+        internal static List<CheatToolDetection> ScanProcesses(List<CheatToolSignature> signatures, bool genericTrainers, bool includeElevated) {
             List<CheatToolDetection> found = new List<CheatToolDetection>();
             StallWatch timer = StallWatch.StartBackground("Cheat scan: process enumeration");
-            Process[] procs = null;
             try {
-                procs = Process.GetProcesses();
-                foreach (Process p in procs) {
-                    string name;
-                    // ProcessName throws for processes that exit between enumeration and access.
-                    try { name = p.ProcessName ?? ""; } catch { continue; }
+                foreach (string name in RunningProcessNames(includeElevated)) {
                     if (name.Length == 0 || CheatToolCatalog.IsIgnored(name)) { continue; }
 
                     foreach (CheatToolSignature sig in signatures) {
@@ -125,15 +120,80 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             } catch (Exception e) {
                 Logger.LogDebug($"CheatDetector.ScanProcesses failed: {e.Message}");
             } finally {
+                timer.Stop();
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// The names of the running processes, without the ".exe" suffix.
+        ///
+        /// Process.GetProcesses cannot be trusted for this under Unity's Mono. Mono builds each entry by opening the
+        /// process with PROCESS_ALL_ACCESS and silently leaves out every one it cannot open - which, for a game running
+        /// as an ordinary user, is every program run as administrator and every service: about a third of the
+        /// processes on a typical desktop. Any catalog tool run elevated was invisible to this scan, whatever the
+        /// catalog said.
+        ///
+        /// A Toolhelp snapshot lists every process by image name without opening any of them, so there is nothing to
+        /// be refused. It is also one syscall where the Mono route was an OpenProcess and a read of the target's memory
+        /// per process.
+        /// </summary>
+        private static IEnumerable<string> RunningProcessNames(bool includeElevated) {
+            // Not a Unity API, so it is safe to read from the worker thread.
+            bool windows = Environment.OSVersion.Platform == PlatformID.Win32NT;
+            return windows && includeElevated ? NativeProcessNames() : ManagedProcessNames();
+        }
+
+        private static IEnumerable<string> NativeProcessNames() {
+            IntPtr snapshot = NativeWin32.CreateToolhelp32Snapshot(NativeWin32.TH32CS_SNAPPROCESS, 0);
+            if (snapshot == NativeWin32.InvalidHandleValue) {
+                Logger.LogDebug("CreateToolhelp32Snapshot failed; falling back to the managed process list.");
+                return ManagedProcessNames();
+            }
+
+            List<string> names = new List<string>();
+            try {
+                NativeWin32.PROCESSENTRY32W entry = new NativeWin32.PROCESSENTRY32W();
+                entry.dwSize = (uint)Marshal.SizeOf(typeof(NativeWin32.PROCESSENTRY32W));
+                // There is always at least System, so a first call that fails means the entry itself was refused (a
+                // struct size the OS does not accept), not an empty machine. Fall back to the old list rather than
+                // report nothing running at all.
+                if (!NativeWin32.Process32FirstW(snapshot, ref entry)) {
+                    Logger.LogDebug($"Process32First failed ({Marshal.GetLastWin32Error()}); falling back to the managed process list.");
+                    return ManagedProcessNames();
+                }
+                do {
+                    string exe = entry.szExeFile ?? "";
+                    names.Add(exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? exe.Substring(0, exe.Length - 4) : exe);
+                } while (NativeWin32.Process32NextW(snapshot, ref entry));
+            } finally {
+                NativeWin32.CloseHandle(snapshot);
+            }
+            return names;
+        }
+
+        /// <summary>
+        /// The original implementation, kept for anything that is not Windows and for when ScanElevatedProcesses is off.
+        /// On Windows under Mono it is missing every process the game cannot open; see RunningProcessNames.
+        /// </summary>
+        private static IEnumerable<string> ManagedProcessNames() {
+            List<string> names = new List<string>();
+            Process[] procs = null;
+            try {
+                procs = Process.GetProcesses();
+                foreach (Process p in procs) {
+                    // ProcessName throws for processes that exit between enumeration and access.
+                    try { names.Add(p.ProcessName ?? ""); } catch { }
+                }
+            } finally {
                 // Process objects hold OS handles; dispose them so the periodic scan does not leak.
                 if (procs != null) {
                     foreach (Process p in procs) {
                         try { p.Dispose(); } catch { }
                     }
                 }
-                timer.Stop();
             }
-            return found;
+            return names;
         }
 
         /// <summary>
@@ -398,6 +458,37 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
             [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
             public static extern bool CheckRemoteDebuggerPresent(IntPtr hProcess, ref bool isDebuggerPresent);
+
+            // Process enumeration, used instead of Process.GetProcesses - see RunningProcessNames for why.
+            public const uint TH32CS_SNAPPROCESS = 0x00000002;
+            public static readonly IntPtr InvalidHandleValue = new IntPtr(-1);
+
+            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+            public struct PROCESSENTRY32W {
+                public uint dwSize;
+                public uint cntUsage;
+                public uint th32ProcessID;
+                public IntPtr th32DefaultHeapID;
+                public uint th32ModuleID;
+                public uint cntThreads;
+                public uint th32ParentProcessID;
+                public int pcPriClassBase;
+                public uint dwFlags;
+                [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+                public string szExeFile;
+            }
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            public static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+            public static extern bool Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+            public static extern bool Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+            [DllImport("kernel32.dll", SetLastError = true)]
+            public static extern bool CloseHandle(IntPtr hObject);
         }
 
         internal class CheatDetectorBehaviour : MonoBehaviour {
@@ -571,17 +662,18 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 string policyKey = $"{CheatToolCatalog.PolicyKey()}|{sessionGeneration}";
                 int phase = scanPhase++ % 3;
                 bool scanModules = ValConfig.ScanLoadedModules.Value;
+                bool scanElevated = ValConfig.ScanElevatedProcesses.Value;
                 bool scanWindows = ValConfig.ScanWindowTitles.Value
                     && (Application.platform == RuntimePlatform.WindowsPlayer
                         || Application.platform == RuntimePlatform.WindowsEditor);
 
                 // None of the three vectors touch a Unity object, so they belong off the main thread.
-                // Process.GetProcesses and Process.Modules are the expensive ones - the latter reads a
-                // file-version resource per loaded module, and a modded install carries hundreds.
+                // Process and module enumeration are the expensive ones: blocking syscalls whose cost
+                // grows with what is running and, on a modded install, with the hundreds of modules loaded.
                 scanTask = Task.Run(() => {
                     switch (phase) {
                         case 0:
-                            return ScanProcesses(signatures, genericTrainers);
+                            return ScanProcesses(signatures, genericTrainers, scanElevated);
                         case 1:
                             return scanModules ? ScanLoadedModules(signatures, policyKey) : new List<CheatToolDetection>();
                         default:

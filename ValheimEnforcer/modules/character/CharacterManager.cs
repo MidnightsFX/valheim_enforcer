@@ -60,6 +60,7 @@ namespace ValheimEnforcer.modules.character {
         internal static void ResetServerCharacterState() {
             ServerCharacter = ServerCharacterState.Unknown;
             JoinValidationPending = false;
+            MapExploration.CancelPending();
             // Invalidates any JoinGate coroutine still running from the session being torn down. Coroutines
             // live on a DontDestroyOnLoad object, so nothing else stops one - and a leftover coroutine would
             // otherwise clear the NEXT session's pending flag, or run a duplicate validation against a
@@ -289,6 +290,7 @@ namespace ValheimEnforcer.modules.character {
                     Name = PlayerName,
                     HostID = playerID,
                     SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level),
+                    GuardianPower = ForsakenPower.Capture(__instance),
                     ConfiscatedItems = null,
                     LastDisconnect = lastDisconnect
                 };
@@ -316,6 +318,7 @@ namespace ValheimEnforcer.modules.character {
                 Logger.LogDebug($"Existing character data found for player {PlayerName} with ID {playerID}. Updating character data with current player information.");
                 savableChar.LastDisconnect = lastDisconnect;
                 savableChar.SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
+                savableChar.GuardianPower = ForsakenPower.Capture(__instance);
                 Logger.LogDebug($"Updated player skills for {PlayerName} with ID {playerID}.");
                 if (ValConfig.PreventExternalCustomDataChanges.Value) {
                     savableChar.PlayerCustomData = CompatCustomData.SnapshotForTracking(__instance.m_customData);
@@ -400,6 +403,9 @@ namespace ValheimEnforcer.modules.character {
 
             if (isNewCharacter) {
                 savableChar = BuildNewCharacter(player, playerID, PlayerName);
+                // Not part of BuildNewCharacter: the map is not in the character record, and unlike everything that
+                // is, a wrong call cannot be undone - so MapExploration makes its own, stricter, decision.
+                MapExploration.ResetForNewCharacter(PlayerName);
             }
 
             // Base enforcement runs on every join. On a *dirty* reconnect the server save can be up to one
@@ -448,6 +454,11 @@ namespace ValheimEnforcer.modules.character {
                 });
             }
             Logger.LogDebug($"Validated player skills.");
+
+            // A new character's power was already decided by BuildNewCharacter.
+            if (!isNewCharacter) {
+                ForsakenPower.RestoreOnJoin(player, savableChar);
+            }
 
             // Custom data is decided twice, and this is the second time. The first is the Player.Load postfix
             // (CharacterPatches.LoadPlayerCustomData), which runs inside Game.SpawnPlayer - before this - and so
@@ -519,6 +530,8 @@ namespace ValheimEnforcer.modules.character {
                 skill.m_accumulator = 0;
             }
 
+            ForsakenPower.ApplyRecord(player, sanitized, "Server first-save enforcement");
+
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
                 player.m_customData = CompatCustomData.ApplyToPlayer(sanitized.PlayerCustomData, player.m_customData);
             }
@@ -565,6 +578,7 @@ namespace ValheimEnforcer.modules.character {
                 Name = playerName,
                 HostID = playerID,
                 SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level),
+                GuardianPower = ForsakenPower.Capture(player),
             };
             foreach (ItemDrop.ItemData item in player.GetInventory().GetAllItems().ToList()) {
                 character.AddItemToPlayerItems(item);
@@ -585,6 +599,10 @@ namespace ValheimEnforcer.modules.character {
             // and the zeros would be gone.
             if (policy.ZeroSkills) {
                 ZeroLiveSkills(player, character);
+            }
+            // Same reasoning: Apply only rewrote the record, and only when tracking put a power in it at all.
+            if (policy.ClearGuardianPower) {
+                ForsakenPower.StripLive(player, character.Name);
             }
 
             // The live inventory still holds everything; ReconcilePlayerToCharacter strips it down to what the
@@ -671,6 +689,7 @@ namespace ValheimEnforcer.modules.character {
             }
             // Vanilla has already applied the death skill penalty and removed every status effect by this point.
             savableChar.SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
+            savableChar.GuardianPower = ForsakenPower.Capture(player);
             savableChar.ActiveCharacterEffects.Clear();
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
                 savableChar.PlayerCustomData = CompatCustomData.SnapshotForTracking(player.m_customData);
@@ -696,6 +715,7 @@ namespace ValheimEnforcer.modules.character {
             PlayerCharacter.PlayerItems.Clear();
             PlayerCharacter.ActiveCharacterEffects.Clear();
             PlayerCharacter.SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
+            PlayerCharacter.GuardianPower = ForsakenPower.Capture(player);
             PersistAndPushCharacter(PlayerCharacter.HostID, PlayerCharacter);
         }
 

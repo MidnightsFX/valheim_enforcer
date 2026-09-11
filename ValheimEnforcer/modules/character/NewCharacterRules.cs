@@ -10,8 +10,8 @@ namespace ValheimEnforcer.modules.character {
     /// What "this character has never been here before" means, in one place.
     ///
     /// A character arriving for the first time may have been played anywhere - a solo world, another server -
-    /// and everything it is carrying was granted by something this server never saw. The three NewCharacter*
-    /// settings say how much of that to keep. Those rules are applied twice, deliberately:
+    /// and everything it is carrying was granted by something this server never saw. The NewCharacter* settings
+    /// say how much of that to keep. Those rules are applied twice, deliberately:
     ///
     ///  - on the client, at join, because that is the only place with a live Player whose inventory and skills
     ///    can actually be changed; and
@@ -36,13 +36,14 @@ namespace ValheimEnforcer.modules.character {
             internal bool ZeroSkills;
             internal bool StripItems;
             internal bool ClearCustomData;
+            internal bool ClearGuardianPower;
             internal bool ConfiscateUnidentifiable;
             internal HashSet<string> StartingPrefabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             /// <summary>False when every rule is off, in which case there is nothing to apply and the server
             /// side never needs to be told about a first save at all.</summary>
             internal bool AnyEnabled {
-                get { return ZeroSkills || StripItems || ClearCustomData; }
+                get { return ZeroSkills || StripItems || ClearCustomData || ClearGuardianPower; }
             }
         }
 
@@ -54,6 +55,7 @@ namespace ValheimEnforcer.modules.character {
                 // Nested under PreventExternalCustomDataChanges the same way the client's clear always has
                 // been: an admin who is not tracking custom data at all has not asked us to police it.
                 ClearCustomData = ValConfig.PreventExternalCustomDataChanges.Value && ValConfig.newCharacterClearCustomData.Value,
+                ClearGuardianPower = ValConfig.NewCharacterClearForsakenPower.Value,
                 ConfiscateUnidentifiable = ValConfig.ConfiscateUnidentifiableItems.Value,
                 StartingPrefabs = StartingPrefabs(),
             };
@@ -78,10 +80,11 @@ namespace ValheimEnforcer.modules.character {
             internal int ItemsRemoved;
             internal int SkillsZeroed;
             internal bool CustomDataCleared;
+            internal bool GuardianPowerCleared;
             internal bool EffectsCleared;
 
             internal bool Changed {
-                get { return ItemsRemoved > 0 || SkillsZeroed > 0 || CustomDataCleared || EffectsCleared; }
+                get { return ItemsRemoved > 0 || SkillsZeroed > 0 || CustomDataCleared || GuardianPowerCleared || EffectsCleared; }
             }
 
             internal string Describe() {
@@ -89,6 +92,7 @@ namespace ValheimEnforcer.modules.character {
                 if (ItemsRemoved > 0) { parts.Add($"{ItemsRemoved} item(s) confiscated"); }
                 if (SkillsZeroed > 0) { parts.Add($"{SkillsZeroed} skill(s) zeroed"); }
                 if (CustomDataCleared) { parts.Add("custom data cleared"); }
+                if (GuardianPowerCleared) { parts.Add("forsaken power cleared"); }
                 if (EffectsCleared) { parts.Add("status effects cleared"); }
                 return parts.Count == 0 ? "nothing to do" : string.Join(", ", parts.ToArray());
             }
@@ -136,10 +140,20 @@ namespace ValheimEnforcer.modules.character {
                 character.PlayerItems = kept;
             }
 
-            // A character that arrives buffed was buffed somewhere else. Cleared whenever any rule is on,
-            // rather than under a fourth setting: there is no coherent policy where the items and skills a
-            // solo world granted are removed but the food and rested bonuses it granted are kept.
-            if (policy.AnyEnabled && character.ActiveCharacterEffects != null && character.ActiveCharacterEffects.Count > 0) {
+            // Only a record that tracks the power can carry one to clear. With PreventExternalForsakenPowerChanges
+            // off the field is null, and the live power is cleared on the client regardless - see
+            // CharacterManager.BuildNewCharacter.
+            if (policy.ClearGuardianPower && !string.IsNullOrEmpty(character.GuardianPower)) {
+                character.GuardianPower = "";
+                result.GuardianPowerCleared = true;
+            }
+
+            // A character that arrives buffed was buffed somewhere else. Cleared whenever an item, skill or
+            // custom data rule is on, rather than under a setting of its own: there is no coherent policy where
+            // the items and skills a solo world granted are removed but the food and rested bonuses it granted
+            // are kept. The Forsaken Power rule is deliberately not one of them - it answers a narrower question,
+            // and switching it on by itself should not start stripping food.
+            if ((policy.ZeroSkills || policy.StripItems || policy.ClearCustomData) && character.ActiveCharacterEffects != null && character.ActiveCharacterEffects.Count > 0) {
                 character.ActiveCharacterEffects.Clear();
                 result.EffectsCleared = true;
             }

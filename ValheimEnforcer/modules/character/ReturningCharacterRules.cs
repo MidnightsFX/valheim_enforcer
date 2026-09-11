@@ -10,7 +10,8 @@ namespace ValheimEnforcer.modules.character {
     ///
     /// On join the client validates its live inventory against the stored character
     /// (<see cref="CharacterManager.LoadAndValidatePlayer"/>): items the stored save does not account for are
-    /// confiscated, skills above the stored level are clamped, custom data is reset to the stored copy. That is
+    /// confiscated, skills above the stored level are clamped, custom data and the Forsaken Power are reset to the
+    /// stored copy. That is
     /// exactly the enforcement a modified client skips, then uploads the un-validated result as the new
     /// authoritative save. This re-runs the same decisions on the server, against the stored character, on the
     /// first full save of the session - so the documented Player Sync rules hold regardless of what the client
@@ -32,10 +33,11 @@ namespace ValheimEnforcer.modules.character {
             internal bool RemoveUntracked;      // RemoveNontrackedItemsFromJoiningPlayers
             internal bool ClampSkills;          // PreventExternalSkillRaises
             internal bool ResetCustomData;      // PreventExternalCustomDataChanges
+            internal bool ResetGuardianPower;   // PreventExternalForsakenPowerChanges
             internal bool LenientDirtyRemoval;  // ItemRemovalForDirtyReconnection
 
             internal bool AnyEnabled {
-                get { return RemoveUntracked || ClampSkills || ResetCustomData; }
+                get { return RemoveUntracked || ClampSkills || ResetCustomData || ResetGuardianPower; }
             }
         }
 
@@ -45,6 +47,7 @@ namespace ValheimEnforcer.modules.character {
                 RemoveUntracked = ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value,
                 ClampSkills = ValConfig.PreventExternalSkillRaises.Value,
                 ResetCustomData = ValConfig.PreventExternalCustomDataChanges.Value,
+                ResetGuardianPower = ValConfig.PreventExternalForsakenPowerChanges.Value,
                 LenientDirtyRemoval = ValConfig.ItemRemovalForDirtyReconnection.Value,
             };
         }
@@ -53,9 +56,10 @@ namespace ValheimEnforcer.modules.character {
             internal int ItemsConfiscated;
             internal int SkillsClamped;
             internal bool CustomDataReset;
+            internal bool GuardianPowerReset;
 
             internal bool Changed {
-                get { return ItemsConfiscated > 0 || SkillsClamped > 0 || CustomDataReset; }
+                get { return ItemsConfiscated > 0 || SkillsClamped > 0 || CustomDataReset || GuardianPowerReset; }
             }
 
             internal string Describe() {
@@ -63,6 +67,7 @@ namespace ValheimEnforcer.modules.character {
                 if (ItemsConfiscated > 0) { parts.Add($"{ItemsConfiscated} item(s) confiscated"); }
                 if (SkillsClamped > 0) { parts.Add($"{SkillsClamped} skill(s) clamped"); }
                 if (CustomDataReset) { parts.Add("custom data reset"); }
+                if (GuardianPowerReset) { parts.Add("forsaken power reset"); }
                 return parts.Count == 0 ? "nothing to do" : string.Join(", ", parts.ToArray());
             }
         }
@@ -134,6 +139,14 @@ namespace ValheimEnforcer.modules.character {
                     incoming.PlayerCustomData = storedCopy;
                     result.CustomDataReset = true;
                 }
+            }
+
+            // Forsaken Power reset to the one this character last had selected here. A stored null is a save from
+            // before tracking was on, with nothing to reset to, so the incoming power is adopted - the same call the
+            // client makes (ForsakenPower.RestoreOnJoin), so the two sides agree on the baseline.
+            if (policy.ResetGuardianPower && stored.GuardianPower != null && incoming.GuardianPower != stored.GuardianPower) {
+                incoming.GuardianPower = stored.GuardianPower;
+                result.GuardianPowerReset = true;
             }
 
             return result;

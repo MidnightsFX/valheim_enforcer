@@ -23,6 +23,8 @@ Server saved character progression lock. All of the following features are confi
 - Character progress is saved on the server
 - Prevents characters from bringing untracked items onto the server
 - Prevents characters from raising skills externally
+- Optionally holds each character's Forsaken Power to the one they selected on this server, and clears it on a character's first join
+- Optionally gives a character joining for the first time a blank map of the world, so a map uncovered in a copy of it elsewhere does not come with them
 - Optionally limits each account to a single character, with an exemption list ([One Character Per Account](#one-character-per-account))
 - Imports existing characters from ServerCharacters so players migrate without losing anything ([Migrating from ServerCharacters](#migrating-from-servercharacters))
 
@@ -218,11 +220,13 @@ Clients are checked against a catalog of known cheat tools across three vectors:
 
 | Vector | What it looks at | Why it exists |
 | --- | --- | --- |
-| Process | Names of running programs | Catches the tool while it is open |
+| Process | Names of running programs, including ones run as administrator and background services | Catches the tool while it is open |
 | Module | DLLs loaded into Valheim itself | Sees a cheat that already injected and then closed its launcher, and survives renaming the tool |
 | Window | Window classes and titles | Catches tools renamed to dodge the process check (a "Cheat Engine" window title does not change when you rename the exe) |
 
-Detected by default: **WeMod / Wand / Infinity**, **Cheat Engine** (including the `magic-engine` fork and injected speedhack/DBK modules), **ArtMoney** (SE and Pro), **PLITCH**, **Speed Gear**, **Squalr**, **WPE Pro**, generic trainers such as FLiNG and Cheat Happens, and the loaders used to deliver Valheim cheats — **ValheimTooler**, **ValHack**, **Valheim Mod Menu**, **SharpMonoInjector**, **Xenos** and **Extreme Injector**.
+When Valheim's own runtime lists processes, it silently leaves out anything it is not allowed to open. That covers every program started as administrator and every background service, roughly a third of what runs on a typical desktop. On Windows the process scan therefore reads names from a system snapshot, which needs no access to the processes themselves. `ScanElevatedProcesses` (Advanced, on) switches back to the old list.
+
+Detected by default: **WeMod / Wand / Infinity** (the app, its auxiliary service, the `TrainerHost` injector, and the trainer DLLs it loads into the game), **Cheat Engine** (including the `magic-engine` fork and injected speedhack/DBK modules), **ArtMoney** (SE and Pro), **PLITCH**, **Speed Gear**, **Squalr**, **WPE Pro**, generic trainers such as FLiNG and Cheat Happens, and the loaders used to deliver Valheim cheats — **ValheimTooler**, **ValHack**, **Valheim Mod Menu**, **SharpMonoInjector**, **Xenos** and **Extreme Injector**.
 
 Tools with no purpose other than cheating (the loaders and injectors above) are banned on sight. Everything else follows `ActionOnDetection`, which defaults to `Kick`. The auto-ban decision is made by the *server* from its own catalog — a client only ever reports what it saw, so a tampered client cannot get another player banned.
 

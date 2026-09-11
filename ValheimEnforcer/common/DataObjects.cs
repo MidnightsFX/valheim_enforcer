@@ -705,6 +705,14 @@ namespace ValheimEnforcer.common {
             public List<string> RemovedCustomDataKeys { get; set; } = new List<string>();
             public Dictionary<Skills.SkillType, float> SkillLevels { get; set; } = new Dictionary<Skills.SkillType, float>();
             public Dictionary<string, PackedStatusEffect> ActiveCharacterEffects { get; set; } = new Dictionary<string, PackedStatusEffect>();
+
+            /// <summary>
+            /// The Forsaken Power the sender has selected, or null when it is not reporting one - tracking is off,
+            /// or the sender predates it. Null leaves the stored value alone; the empty string is a real value
+            /// meaning "no power selected". See <see cref="Character.GuardianPower"/>.
+            /// </summary>
+            [DefaultValue(null)]
+            public string GuardianPower { get; set; }
         }
 
         public class CharacterSaveData {
@@ -720,6 +728,15 @@ namespace ValheimEnforcer.common {
             public string HostID { get; set; }
             public DisconnectionState LastDisconnect { get; set; } = DisconnectionState.Clean;
             public Dictionary<Skills.SkillType, float> SkillLevels { get; set; } = new Dictionary<Skills.SkillType, float>();
+            /// <summary>
+            /// The Forsaken Power this character last had selected here - the status effect name vanilla hands to
+            /// Player.SetGuardianPower, such as GP_Eikthyr. Empty and null are different answers: empty means
+            /// tracked with no power selected, null means never tracked (the save predates
+            /// PreventExternalForsakenPowerChanges, or was written with it off), and a join adopts the live power
+            /// rather than stripping it. See modules.character.ForsakenPower.
+            /// </summary>
+            [DefaultValue(null)]
+            public string GuardianPower { get; set; }
             public Dictionary<string, string> PlayerCustomData { get; set; } = new Dictionary<string, string>();
             public Dictionary<string, PackedStatusEffect> ActiveCharacterEffects { get; set; } = new Dictionary<string, PackedStatusEffect>();
             public List<PackedItem> PlayerItems { get; set; } = new List<PackedItem>();

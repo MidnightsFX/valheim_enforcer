@@ -1,3 +1,20 @@
+**0.24.0**
+---
+```
+- Adds PreventExternalForsakenPowerChanges (Player Sync, default off). The character save now records the Forsaken Power a
+  character has selected and puts it back when they join, so a power picked up in a solo world or on another
+  server - one this server may never have unlocked at its boss stones - cannot be walked in.
+    - A power selected at a boss stone here is saved as normal, mid-session included.
+    - A save written before the setting was on has no power recorded. That character keeps the power they arrive
+      with on their next join and is tracked from then on, so switching this on strips nobody's existing power.
+    - Re-applied server side on the first save of each session when ServerSideJoinEnforcement is on.
+- Adds NewCharacterClearForsakenPower (Player Sync, default off): a character joining for the first time has their Forsaken
+  Power cleared, on the client at join and again server side on their first save.
+- Adds NewCharacterResetMapExploration (Player Sync, default off): a character joining for the first time has their map of
+  this world wiped - explored areas, cartography table data and saved pins.
+- Improves WeMod detection
+```
+
 **0.23.2**
 ---
 ```

@@ -110,21 +110,31 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         private static readonly CheatToolSignature[] GeneralTools = {
             // WeMod, Wand and Infinity are the same product across three rebrands; all three names
             // remain in circulation. "wemod" is distinctive enough to prefix-match, which also picks
-            // up helpers like WeMod.Updater.exe. The trainer itself injects into valheim.exe under a
-            // per-build randomised DLL name, so the module fingerprints here are the only signal once
-            // the launcher has been closed.
+            // up WeModAuxiliaryService.exe - and Wand 12.x still ships a WeMod.exe beside Wand.exe, in
+            // the same %LocalAppData%\WeMod folder.
+            //
+            // Injection is TrainerHost (next entry) loading TrainerLib into the game, which pulls in CELib
+            // to assemble the cheat scripts and then the trainer itself. The trainer DLL is named per
+            // download (Trainer_<id>_<hash>.dll) but always under that prefix, and nothing else loaded
+            // into Valheim carries it. These module fingerprints are the only signal once the app is closed.
             new CheatToolSignature {
                 Tool = "WeMod/Wand",
                 ProcessNames = new[] { "wemod" }, ProcessMatch = MatchMode.Prefix,
-                ModuleNames = new[] { "trainerlib_x64", "celib_x64" },
+                ModuleNames = new[] { "trainerlib_x64", "celib_x64", "trainer_" },
                 WindowTitles = new[] { "WeMod" }, WindowTitleMatch = MatchMode.Exact
             },
             // Second entry for the same tool: "wand" and "infinity" are short, ordinary words that
             // legitimate software contains (Wandering Village, Wanderlust, Infinity Nikki...), so
             // they must match exactly. Detections collapse onto the shared label.
+            //
+            // TrainerHost is the injector and stays running while a trainer is attached. It ships under
+            // the same name in WeMod 11 and Wand 12, and the generic trainer check cannot see it:
+            // "TrainerHost" has no word break after "Trainer". WandAuxiliaryService is the rebranded
+            // WeModAuxiliaryService, which "wand" alone does not reach. When either runs elevated, only
+            // ScanElevatedProcesses lets the process scan see it.
             new CheatToolSignature {
                 Tool = "WeMod/Wand",
-                ProcessNames = new[] { "wand", "infinity" }, ProcessMatch = MatchMode.Exact,
+                ProcessNames = new[] { "wand", "wandauxiliaryservice", "trainerhost_x64", "trainerhost_x86", "infinity" }, ProcessMatch = MatchMode.Exact,
                 WindowTitles = new[] { "Wand" }, WindowTitleMatch = MatchMode.Exact
             },
             // TfrmMain/TfrmMemView survive renaming the executable, but they are Delphi's default
