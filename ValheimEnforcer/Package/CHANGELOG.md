@@ -1,3 +1,9 @@
+**0.25.0**
+---
+```
+- Adds full support for crossplay exclusive servers
+```
+
 **0.24.0**
 ---
 ```

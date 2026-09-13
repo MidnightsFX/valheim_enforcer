@@ -380,14 +380,14 @@ namespace ValheimEnforcer.modules.worldintegrity {
         /// </summary>
         private static void ObserveDeath(ZNetPeer peer) {
             if (peer == null || peer.m_socket == null) { return; }
-            string endpoint = peer.m_socket.GetEndPointString();
+            string account = PeerIdentity.AccountFor(peer);
             string name = peer.m_playerName;
-            if (string.IsNullOrEmpty(endpoint) || string.IsNullOrEmpty(name)) { return; }
+            if (string.IsNullOrEmpty(account) || string.IsNullOrEmpty(name)) { return; }
 
             try {
                 // Resolve the spelling the save is actually filed under (an account reaches us under more than
                 // one id spelling; see PlatformIds), so the clear lands on the right file.
-                if (!CharacterSaves.TryResolveSave(endpoint, name, out string saveId, out string saveName, out bool lookupFailed)) {
+                if (!CharacterSaves.TryResolveSave(account, name, out string saveId, out string saveName, out bool lookupFailed)) {
                     // No stored save (or the store could not be read) - nothing to clear, nothing to dupe.
                     if (lookupFailed) { Logger.LogDebug($"Death observed for {name} but the character store could not be read; leaving it alone."); }
                     return;

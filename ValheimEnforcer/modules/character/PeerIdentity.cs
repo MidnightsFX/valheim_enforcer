@@ -145,15 +145,16 @@ namespace ValheimEnforcer.modules.character {
         /// identity - in which case the caller must refuse whatever it was about to do rather than fall back to
         /// trusting the payload.
         ///
-        /// The account id is the socket's endpoint string, matching what SendSavedCharacter files saves under
-        /// and what the previous inline checks compared against; identity is normalised for comparison in Owns.
+        /// The account id is the socket's host name (see <see cref="AccountFor"/>), the same id SendSavedCharacter
+        /// looks saves up under; identity is normalised for comparison in Owns. Not the endpoint string: that is
+        /// only the account on Steam sockets, and on PlayFab (crossplay) it is "playfab/&lt;entity id&gt;".
         /// </summary>
         internal static bool TryResolve(long sender, out string accountId, out string characterName) {
             accountId = null;
             characterName = null;
             ZNetPeer peer = ZNet.instance?.GetPeer(sender);
             if (peer == null || !peer.IsReady()) { return false; }
-            accountId = peer.m_socket?.GetEndPointString();
+            accountId = AccountFor(peer);
             characterName = peer.m_playerName;
             return !string.IsNullOrEmpty(accountId) && !string.IsNullOrEmpty(characterName);
         }

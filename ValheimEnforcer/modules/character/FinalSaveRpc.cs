@@ -90,9 +90,38 @@ namespace ValheimEnforcer.modules.character {
             if (serverPeer == null || character == null) { return; }
             ZPackage package = new ZPackage();
             package.Write(Compress(DataObjects.yamlserializer.Serialize(character)));
+            if (serverPeer.m_socket is ZPlayFabSocket) {
+                InvokeOnPlayFab(serverPeer, package);
+                Logger.LogDebug($"Sent synchronous final character save for {character.Name} ({package.Size()} bytes) over PlayFab.");
+                return;
+            }
             serverPeer.m_rpc.Invoke(RPC_NAME, package);
             serverPeer.m_socket?.Flush();
             Logger.LogDebug($"Sent synchronous final character save for {character.Name} ({package.Size()} bytes) and flushed the socket.");
+        }
+
+        /// <summary>
+        /// The crossplay half of <see cref="SendFinalSaveSync"/>. ZPlayFabSocket cannot be flushed - Flush throws
+        /// NotImplementedException - and its Send does not reach the wire on its own either: while ZNet is running
+        /// it hands the payload to a background zlib thread and sends the result from a later LateUpdate. That
+        /// frame never comes here, because Game.Shutdown disposes the socket in the same call, so the save would
+        /// be dropped silently.
+        ///
+        /// The one path that compresses and sends on the spot is the one vanilla takes for its own Disconnect
+        /// message, which ZNet.StopAll sends after setting m_haveStoped. This takes that path for one message and
+        /// puts the flag back. Nothing else can observe it in between: the only readers of the flag are StopAll,
+        /// the HaveStopped property and ZPlayFabSocket.InternalSend, all on this thread.
+        /// </summary>
+        private static void InvokeOnPlayFab(ZNetPeer serverPeer, ZPackage package) {
+            ZNet znet = ZNet.instance;
+            if (znet == null) { return; }
+            bool wasStopped = znet.m_haveStoped;
+            znet.m_haveStoped = true;
+            try {
+                serverPeer.m_rpc.Invoke(RPC_NAME, package);
+            } finally {
+                znet.m_haveStoped = wasStopped;
+            }
         }
 
         private static byte[] Compress(string text) {

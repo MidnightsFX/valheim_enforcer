@@ -6,9 +6,13 @@ namespace ValheimEnforcer.common {
     /// The same account reaches us under more than one spelling. A connecting peer is identified by
     /// <c>ISocket.GetHostName()</c>, which on Steam sockets is the bare SteamID64 but on PlayFab sockets is
     /// the platform-prefixed form ("Steam_7656...", "XboxLive_..."). Ids that were written to disk came from
-    /// whichever path produced them - CharacterManager.GetPlayerID reads a bare m_userID, ValConfig
-    /// .SendSavedCharacter uses GetEndPointString() - and an admin typing an id into a config file may use
-    /// either. Comparing on the platform-specific suffix makes all of those agree.
+    /// whichever path produced them - CharacterManager.GetPlayerID reads a bare m_userID - and an admin typing
+    /// an id into a config file may use either. Comparing on the platform-specific suffix makes all of those
+    /// agree.
+    ///
+    /// <c>ISocket.GetEndPointString()</c> is not an account id and must never be compared as one. It happens to
+    /// equal the SteamID64 on a Steam socket, but on a PlayFab socket it is "playfab/&lt;entity id&gt;", which
+    /// shares no suffix with the platform account.
     /// </summary>
     internal static class PlatformIds {
 

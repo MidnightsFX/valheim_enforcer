@@ -183,7 +183,15 @@ namespace ValheimEnforcer.modules.character {
                 // records the character as cleanly disconnected. Reset by ClearPlayerCharacterOnLogout on a
                 // return-to-menu, and by LoadAndValidatePlayer on the next spawn.
                 CharacterManager.LogoutInProgress = true;
-                CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
+                // Never let this throw. An exception out of a prefix skips the original, and for Game.Shutdown
+                // that means no profile save, no ZNet shutdown, and - since it unwinds ContinueLogout too - no
+                // return to the menu: the logout button simply stops working. Losing the enforcer's copy of
+                // one save is the far smaller failure.
+                try {
+                    CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
+                } catch (Exception e) {
+                    Logger.LogError($"Final character save failed during shutdown; letting the game shut down anyway: {e}");
+                }
             }
         }
 

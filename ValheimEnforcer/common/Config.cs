@@ -560,7 +560,9 @@ namespace ValheimEnforcer {
         /// the client supplied, which a modified client chooses.
         /// </summary>
         internal static ZPackage SendSavedCharacter(ZNetPeer peer) {
-            string id = peer.m_socket.GetEndPointString();
+            // The account, not the endpoint. On a PlayFab (crossplay) socket GetEndPointString is
+            // "playfab/<entity id>", which matches no save the client ever filed.
+            string id = modules.character.PeerIdentity.AccountFor(peer);
             Logger.LogInfo($"Sending saved character data to player {peer.m_playerName} with ID: {id}");
 
             // The id a save was filed under is not always spelled the way the socket spells it (see
@@ -689,7 +691,7 @@ namespace ValheimEnforcer {
             // account's character - overwriting that character, and skipping the first-save check at the same
             // time, because the check asks "does a save already exist?" about the name the payload supplied.
             ZNetPeer senderPeer = ZNet.instance?.GetPeer(sender);
-            string senderAccountId = senderPeer?.m_socket?.GetEndPointString();
+            string senderAccountId = modules.character.PeerIdentity.AccountFor(senderPeer);
             string senderCharacterName = senderPeer?.m_playerName;
 
             if (ValConfig.InternalStorageMode.Value) {
@@ -764,7 +766,7 @@ namespace ValheimEnforcer {
             if (chara == null) { return false; }
             // Fail CLOSED when the connection carries no identity. This used to accept the save "unchecked",
             // which is exactly the pre-handshake state VE_FINAL_CHAR_SAVE could smuggle a save in during. On
-            // every supported backend a ready peer has both an endpoint and a name, so an empty one is a
+            // every supported backend a ready peer has both an account id and a name, so an empty one is a
             // reason to refuse, not to trust.
             if (string.IsNullOrEmpty(senderAccountId) || string.IsNullOrEmpty(senderCharacterName)) {
                 Logger.LogWarning($"Refusing a character save from sender {sender}: the server could not resolve who they are.");
