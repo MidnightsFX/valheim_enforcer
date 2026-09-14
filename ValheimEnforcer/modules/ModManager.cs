@@ -44,25 +44,29 @@ namespace ValheimEnforcer.modules {
 
             // Read the config file
             LoadConfig(File.ReadAllText(ValConfig.ModsConfigFilePath));
+            NoteModsOnAdminOnlyAndRequired();
 
             PluginHasher.WaitForPass(ValConfig.HashComputeTimeoutSeconds.Value * 1000);
             PatcherIndex.WaitForPass(ValConfig.HashComputeTimeoutSeconds.Value * 1000);
             RebuildActiveMods();
             RebuildActivePatchers();
+            WriteActiveModsFile();
 
             foreach (KeyValuePair<string, BaseUnityPlugin> plugin in ActiveMods) {
                 Logger.LogDebug($"Found active mod: {plugin.Key} v{plugin.Value.Info.Metadata.Version}");
                 string currentVersion = plugin.Value.Info.Metadata.Version.ToString();
                 string localHash = PluginHasher.Get(plugin.Key)?.Hash;
 
-                if (ModSettings.RequiredMods.ContainsKey(plugin.Key)) {
-                    UpdateModVersionIfChanged(ModSettings.RequiredMods, plugin.Key, currentVersion);
-                    RecordLocalHashIfAllowed(ModSettings.RequiredMods, plugin.Key, localHash, currentVersion);
-                    continue;
-                }
+                // AdminOnly before Required, matching ValidateModlist: for a mod on both lists the admin-only
+                // entry is the one clients are checked against, so it is the one kept current.
                 if (ModSettings.AdminOnlyMods.ContainsKey(plugin.Key)) {
                     UpdateModVersionIfChanged(ModSettings.AdminOnlyMods, plugin.Key, currentVersion);
                     RecordLocalHashIfAllowed(ModSettings.AdminOnlyMods, plugin.Key, localHash, currentVersion);
+                    continue;
+                }
+                if (ModSettings.RequiredMods.ContainsKey(plugin.Key)) {
+                    UpdateModVersionIfChanged(ModSettings.RequiredMods, plugin.Key, currentVersion);
+                    RecordLocalHashIfAllowed(ModSettings.RequiredMods, plugin.Key, localHash, currentVersion);
                     continue;
                 }
                 if (ModSettings.OptionalMods.ContainsKey(plugin.Key)) {
@@ -80,6 +84,10 @@ namespace ValheimEnforcer.modules {
                     ModSettings.RequiredMods.Add(plugin.Key, new DataObjects.Mod() { EnforceVersion = false, Version = currentVersion, PluginID = plugin.Value.Info.Metadata.GUID, Name = plugin.Value.Info.Metadata.Name });
                     RecordLocalHashIfAllowed(ModSettings.RequiredMods, plugin.Key, localHash, currentVersion);
                 }
+            }
+
+            if (ValConfig.RemoveUnloadedModsFromRequired.Value) {
+                RemoveUnloadedRequiredMods();
             }
 
             // Write out updates to the loaded mods, if enabled
@@ -104,10 +112,11 @@ namespace ValheimEnforcer.modules {
             "#",
             "# Every entry is keyed by its BepInEx plugin GUID.",
             "#",
-            "#   activeMods      What this machine actually loaded. Rebuilt every start - editing it does nothing.",
+            ActiveModsHeaderLine,
             "#   requiredMods    Clients must have these. Mods the server loads land here by themselves.",
             "#   optionalMods    Clients may have these, and may connect without them.",
-            "#   adminOnlyMods   Only admins may connect with these; everyone else is rejected.",
+            "#   adminOnlyMods   Admins may have these, and may connect without them. Anyone else is rejected.",
+            "#                   Wins over requiredMods, so a mod on both is required of nobody.",
             "#   serverOnlyMods  Server side only. Not demanded of clients - but a client that installs one",
             "#                   is rejected for it, so this is not the list for client-side mods.",
             "#",
@@ -124,6 +133,28 @@ namespace ValheimEnforcer.modules {
             "#################################################",
         };
 
+        /// <summary>The banner line pointing at ServerActiveMods.yaml, which took the place of <see cref="LegacyActiveModsHeaderLine"/>.</summary>
+        private const string ActiveModsHeaderLine = "# ServerActiveMods.yaml, beside this file, lists every plugin this machine loaded. Copy entries from it into:";
+
+        /// <summary>
+        /// The line every banner carried while activeMods was still written into Mods.yaml. Swapped in place for
+        /// <see cref="ActiveModsHeaderLine"/> on the next rewrite, since a preserved banner is never regenerated and
+        /// would otherwise go on describing a list the file no longer holds. Matched exactly, so an admin who
+        /// rewrote the line keeps their version.
+        /// </summary>
+        private const string LegacyActiveModsHeaderLine = "#   activeMods      What this machine actually loaded. Rebuilt every start - editing it does nothing.";
+
+        private static readonly string[] ActiveModsFileHeaderLines = {
+            "#################################################",
+            "# Valheim Enforcer - Active Mods",
+            "#",
+            "# Every plugin this machine loaded, for copying into the lists in Mods.yaml. Each entry is already",
+            "# indented to sit under requiredMods, optionalMods, adminOnlyMods or serverOnlyMods.",
+            "#",
+            "# Reference only: deleted and rewritten every start, and never read. Editing it does nothing.",
+            "#################################################",
+        };
+
         /// <summary>
         /// Serializes the current mod settings to Mods.yaml. Shared by the startup rewrite and the Thunderstore
         /// resolver so both go through the same self-write suppression - otherwise our own write comes straight
@@ -132,7 +163,7 @@ namespace ValheimEnforcer.modules {
         internal static void PersistModSettings() {
             if (ModSettings == null) { return; }
             try {
-                string yaml = DataObjects.yamlserializer.Serialize(ModSettings);
+                string yaml = SerializeModsFile(ModSettings);
                 File.WriteAllText(ValConfig.ModsConfigFilePath, WithPreservedComments(yaml));
                 // Qualified: Jotunn.Utils has a ConfigFileWatcher of its own and this file imports that namespace.
                 common.ConfigFileWatcher.NoteSelfWrite(ValConfig.ModsConfigFilePath);
@@ -157,6 +188,8 @@ namespace ValheimEnforcer.modules {
             try {
                 string existing = File.Exists(ValConfig.ModsConfigFilePath) ? File.ReadAllText(ValConfig.ModsConfigFilePath) : null;
                 YamlComments.Captured captured = YamlComments.Capture(existing);
+                int legacyLine = captured.Leading.IndexOf(LegacyActiveModsHeaderLine);
+                if (legacyLine >= 0) { captured.Leading[legacyLine] = ActiveModsHeaderLine; }
                 string preserved = YamlComments.Reapply(yaml, captured);
                 if (captured.HasLeadingBlock) { return preserved; }
 
@@ -196,10 +229,38 @@ namespace ValheimEnforcer.modules {
             entry.HashedFrom = $"local:{version}";
         }
 
+        /// <summary>
+        /// Logs every mod that is on both adminOnlyMods and requiredMods. Not an error - adminOnlyMods wins, so the
+        /// mod is refused to non-admins and demanded of nobody - but the requiredMods entry is dead and the file
+        /// reads as though the mod were required, so the admin is told which one counts.
+        /// </summary>
+        private static void NoteModsOnAdminOnlyAndRequired() {
+            if (ModSettings?.AdminOnlyMods == null || ModSettings.RequiredMods == null) { return; }
+            List<string> both = ModSettings.AdminOnlyMods.Keys.Where(key => ModSettings.RequiredMods.ContainsKey(key)).ToList();
+            if (both.Count == 0) { return; }
+            Logger.LogInfo($"On both adminOnlyMods and requiredMods, treated as admin-only (optional for admins, refused to everyone else): {string.Join(", ", both)}. The requiredMods entries do nothing and can be deleted.");
+        }
+
         private static void UpdateModVersionIfChanged(Dictionary<string, DataObjects.Mod> modList, string key, string currentVersion) {
             if (modList[key].Version != currentVersion) {
                 Logger.LogInfo($"Updating version for {key}: {modList[key].Version} -> {currentVersion}");
                 modList[key].Version = currentVersion;
+            }
+        }
+
+        /// <summary>
+        /// Drops every requiredMods entry for a plugin this machine did not load, so a mod taken off the server
+        /// stops being demanded of clients. Required only: the other lists routinely hold mods the server never
+        /// runs, which is what they are for.
+        /// </summary>
+        private static void RemoveUnloadedRequiredMods() {
+            // Enforcer is itself a loaded plugin, so an empty list means the plugin scan failed - not that every
+            // mod was uninstalled - and emptying requiredMods on the strength of it would wipe the admin's list.
+            if (ActiveMods.Count == 0) { return; }
+
+            foreach (string key in ModSettings.RequiredMods.Keys.Where(guid => !ActiveMods.ContainsKey(guid)).ToList()) {
+                Logger.LogInfo($"Removing {key} from requiredMods: it is not loaded on this server (RemoveUnloadedModsFromRequired).");
+                ModSettings.RequiredMods.Remove(key);
             }
         }
 
@@ -224,6 +285,47 @@ namespace ValheimEnforcer.modules {
                 // itself is.
                 PluginHasher.Apply(plugin.Key, entry);
                 ModSettings.ActiveMods[plugin.Key] = entry;
+            }
+        }
+
+        /// <summary>
+        /// Writes ServerActiveMods.yaml: every loaded plugin as a bare Mods.yaml entry, sorted, for an admin to
+        /// copy into whichever list it belongs in.
+        ///
+        /// Only the file moved. <see cref="DataObjects.Mods.ActiveMods"/> is still what the handshake reports,
+        /// and it is still derived from the loaded plugins rather than read from here. The entries carry no hash
+        /// and no enforceVersion: those describe policy rather than what is installed, and a mod pasted into a
+        /// list while the server runs it gets its hash recorded on the next start anyway.
+        /// </summary>
+        private static void WriteActiveModsFile() {
+            Dictionary<string, DataObjects.Mod> entries = new Dictionary<string, DataObjects.Mod>();
+            foreach (KeyValuePair<string, BaseUnityPlugin> plugin in ActiveMods.OrderBy(loaded => loaded.Key, System.StringComparer.OrdinalIgnoreCase)) {
+                entries[plugin.Key] = new DataObjects.Mod() {
+                    PluginID = plugin.Value.Info.Metadata.GUID,
+                    Version = plugin.Value.Info.Metadata.Version.ToString(),
+                    Name = plugin.Value.Info.Metadata.Name,
+                };
+            }
+
+            try {
+                // Under a top-level key, so each entry comes out indented exactly as it has to be in Mods.yaml.
+                string yaml = DataObjects.yamlserializer.Serialize(new Dictionary<string, Dictionary<string, DataObjects.Mod>> { { "activeMods", entries } });
+                string newline = YamlComments.DetectNewline(yaml);
+                File.WriteAllText(ValConfig.ServerActiveModsFilePath, string.Join(newline, ActiveModsFileHeaderLines) + newline + newline + yaml);
+            } catch (System.Exception e) {
+                Logger.LogWarning($"Could not write {ValConfig.ServerActiveModsFilePath}: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Clears ServerActiveMods.yaml at startup, before any plugin has been looked at, so a start that never
+        /// reaches <see cref="WriteActiveModsFile"/> does not leave the previous run's mod set on disk looking current.
+        /// </summary>
+        internal static void DeleteActiveModsFile() {
+            try {
+                if (File.Exists(ValConfig.ServerActiveModsFilePath)) { File.Delete(ValConfig.ServerActiveModsFilePath); }
+            } catch (System.Exception e) {
+                Logger.LogWarning($"Could not delete {ValConfig.ServerActiveModsFilePath}: {e.Message}");
             }
         }
 
@@ -331,6 +433,7 @@ namespace ValheimEnforcer.modules {
                     return;
                 }
                 ModSettings = fromFile;
+                NoteModsOnAdminOnlyAndRequired();
                 RebuildActiveMods();
                 RebuildActivePatchers();
             } catch (System.Exception e) {
@@ -374,7 +477,11 @@ namespace ValheimEnforcer.modules {
             List<string> extraPatchers = new List<string>();       // a BepInEx patcher the server does not allow
             List<string> patcherHashMismatch = new List<string>(); // allowed by name, but not this build of it
             List<string> patcherUnverifiable = new List<string>(); // the server pinned it, the client reported no hash
-            List<string> requiredModsMissing = AuthoratativeMods.RequiredMods.Keys.Distinct().ToList();
+            Dictionary<string, DataObjects.Mod> adminOnlyMods = AuthoratativeMods.AdminOnlyMods ?? new Dictionary<string, DataObjects.Mod>();
+            // Admin-only mods are optional for admins: permitted, never demanded - of admins or anyone else. A mod
+            // on both lists is the normal way to get here rather than a typo: the server loads a mod, it lands in
+            // requiredMods by itself, and the admin then adds it to adminOnlyMods without deleting the original.
+            List<string> requiredModsMissing = AuthoratativeMods.RequiredMods.Keys.Where(key => !adminOnlyMods.ContainsKey(key)).Distinct().ToList();
             // At least one version mismatch was found by the file check rather than by enforceVersion, so the
             // list gets the extra line saying why a version the server never marked as enforced still matters.
             bool versionPinnedByHash = false;
@@ -388,10 +495,12 @@ namespace ValheimEnforcer.modules {
                 // rather than continue'd out of, because file verification runs on top of whatever the
                 // version/admin check decided and needs the same record.
                 //
-                // The else-if chain also establishes an explicit Required > AdminOnly > Optional priority.
+                // The else-if chain also establishes an explicit AdminOnly > Required > Optional priority.
                 // Previously these were independent ifs and the version-mismatch branches did not continue, so
                 // a required (or optional) mod with the wrong version was reported as BOTH a version mismatch
-                // and a non-allowed mod.
+                // and a non-allowed mod. AdminOnly is first so a mod on both lists stays refused to non-admins;
+                // with Required first, putting a mod in adminOnlyMods did nothing until it was also deleted
+                // from requiredMods.
                 DataObjects.Mod authoritative = null;
                 bool requiredOrAdmin = false;
                 // Whether this client's copy of this mod is actually version-checked. Not simply
@@ -399,16 +508,10 @@ namespace ValheimEnforcer.modules {
                 // as far as its version, and neither does a client whose admin status has not synced yet.
                 bool versionEnforced = false;
 
-                // Compare required mods
-                if (AuthoratativeMods.RequiredMods.ContainsKey(mod.Key)) {
-                    authoritative = AuthoratativeMods.RequiredMods[mod.Key];
-                    requiredOrAdmin = true;
-                    versionEnforced = authoritative.EnforceVersion;
-                }
                 // Compare admin mods - prevent non-admin clients from joining with admin only mods.
                 // Non-admins carrying one are rejected; admins are version-enforced when EnforceVersion is set.
-                else if (AuthoratativeMods.AdminOnlyMods.ContainsKey(mod.Key)) {
-                    authoritative = AuthoratativeMods.AdminOnlyMods[mod.Key];
+                if (adminOnlyMods.ContainsKey(mod.Key)) {
+                    authoritative = adminOnlyMods[mod.Key];
                     requiredOrAdmin = true;
                     if (!adminStatusKnown) {
                         // Client side: Jotunn only syncs admin status after login (post-RPC_PeerInfo),
@@ -420,6 +523,12 @@ namespace ValheimEnforcer.modules {
                     } else {
                         adminOnlyNotAllowed.Add(mod.Key);
                     }
+                }
+                // Compare required mods
+                else if (AuthoratativeMods.RequiredMods.ContainsKey(mod.Key)) {
+                    authoritative = AuthoratativeMods.RequiredMods[mod.Key];
+                    requiredOrAdmin = true;
+                    versionEnforced = authoritative.EnforceVersion;
                 }
                 // Compare optional mods
                 else if (AuthoratativeMods.OptionalMods.ContainsKey(mod.Key)) {
@@ -685,10 +794,25 @@ namespace ValheimEnforcer.modules {
         }
 
         internal static string GetDefaultConfig() {
-            if (ModSettings != null) {
-                return DataObjects.yamlserializer.Serialize(ModSettings);
-            }
-            return DataObjects.yamlserializer.Serialize(new DataObjects.Mods());
+            return SerializeModsFile(ModSettings ?? new DataObjects.Mods());
+        }
+
+        /// <summary>
+        /// Mods.yaml as written: the settings without activeMods, which goes to ServerActiveMods.yaml instead.
+        /// A copy rather than clearing the list on the live object, because the handshake still sends it. Nonce
+        /// and Attestation stay behind too - they belong to one connection, never to the file.
+        /// </summary>
+        private static string SerializeModsFile(DataObjects.Mods mods) {
+            DataObjects.Mods written = new DataObjects.Mods {
+                ActiveMods = null, // null rather than empty, so OmitDefaults leaves the key out entirely
+                RequiredMods = mods.RequiredMods,
+                OptionalMods = mods.OptionalMods,
+                AdminOnlyMods = mods.AdminOnlyMods,
+                ServerOnlyMods = mods.ServerOnlyMods,
+                ActivePatchers = mods.ActivePatchers,
+                AllowedPatchers = mods.AllowedPatchers,
+            };
+            return DataObjects.yamlserializer.Serialize(written);
         }
 
 

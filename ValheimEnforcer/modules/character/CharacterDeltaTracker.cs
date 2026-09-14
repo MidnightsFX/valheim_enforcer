@@ -51,7 +51,7 @@ namespace ValheimEnforcer.modules.character {
         }
 
         // Runs inside inventory mutation, so it stays trivial - the real work happens on the next Update tick.
-        // Internal so a change that never touches the inventory (ForsakenPower) can wake the flush the same way.
+        // Internal so a change that never touches the inventory (ForsakenPower, FoodSync) can wake the flush the same way.
         internal static void MarkBaselineDirty() {
             BaselineDirty = true;
             DirtySince = Time.unscaledTime;
@@ -206,9 +206,14 @@ internal class DeltaChangeTracker : MonoBehaviour {
         string currentGuardianPower = ForsakenPower.Capture(Player.m_localPlayer);
         bool guardianPowerChanged = currentGuardianPower != null && currentGuardianPower != CharacterManager.PlayerCharacter.GuardianPower;
 
+        // Eating usually changes the inventory as well, but a feast does not; FoodSync's EatFood postfix marks the
+        // tracker dirty for that. Null when foods are not being tracked.
+        List<PackedFood> currentFoods = FoodSync.Capture(Player.m_localPlayer);
+        bool foodsChanged = FoodSync.ChangedSince(currentFoods, CharacterManager.PlayerCharacter.Foods);
+
         // No delta changes need to be sent
-        // Skills are a lower priority update and will get updated when the next item, or custom data change happens
-        if (itemDeltas.Count == 0 && customDataModifications.Count == 0 && customDataRemovedKeys.Count == 0 && !guardianPowerChanged) { return; }
+        // Skills (and food burn time) are a lower priority update and will get updated when the next item, or custom data change happens
+        if (itemDeltas.Count == 0 && customDataModifications.Count == 0 && customDataRemovedKeys.Count == 0 && !guardianPowerChanged && !foodsChanged) { return; }
         Logger.LogDebug("Changes found, syncing deltas.");
 
         // Refresh the in-memory baseline first, and unconditionally. This used to sit behind a server-peer check,
@@ -225,6 +230,7 @@ internal class DeltaChangeTracker : MonoBehaviour {
         var skillLevels = Player.m_localPlayer.GetSkills().GetSkillList().ToDictionary(s => s.m_info.m_skill, s => s.m_level);
         CharacterManager.PlayerCharacter.SkillLevels = skillLevels;
         CharacterManager.PlayerCharacter.GuardianPower = currentGuardianPower;
+        CharacterManager.PlayerCharacter.Foods = currentFoods;
 
         Dictionary<string, PackedStatusEffect> currentActiveEffects = new Dictionary<string, PackedStatusEffect>();
         foreach (StatusEffect se in Player.m_localPlayer.GetSEMan().GetStatusEffects()) {
@@ -258,6 +264,7 @@ internal class DeltaChangeTracker : MonoBehaviour {
             RemovedCustomDataKeys = customDataRemovedKeys,
             ActiveCharacterEffects = currentActiveEffects,
             GuardianPower = currentGuardianPower,
+            Foods = currentFoods,
         };
 
         ZPackage package = new ZPackage();

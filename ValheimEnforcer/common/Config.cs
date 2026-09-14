@@ -25,6 +25,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> AllowPublicDiagnosticCommands;
         public static ConfigEntry<bool> UpdateLoadedModsOnStartup;
         public static ConfigEntry<bool> AutoAddModsToRequired;
+        public static ConfigEntry<bool> RemoveUnloadedModsFromRequired;
         public static ConfigEntry<string> HashEnforcement;
         public static ConfigEntry<bool> RecordHashesForLoadedMods;
         public static ConfigEntry<bool> ValidatePatchers;
@@ -35,6 +36,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<int> ThunderstoreMaxArchiveMB;
         public static ConfigEntry<bool> RemoveNontrackedItemsFromJoiningPlayers;
         public static ConfigEntry<bool> AddMissingItemsFromPlayerServerSave;
+        public static ConfigEntry<bool> RestoreSkillsFromPlayerServerSave;
         public static ConfigEntry<bool> PreventExternalSkillRaises;
         public static ConfigEntry<bool> NewCharactersRemoveExtraItems;
         public static ConfigEntry<bool> NewCharacterSetSkillsToZero;
@@ -56,6 +58,9 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> PreventExternalForsakenPowerChanges;
         public static ConfigEntry<bool> NewCharacterClearForsakenPower;
         public static ConfigEntry<bool> NewCharacterResetMapExploration;
+        public static ConfigEntry<bool> PreventExternalFoodChanges;
+        public static ConfigEntry<bool> NewCharacterClearKnownRecipes;
+        public static ConfigEntry<bool> RecordSkillReductions;
 
         public static ConfigEntry<bool> EnforceCharacterLimit;
         public static ConfigEntry<int> MaxCharactersPerAccount;
@@ -158,11 +163,13 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> DiscordNotifyItemOrigin;
 
         internal const string ModsFileName = "Mods.yaml";
+        internal const string ServerActiveModsFileName = "ServerActiveMods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
         internal const string CharacterFolder = "Characters";
         internal const string KnownCheatersFileName = "KnownCheaters.yaml";
         internal const string NotificationsFileName = "Notifications.yaml";
         internal static String ModsConfigFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, ModsFileName);
+        internal static String ServerActiveModsFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, ServerActiveModsFileName);
         internal static String CharacterFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder);
         internal static String KnownCheatersFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, KnownCheatersFileName);
         internal static String NotificationsFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, NotificationsFileName);
@@ -176,6 +183,7 @@ namespace ValheimEnforcer {
         // that half now goes through ClientCommandRequestRPC, leaving these to do one thing each.
         internal static CustomRPC ReturnConfiscatedItemsRPC;
         internal static CustomRPC ClearConfiscatedRPC;
+        internal static CustomRPC SkillRestoreRPC;
 
         // One pair for every console command: the request going up, the output coming back. Replaces the
         // four per-command RPCs, each of which had to re-implement the admin check and invent its own reply
@@ -204,6 +212,7 @@ namespace ValheimEnforcer {
             CheatDetectionRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHEAT", OnServerReceiveCheatReport, OnClientReceiveCheatReport);
             ItemDeltaUpdateRPC = NetworkManager.Instance.AddRPC("VENFORCE_ITEMDELTA", OnServerRecieveDeltaItemUpdate, OnClientReceiveDeltaItemUpdate);
             ClearConfiscatedRPC = NetworkManager.Instance.AddRPC("VENFORCE_CLEAR_CONFISCATED", NoServerHandler, OnClientReceiveClearConfiscated);
+            SkillRestoreRPC = NetworkManager.Instance.AddRPC("VENFORCE_SKILL_RESTORE", NoServerHandler, OnClientReceiveSkillRestore);
             FullSyncRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_FULLSYNC_REQ", OnServerReceiveFullSyncRequest, OnClientReceiveFullSyncRequest);
             ClientCommandRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_CMD_REQ", OnServerReceiveCommandRequest, NoClientHandler);
             CommandOutputRPC = NetworkManager.Instance.AddRPC("VENFORCE_CMD_OUT", NoServerHandler, OnClientReceiveCommandOutput);
@@ -212,6 +221,10 @@ namespace ValheimEnforcer {
 
             SynchronizationManager.Instance.AddInitialSynchronization(CharacterSaveRPC, SendSavedCharacter);
 
+            // Deliberately not in the list below: ServerActiveMods.yaml is output, not config, so it is neither
+            // watched nor created empty. Cleared here and rewritten by ModManager.SetModsActive once every plugin
+            // has loaded.
+            ModManager.DeleteActiveModsFile();
             LoadYamlConfigs(new Dictionary<string, Action<string>>() {
                 { ModsConfigFilePath, CreateModsFile },
                 { KnownCheatersFilePath, CreateKnownCheatersFile },
@@ -241,6 +254,7 @@ namespace ValheimEnforcer {
 
             UpdateLoadedModsOnStartup = BindServerConfig("Mods", "UpdateLoadedModsOnStartup", true, "Whether or not the mod configuration file will update its loaded mods once they are detected.");
             AutoAddModsToRequired = BindServerConfig("Mods", "AutoAddModsToRequired", true, "If true, automatically adds mods not found in the optional, admin, or server-only mod lists.");
+            RemoveUnloadedModsFromRequired = BindServerConfig("Mods", "RemoveUnloadedModsFromRequired", true, "If enabled, any mod in requiredMods that this server does not have loaded is removed from the list at startup, so a mod taken off the server stops being demanded of every client without anyone editing Mods.yaml. Only requiredMods is touched: optionalMods, adminOnlyMods and serverOnlyMods routinely hold mods the server never runs, and are left alone. This also removes a mod you required by hand that the server does not run itself, including one pinned with a thunderstorePackage - leave this off if you require any of those. Needs UpdateLoadedModsOnStartup for the removal to reach disk. Off by default.");
             HashEnforcement = BindServerConfig("Mods", "HashEnforcement", "WhenKnown", "Controls SHA256 file verification of client plugin DLLs during the connect handshake, which catches a mod somebody recompiled with different numbers in it even though its version string is unchanged. 'Off' never checks. 'WhenKnown' (the default) enforces only the mods this server has a recorded hash for, so verification is opt-in per mod and enabling it breaks nothing. 'Strict' additionally rejects any client carrying a Required or AdminOnly mod the server has NO recorded hash for - a deliberately loud signal that the mod list is not fully pinned. Individual mods override this with a 'hashEnforcement' field in Mods.yaml. Note this raises the bar from 'edit one file and rebuild' to 'reverse engineer and patch the enforcer'; it is not a wall.", new AcceptableValueList<string>("Off", "WhenKnown", "Strict"));
             AttestationPolicy = BindServerConfig("Mods", "AttestationPolicy", "Off", "Make each client prove its mod report was generated for THIS connection. The server hands every connection a random value during the handshake and the client returns a digest over that value and the exact mod and patcher list it is sending; the server recomputes it and compares. Without this, a client reports the same list and the same file hashes every session forever, so a client patched to skip the work can replay one captured answer indefinitely. Be clear on what a pass means: it proves the report was produced now, by code that actually ran - it does NOT prove the report is true, because a client that keeps the original DLLs and hashes those still passes. What it costs an attacker is the difference between returning a constant and keeping a working hashing path alive. Off does nothing at all. Report logs a failure and lets the player in. Require rejects them - and note that a player on an older ValheimEnforcer sends no attestation at all and is therefore rejected too, so only set Require once your pack has rolled out.", new AcceptableValueList<string>("Off", "Report", "Require"));
             ValidatePatchers = BindServerConfig("Mods", "ValidatePatchers", false, "Hold clients to a list of allowed BepInEx patchers, the same way they are held to a list of allowed mods. Patchers are the DLLs in BepInEx/patchers - not plugins. BepInEx loads them before any plugin exists and hands each one the game assemblies to rewrite on the way in, which is a more powerful position than any plugin has, and until now nothing here looked at that folder at all. The list is an allowlist, not a required list: a client with no patchers always passes, and only a patcher the server has not allowed is refused. Off by default. Patchers are enumerated and logged either way, so leave this off for a while first and read the log to see what your players actually carry.");
@@ -249,6 +263,7 @@ namespace ValheimEnforcer {
             ResolveThunderstoreHashes = BindServerConfig("Mods", "ResolveThunderstoreHashes", false, "If enabled, the server downloads any mod in Mods.yaml carrying a 'thunderstorePackage' field (format Owner-ModName or Owner-ModName-Version, the same format a Thunderstore manifest uses), hashes the DLLs inside the archive in memory, records them, and discards the download. This is how you pin a client-only mod the server never loads itself. Only thunderstore.io and its CDN are ever contacted; arbitrary download URLs are deliberately not supported. Off by default because it makes outbound network requests.");
             RemoveNontrackedItemsFromJoiningPlayers = BindServerConfig("Player Sync", "RemoveNontrackedItemsFromJoiningPlayers", true, "If enabled, any items that are not tracked by the server will be removed from joining player's inventories.");
             AddMissingItemsFromPlayerServerSave = BindServerConfig("Player Sync", "AddMissingItemsFromPlayerServerSave", true, "If enabled, any items the player does not have that are listed on the server will be given to the player when joining");
+            RestoreSkillsFromPlayerServerSave = BindServerConfig("Player Sync", "RestoreSkillsFromPlayerServerSave", true, "If enabled, a returning character whose skills are below the levels the server holds for them has them raised back to those levels when they join - the skill counterpart of AddMissingItemsFromPlayerServerSave. This is what brings a character back after its local save was deleted and the character recreated under the same name: the server still holds their progress, and without this the recreated character's blank skills would be uploaded as the new record on their first save. Never lowers a skill; PreventExternalSkillRaises covers the other direction. Skipped on a dirty reconnect unless ItemReturnForDirtyReconnection is on, for the same reason item restoration is: the stored copy can be a delta window stale, and the one way it can hold a higher skill than the player has is a death the server never heard about. On by default.");
             PreventExternalSkillRaises = BindServerConfig("Player Sync", "PreventExternalSkillRaises", true, "If enabled, player skill gains outside of the server are removed when connecting.");
             NewCharactersRemoveExtraItems = BindServerConfig("Player Sync", "NewCharactersRemoveExtraItems", false, "If enabled, new characters that have no existing character file will have all items removed except for starting items.");
             NewCharacterSetSkillsToZero = BindServerConfig("Player Sync", "NewCharacterSetSkillsToZero", false, "If enabled, new characters will have their skills set to zero. Prevents players from raising skills before connecting.");
@@ -267,12 +282,15 @@ namespace ValheimEnforcer {
             ItemValidationDurabilityAllowedVariance = BindServerConfig("Player Sync", "ItemValidationDurabilityAllowedVariance", 10f, "Allowed variance for item durability validation.", true, 0, 100f);
             SavePlayerStatusEffectsOnLogout = BindServerConfig("Player Sync", "SavePlayerStatusEffectsOnLogout", true, "Whether or not to save active character effects on logout and reapply on login");
             ItemRemovalForDirtyReconnection = BindServerConfig("Player Sync", "ItemRemovalForDirtyReconnection", false, "Leniency for dirty reconnects (crash/timeout, where the server save may be up to one delta window stale). RemoveNontrackedItemsFromJoiningPlayers always runs otherwise; if this is enabled, untracked items are NOT confiscated when the player's last disconnect was dirty, so crash victims keep items gained in the unsaved window.");
-            ItemReturnForDirtyReconnection = BindServerConfig("Player Sync", "ItemReturnForDirtyReconnection", false, "Leniency for dirty reconnects. AddMissingItemsFromPlayerServerSave always restores missing tracked items on a clean join; on a dirty reconnect restoration is skipped by default (to avoid duping items consumed in the unsaved window) unless this is enabled.");
-            ServerSideJoinEnforcement = BindServerConfig("Player Sync", "ServerSideJoinEnforcement", true, "If enabled, the server re-applies the join rules (item confiscation, skill clamping, custom-data and Forsaken Power reset) to the first full character save a RETURNING player uploads each session, instead of trusting the client to have done it. This is the returning-character counterpart to the first-save enforcement the server already runs for brand new characters: the client runs the same checks, but the client is what you are defending against, so this is the copy a modified client cannot skip. Honours RemoveNontrackedItemsFromJoiningPlayers, PreventExternalSkillRaises, PreventExternalCustomDataChanges, PreventExternalForsakenPowerChanges and the dirty-reconnect leniency settings, so turning those off turns off the matching server-side check too. Inert if none of them are on.");
+            ItemReturnForDirtyReconnection = BindServerConfig("Player Sync", "ItemReturnForDirtyReconnection", false, "Leniency for dirty reconnects. AddMissingItemsFromPlayerServerSave always restores missing tracked items on a clean join, and RestoreSkillsFromPlayerServerSave raises lowered skills the same way; on a dirty reconnect both are skipped by default (to avoid duping items consumed, or handing back skill lost to a death, in the unsaved window) unless this is enabled.");
+            ServerSideJoinEnforcement = BindServerConfig("Player Sync", "ServerSideJoinEnforcement", true, "If enabled, the server re-applies the join rules (item confiscation, skill clamping, custom-data, Forsaken Power and food reset) to the first full character save a RETURNING player uploads each session, instead of trusting the client to have done it. This is the returning-character counterpart to the first-save enforcement the server already runs for brand new characters: the client runs the same checks, but the client is what you are defending against, so this is the copy a modified client cannot skip. Honours RemoveNontrackedItemsFromJoiningPlayers, PreventExternalSkillRaises, PreventExternalCustomDataChanges, PreventExternalForsakenPowerChanges, PreventExternalFoodChanges and the dirty-reconnect leniency settings, so turning those off turns off the matching server-side check too. Inert if none of them are on.");
 
             PreventExternalForsakenPowerChanges = BindServerConfig("Player Sync", "PreventExternalForsakenPowerChanges", false, "If enabled, each character's save records the Forsaken Power they have selected, and it is put back when they join - so a power picked up in a solo world or on another server, one this server may never have unlocked at its boss stones, cannot be brought in. Selecting a power at a boss stone while playing here is saved as normal. A character whose save was written before this was enabled has no power recorded yet: they keep the one they arrive with on their next join and are tracked from then on, so switching this on strips nobody. Also checked server side when ServerSideJoinEnforcement is on. Pair with NewCharacterClearForsakenPower, which covers a character's first join. Off by default.");
             NewCharacterClearForsakenPower = BindServerConfig("Player Sync", "NewCharacterClearForsakenPower", false, "If enabled, a character joining this server for the first time has their Forsaken Power cleared, so one selected in a solo world or on another server does not come with them. They can select one at a boss stone here as normal. Pair with PreventExternalForsakenPowerChanges, which stops a returning character bringing a different one in later. Off by default.");
             NewCharacterResetMapExploration = BindServerConfig("Player Sync", "NewCharacterResetMapExploration", false, "If enabled, a character joining this server for the first time has their map of this world wiped: explored areas, anything a cartography table revealed, and their saved pins. Valheim keeps a separate map for every world, so arriving with this one already uncovered means having played a copy of this world somewhere else - or being a character whose save an admin deleted to reset them, who now gets a fresh map along with everything else. The wipe only happens once the server has confirmed it holds no save for the character; if that answer has not arrived by the time the join is validated the map is left alone, because unlike an item a wiped map cannot be given back. The map lives only in the player's own character file and never reaches the server, so this is carried out by the client and cannot be checked server side. Off by default.");
+            PreventExternalFoodChanges = BindServerConfig("Player Sync", "PreventExternalFoodChanges", false, "If enabled, each character's save records the foods they have eaten and how long each has left, and those exact foods are put back when they join. Vanilla keeps eaten food in the player's own character file, so without this a player can log off, eat food this server has not reached yet in a solo world, and come straight back with it - or just top their food back up for free. A returning character gets back what they left with, whatever they ate or let run out in between; a character joining for the first time has all their food cleared, and can eat as normal once here. A character whose save was written before this was enabled has no foods recorded yet: they keep what they arrive with on their next join and are tracked from then on, so switching this on strips nobody. The record is only as fresh as the character's last save, so after a crash or dropped connection a player can get back the burn time used since then - at most FullSyncPullIntervalMinutes' worth. Also checked server side when ServerSideJoinEnforcement is on. Off by default.");
+            RecordSkillReductions = BindServerConfig("Player Sync", "RecordSkillReductions", true, "If enabled (the default), every time this mod lowers a character's skill - a returning character clamped back to the level the server holds for them under PreventExternalSkillRaises, or a first-time character's skills set to zero under NewCharacterSetSkillsToZero - the skill, the level it was lowered from and to, when, and why are written into that character's save, and enforcer-skills-list shows them. That record is what lets an admin undo one: enforcer-skills-restore puts each skill back to the highest level it was recorded being lowered from, straight away if the player is online and on their next join if not, and enforcer-skills-clear forgets a record without restoring anything. Only reductions this mod makes are recorded - the skill loss on death is the game's own, and a reported value the game could never produce (above 100, negative) is corrected without a record because there is nothing valid to put it back to. Turn this off to stop recording; records already made are kept until they are restored or cleared.");
+            NewCharacterClearKnownRecipes = BindServerConfig("Player Sync", "NewCharacterClearKnownRecipes", true, "If enabled, a character joining this server for the first time forgets every recipe and build piece they discovered somewhere else. Valheim discovers a recipe as soon as the player knows its materials and crafting station, so the materials, crafting stations and trophies they know are cleared too - the same reset as the game's resetknownitems command - and discovery starts again from what they are carrying once the other new-character rules have run. Like NewCharacterResetMapExploration this only happens once the server has confirmed it holds no save for the character, because forgotten recipes cannot be given back, and it is carried out by the client because recipes never reach the server. Never applies in singleplayer or to a listen host's own character. Note that on a server which already has players, anyone joining for the first time since Valheim Enforcer was installed has no save yet and counts as new. On by default.");
 
             EnforceCharacterLimit = BindServerConfig("Player Sync", "EnforceCharacterLimit", false, "Master switch for the one-character-per-account rule. When enabled, an account may only join with a character the server already has a save for, up to MaxCharactersPerAccount; any other character is refused at the connect handshake and told which character to use instead. Characters that already have a save are always allowed, so turning this on never locks out an existing player - it only stops new characters being added. Freeing a slot means deleting that character's save file (BepInEx/config/ValheimEnforcer/Characters/<accountId>/<Name>.yaml), which is what a character reset already involves. Off by default.");
             MaxCharactersPerAccount = BindServerConfig("Player Sync", "MaxCharactersPerAccount", 1, "How many characters one account may have on this server when EnforceCharacterLimit is enabled. Accounts that already have more than this keep every character they have; the limit only blocks adding another.", valmin: 1, valmax: 20);
@@ -616,7 +634,7 @@ namespace ValheimEnforcer {
             // the worker thread produce it.
             string cached = modules.character.CharacterStore.GetYamlIfCurrent(saveId, saveName, diskMtime);
             if (cached != null) {
-                return CharacterPayload(StripConfiscatedItemsFromYaml(cached), CharPayloadCharacter);
+                return CharacterPayload(StripServerOwnedFromYaml(cached), CharPayloadCharacter);
             }
 
             if (!exists) {
@@ -629,7 +647,7 @@ namespace ValheimEnforcer {
             // Seed the store with the FULL save - it is the server's authoritative copy. Only the outbound
             // payload is stripped.
             modules.character.CharacterStore.Seed(saveId, saveName, filecontents, diskMtime);
-            return CharacterPayload(StripConfiscatedItemsFromYaml(filecontents), CharPayloadCharacter);
+            return CharacterPayload(StripServerOwnedFromYaml(filecontents), CharPayloadCharacter);
         }
 
         // Coarse DoS guards on inbound client payloads. None of these are tight - they exist so a single
@@ -712,13 +730,21 @@ namespace ValheimEnforcer {
                     if (appended > 0) {
                         Logger.LogInfo($"Recorded {appended} newly confiscated item(s) for {chara.Name}.");
                     }
+                    // Skill reductions and pending restores are server-owned the same way - see CharacterStore.
+                    List<SkillReduction> reportedReductions = chara.SkillReductions;
+                    chara.SkillReductions = existing?.SkillReductions;
+                    int reductions = chara.MergeSkillReductions(reportedReductions);
+                    if (reductions > 0) {
+                        Logger.LogInfo($"Recorded {reductions} skill reduction(s) reported by {chara.Name}.");
+                    }
+                    chara.PendingSkillRestores = existing?.PendingSkillRestores;
 
                     // Both stores have to be empty before this counts as a first save. WritePlayerCharacterToSave
                     // deliberately double-writes (registry AND disk) so that switching storage modes does not
                     // lose data, which means a character can be absent from one and present in the other.
                     bool isFirstSave = existing == null && !modules.character.CharacterSaves.ExistsOnDisk(chara.HostID, chara.Name);
                     if (newCharacterPolicy != null && isFirstSave) {
-                        NewCharacterRules.Result sanitized = NewCharacterRules.Apply(chara, newCharacterPolicy, recordConfiscation: true);
+                        NewCharacterRules.Result sanitized = NewCharacterRules.Apply(chara, newCharacterPolicy, record: true);
                         if (sanitized.Changed) {
                             Logger.LogWarning($"First save for {chara.Name} ({chara.HostID}) held to the new-character rules: {sanitized.Describe()}");
                             WritePlayerCharacterToSave(chara.HostID, chara);
@@ -734,12 +760,14 @@ namespace ValheimEnforcer {
                         if (reconciled.Changed) {
                             Logger.LogWarning($"Returning save for {chara.Name} ({chara.HostID}) reconciled to the stored character: {reconciled.Describe()}");
                             modules.character.SkillClamp.Apply(chara.SkillLevels, chara.Name);
+                            chara.ConsumePendingSkillRestores();
                             WritePlayerCharacterToSave(chara.HostID, chara);
                             SendSanitizedCharacterToClient(sender, chara);
                             return;
                         }
                     }
                     modules.character.SkillClamp.Apply(chara.SkillLevels, chara.Name);
+                    chara.ConsumePendingSkillRestores();
                     WritePlayerCharacterToSave(chara.HostID, chara);
                 } catch (Exception e) {
                     Logger.LogWarning($"Failed to deserialize character data from {sender}: {e.Message}");
@@ -801,13 +829,16 @@ namespace ValheimEnforcer {
             // Same withholding as every other server -> client character payload, but tagged SANITIZED so the
             // client reconciles its live inventory rather than just adopting the record.
             List<PackedItem> held = chara.ConfiscatedItems;
+            List<SkillReduction> heldReductions = chara.SkillReductions;
             ZPackage payload;
             try {
                 chara.ConfiscatedItems = null;
+                chara.SkillReductions = null;
                 payload = CharacterPayload(DataObjects.yamlserializer.Serialize(chara), CharPayloadSanitized);
             } finally {
                 // The caller's object is server-side authoritative state; never leave it stripped.
                 chara.ConfiscatedItems = held;
+                chara.SkillReductions = heldReductions;
             }
             SendSanitizedPayload(sender, chara.Name, payload);
         }
@@ -820,7 +851,7 @@ namespace ValheimEnforcer {
                 Logger.LogWarning($"Sanitized character for {name} ({hostId}) is no longer cached; the client will pick it up on its next connect instead.");
                 return;
             }
-            SendSanitizedPayload(sender, name, CharacterPayload(StripConfiscatedItemsFromYaml(yaml), CharPayloadSanitized));
+            SendSanitizedPayload(sender, name, CharacterPayload(StripServerOwnedFromYaml(yaml), CharPayloadSanitized));
         }
 
         private static void SendSanitizedPayload(long sender, string name, ZPackage payload) {
@@ -863,6 +894,38 @@ namespace ValheimEnforcer {
                 modules.character.ConfiscatedItems.ParseFilter(filter));
             Logger.LogDebug($"Cleared {cleared} tracked confiscated item(s) locally for filter '{filter}'.");
             yield break;
+        }
+
+        // Client handler: an admin restored or cleared skill reductions for this player. The save on the server
+        // is already authoritative; this raises the live skills the admin restored, drops the matching records
+        // from the copy this session is tracking (which would otherwise re-report them on the next full push),
+        // and pushes a full save so the server sees the restored levels and can confirm them.
+        public static IEnumerator OnClientReceiveSkillRestore(long sender, ZPackage package) {
+            if (!FromServer(sender)) { Logger.LogWarning($"Ignoring a skill restore not from the server (sender {sender})."); yield break; }
+            string filter = package.ReadString();
+            Dictionary<Skills.SkillType, float> levels = ReadSkillLevels(package);
+
+            int dropped = modules.character.SkillReductions.ClearTrackedLocally(modules.character.SkillReductions.ParseFilter(filter));
+            Logger.LogDebug($"Dropped {dropped} tracked skill reduction record(s) locally for filter '{filter}'.");
+
+            int raised = modules.character.SkillReductions.ApplyToLivePlayer(Player.m_localPlayer, levels, "Admin restore");
+            if (raised > 0 && Player.m_localPlayer != null) {
+                CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
+            }
+            yield break;
+        }
+
+        // Split out because an iterator cannot yield inside a try/catch, and this read has to be in one: the
+        // payload arrives over the network and a malformed one must not throw out of the Jotunn coroutine.
+        private static Dictionary<Skills.SkillType, float> ReadSkillLevels(ZPackage package) {
+            try {
+                string yaml = package.GetPos() < package.Size() ? package.ReadString() : null;
+                if (string.IsNullOrWhiteSpace(yaml)) { return null; }
+                return DataObjects.yamldeserializer.Deserialize<Dictionary<Skills.SkillType, float>>(yaml);
+            } catch (Exception e) {
+                Logger.LogWarning($"Could not read the skill levels in a restore from the server: {e.Message}");
+                return null;
+            }
         }
 
         public static IEnumerator OnClientReceiveCharacter(long sender, ZPackage package) {
@@ -1454,12 +1517,19 @@ namespace ValheimEnforcer {
             // modified one can claim any value.
             modules.character.SkillClamp.Apply(deltaSummary.SkillLevels, character.Name);
             character.SkillLevels = deltaSummary.SkillLevels;
+            // The reported levels are the only confirmation a restore ever gets - see PendingSkillRestores.
+            character.ConsumePendingSkillRestores();
             character.ActiveCharacterEffects = deltaSummary.ActiveCharacterEffects;
             // Null means the sender is not reporting a power (tracking is off, or it predates it) and must leave the
             // stored value alone. Not validated: selecting a power is purely client side, with no RPC to check it
             // against, so the stored value is only ever as good as the client that reported it.
             if (deltaSummary.GuardianPower != null) {
                 character.GuardianPower = deltaSummary.GuardianPower;
+            }
+            // Same null rule. Not validated either: what a player eats is decided entirely on their own machine, and a
+            // client that can lie here can eat whatever it likes anyway. What the record buys is the join restore.
+            if (deltaSummary.Foods != null) {
+                character.Foods = deltaSummary.Foods;
             }
 
             // Set the connection state (applied before any persistence so internal-storage and disk copies agree)
@@ -1524,14 +1594,16 @@ namespace ValheimEnforcer {
         }
 
         /// <summary>
-        /// Server -> client character payload, with ConfiscatedItems withheld.
+        /// Server -> client character payload, with ConfiscatedItems and SkillReductions withheld.
         ///
         /// The client has no use for the confiscated history (nothing client side reads it) and mirroring it back
         /// on every full push wasted a lot of bandwidth - a real test character carried 239 entries in a 309KB
         /// save, re-sent both directions on join, death, respawn, logout and every full-sync pull. Worse, the
         /// mirror went stale the moment an admin ran /clear or /return, and the client's next push resurrected
         /// what the admin had removed. With the list withheld, a client's ConfiscatedItems only ever holds what it
-        /// confiscated this session, which is exactly what MergeConfiscatedItems expects to receive.
+        /// confiscated this session, which is exactly what MergeConfiscatedItems expects to receive. The
+        /// skill-reduction record is withheld for the same reasons; PendingSkillRestores is deliberately NOT,
+        /// because the client is what applies it.
         ///
         /// Deliberately NOT folded into SendCharacterAsZpackage: that one also serves client -> server pushes,
         /// which must keep carrying the new confiscations.
@@ -1539,8 +1611,10 @@ namespace ValheimEnforcer {
         internal static ZPackage SendCharacterToClientAsZpackage(DataObjects.Character chara) {
             if (chara == null) { return new ZPackage(); }
             List<PackedItem> held = chara.ConfiscatedItems;
+            List<SkillReduction> heldReductions = chara.SkillReductions;
             try {
                 chara.ConfiscatedItems = null;
+                chara.SkillReductions = null;
                 // Tagged so every server -> client character payload carries its kind explicitly. Not tagging
                 // would still work (the client defaults an untagged payload to CHAR, for older servers), but
                 // leaving one path implicit is how the "silence means no character" ambiguity started.
@@ -1548,6 +1622,7 @@ namespace ValheimEnforcer {
             } finally {
                 // The caller's object is server-side authoritative state; never leave it stripped.
                 chara.ConfiscatedItems = held;
+                chara.SkillReductions = heldReductions;
             }
         }
 
@@ -1555,15 +1630,16 @@ namespace ValheimEnforcer {
         /// been parsed yet - used on the connect path, where the store hands back cached/on-disk YAML. Falls back
         /// to the original text if it cannot be parsed, so a corrupt save still reaches the client unchanged
         /// rather than becoming an empty payload.</summary>
-        internal static string StripConfiscatedItemsFromYaml(string yaml) {
+        internal static string StripServerOwnedFromYaml(string yaml) {
             if (string.IsNullOrEmpty(yaml)) { return yaml; }
             try {
                 DataObjects.Character chara = DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(yaml);
                 if (chara == null) { return yaml; }
                 chara.ConfiscatedItems = null;
+                chara.SkillReductions = null;
                 return DataObjects.yamlserializer.Serialize(chara);
             } catch (Exception e) {
-                Logger.LogWarning($"Could not strip confiscated items from a character payload, sending it as-is: {e.Message}");
+                Logger.LogWarning($"Could not strip the server-owned lists from a character payload, sending it as-is: {e.Message}");
                 return yaml;
             }
         }

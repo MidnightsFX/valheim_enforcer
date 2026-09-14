@@ -108,7 +108,7 @@ playerLeft: |
   {
     "embeds": [{
       "title": "Player Left",
-      "color": {statusColor},
+      "color": {colorGrey},
       "timestamp": "{timestamp}",
       "fields": [
         {"name": "Player", "value": "{player}", "inline": true},

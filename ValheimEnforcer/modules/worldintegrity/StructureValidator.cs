@@ -403,6 +403,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
                     Logger.LogInfo($"Death observed for {saveName} ({saveId}); clearing the stored item list so the grave cannot be duplicated on rejoin.");
                     if (stored.PlayerItems == null) { stored.PlayerItems = new List<DataObjects.PackedItem>(); } else { stored.PlayerItems.Clear(); }
                     stored.ActiveCharacterEffects?.Clear();
+                    stored.Foods?.Clear();
                     stored.LastDisconnect = DataObjects.DisconnectionState.DirtyDisconnect;
                     ValConfig.WritePlayerCharacterToSave(saveId, stored);
                     return;

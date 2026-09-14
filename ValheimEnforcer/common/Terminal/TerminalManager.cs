@@ -33,6 +33,7 @@ namespace ValheimEnforcer.common {
             RegisterMetaCommands();
             RegisterPlayerCommands();
             RegisterItemCommands();
+            RegisterSkillCommands();
             RegisterCharacterCommands();
             RegisterNotificationCommands();
             RegisterStructureCommands();

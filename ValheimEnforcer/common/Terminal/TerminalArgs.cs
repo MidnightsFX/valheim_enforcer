@@ -71,6 +71,54 @@ namespace ValheimEnforcer.common {
             return true;
         }
 
+        /// <summary>
+        /// The skill filter the skill commands share: 'all', or a comma-separated list of skill names (or numbers,
+        /// which is how a skill another mod added appears in a save). Returns null for 'all', like ReadItemFilter.
+        /// </summary>
+        internal static bool ReadSkillFilter(this EnforcerCommandArgs args, int index, string usage, out string raw, out List<Skills.SkillType> skills) {
+            skills = null;
+            raw = args.Args.GetString(index, null);
+            if (string.IsNullOrEmpty(raw)) {
+                args.Output.Error($"A skill filter is required - use 'all' or a comma-separated list of skill names. {usage}");
+                return false;
+            }
+            if (string.Equals(raw, "all", StringComparison.OrdinalIgnoreCase)) { return true; }
+
+            skills = new List<Skills.SkillType>();
+            foreach (string token in raw.Split(',')) {
+                string trimmed = token.Trim();
+                if (trimmed.Length == 0) { continue; }
+                if (!SkillReductions.TryParseSkill(trimmed, out Skills.SkillType skill)) {
+                    args.Output.Error($"'{trimmed}' is not a skill name. Use 'all', or names as the game spells them (Swords, Bows, Run...) - enforcer-skills-list shows which have records. {usage}");
+                    return false;
+                }
+                skills.Add(skill);
+            }
+            if (skills.Count == 0) {
+                args.Output.Error($"'{raw}' contains no skill names. Use 'all' or a comma-separated list. {usage}");
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>'all', then the skills that have a reduction on record for the character already typed.</summary>
+        internal static List<string> RecordedSkills(string[] input) {
+            List<string> options = new List<string>() { "all" };
+            try {
+                string account = input.GetString(1, null);
+                string name = input.GetString(2, null);
+                if (string.IsNullOrEmpty(account) || string.IsNullOrEmpty(name)) { return options; }
+                if (!CharacterSaves.Exists(account, name)) { return options; }
+                options.AddRange(SkillReductions.Peek(account, name, out _)
+                    .Select(record => record.Skill.ToString())
+                    .Distinct()
+                    .OrderBy(skill => skill));
+            } catch (Exception) {
+                // Completion is a convenience; an unreadable save just means fewer suggestions.
+            }
+            return options;
+        }
+
         internal static List<string> Names<T>() where T : struct, Enum {
             return Enum.GetNames(typeof(T)).ToList();
         }

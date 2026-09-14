@@ -37,13 +37,15 @@ namespace ValheimEnforcer.modules.character {
             internal bool StripItems;
             internal bool ClearCustomData;
             internal bool ClearGuardianPower;
+            internal bool ClearFoods;
             internal bool ConfiscateUnidentifiable;
+            internal bool RecordReductions;     // RecordSkillReductions
             internal HashSet<string> StartingPrefabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             /// <summary>False when every rule is off, in which case there is nothing to apply and the server
             /// side never needs to be told about a first save at all.</summary>
             internal bool AnyEnabled {
-                get { return ZeroSkills || StripItems || ClearCustomData || ClearGuardianPower; }
+                get { return ZeroSkills || StripItems || ClearCustomData || ClearGuardianPower || ClearFoods; }
             }
         }
 
@@ -56,7 +58,11 @@ namespace ValheimEnforcer.modules.character {
                 // been: an admin who is not tracking custom data at all has not asked us to police it.
                 ClearCustomData = ValConfig.PreventExternalCustomDataChanges.Value && ValConfig.newCharacterClearCustomData.Value,
                 ClearGuardianPower = ValConfig.NewCharacterClearForsakenPower.Value,
+                // One setting both tracks foods and clears a new character's: food eaten anywhere but here is exactly
+                // what tracking exists to keep out.
+                ClearFoods = ValConfig.PreventExternalFoodChanges.Value,
                 ConfiscateUnidentifiable = ValConfig.ConfiscateUnidentifiableItems.Value,
+                RecordReductions = ValConfig.RecordSkillReductions.Value,
                 StartingPrefabs = StartingPrefabs(),
             };
         }
@@ -81,10 +87,11 @@ namespace ValheimEnforcer.modules.character {
             internal int SkillsZeroed;
             internal bool CustomDataCleared;
             internal bool GuardianPowerCleared;
+            internal bool FoodsCleared;
             internal bool EffectsCleared;
 
             internal bool Changed {
-                get { return ItemsRemoved > 0 || SkillsZeroed > 0 || CustomDataCleared || GuardianPowerCleared || EffectsCleared; }
+                get { return ItemsRemoved > 0 || SkillsZeroed > 0 || CustomDataCleared || GuardianPowerCleared || FoodsCleared || EffectsCleared; }
             }
 
             internal string Describe() {
@@ -93,6 +100,7 @@ namespace ValheimEnforcer.modules.character {
                 if (SkillsZeroed > 0) { parts.Add($"{SkillsZeroed} skill(s) zeroed"); }
                 if (CustomDataCleared) { parts.Add("custom data cleared"); }
                 if (GuardianPowerCleared) { parts.Add("forsaken power cleared"); }
+                if (FoodsCleared) { parts.Add("foods cleared"); }
                 if (EffectsCleared) { parts.Add("status effects cleared"); }
                 return parts.Count == 0 ? "nothing to do" : string.Join(", ", parts.ToArray());
             }
@@ -101,19 +109,24 @@ namespace ValheimEnforcer.modules.character {
         /// <summary>
         /// Applies the policy to a character. Pure data - safe to call from the CharacterStore worker thread.
         ///
-        /// <paramref name="recordConfiscation"/> decides whether stripped items are written into the
-        /// character's confiscated list. It exists so an item is recorded exactly once: whichever side
-        /// actually removes the item from the save records it, and the other side reconciles a live inventory
-        /// against the result without recording anything. Two recordings would mean two confiscation entries
-        /// with two ids for one item, and an admin returning it would hand back two.
+        /// <paramref name="record"/> decides whether stripped items are written into the character's
+        /// confiscated list, and zeroed skills into its skill-reduction record. It exists so each is recorded
+        /// exactly once: whichever side actually removes the item (or zeroes the skill) in the save records it,
+        /// and the other side reconciles a live player against the result without recording anything. Two
+        /// recordings would mean two confiscation entries with two ids for one item, and an admin returning it
+        /// would hand back two.
         /// </summary>
-        internal static Result Apply(DataObjects.Character character, Policy policy, bool recordConfiscation) {
+        internal static Result Apply(DataObjects.Character character, Policy policy, bool record) {
             Result result = new Result();
             if (character == null || policy == null) { return result; }
 
             if (policy.ZeroSkills && character.SkillLevels != null) {
                 foreach (Skills.SkillType skill in character.SkillLevels.Keys.ToList()) {
-                    if (character.SkillLevels[skill] == 0) { continue; }
+                    float level = character.SkillLevels[skill];
+                    if (level == 0) { continue; }
+                    if (record && policy.RecordReductions) {
+                        character.AddSkillReduction(skill, level, 0, "New character: skills set to zero");
+                    }
                     character.SkillLevels[skill] = 0;
                     result.SkillsZeroed++;
                 }
@@ -133,7 +146,7 @@ namespace ValheimEnforcer.modules.character {
                         continue;
                     }
                     result.ItemsRemoved++;
-                    if (recordConfiscation) {
+                    if (record) {
                         character.AddConfiscatedItem(item, ReasonFor(item));
                     }
                 }
@@ -148,11 +161,20 @@ namespace ValheimEnforcer.modules.character {
                 result.GuardianPowerCleared = true;
             }
 
+            // Tracking is on, so the record should say "no food" rather than "not tracked". A save that arrives with
+            // no foods at all under this policy came from a client that is not running the rule, and is cleared too -
+            // left null, the character's next join would adopt whatever they are carrying.
+            if (policy.ClearFoods && (character.Foods == null || character.Foods.Count > 0)) {
+                character.Foods = new List<PackedFood>();
+                result.FoodsCleared = true;
+            }
+
             // A character that arrives buffed was buffed somewhere else. Cleared whenever an item, skill or
             // custom data rule is on, rather than under a setting of its own: there is no coherent policy where
-            // the items and skills a solo world granted are removed but the food and rested bonuses it granted
-            // are kept. The Forsaken Power rule is deliberately not one of them - it answers a narrower question,
-            // and switching it on by itself should not start stripping food.
+            // the items and skills a solo world granted are removed but the rested and mead bonuses it granted
+            // are kept. The Forsaken Power and food rules are deliberately not among them - each answers a narrower
+            // question, and switching one on by itself should not start stripping status effects. (Eaten food is
+            // not a status effect; FoodsCleared above covers it.)
             if ((policy.ZeroSkills || policy.StripItems || policy.ClearCustomData) && character.ActiveCharacterEffects != null && character.ActiveCharacterEffects.Count > 0) {
                 character.ActiveCharacterEffects.Clear();
                 result.EffectsCleared = true;

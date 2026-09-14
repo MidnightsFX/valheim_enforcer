@@ -309,6 +309,16 @@ namespace ValheimEnforcer.modules.character {
                     if (appended > 0) {
                         Logger.LogInfo($"Recorded {appended} newly confiscated item(s) for {c.Name}.");
                     }
+                    // The skill-reduction record and any pending restore are server-owned the same way, and for
+                    // the same reason: the client reports what it lowered this session, and never decides what
+                    // an admin has since restored or cleared.
+                    List<SkillReduction> reportedReductions = c.SkillReductions;
+                    c.SkillReductions = existing?.SkillReductions;
+                    int reductions = c.MergeSkillReductions(reportedReductions);
+                    if (reductions > 0) {
+                        Logger.LogInfo($"Recorded {reductions} skill reduction(s) reported by {c.Name}.");
+                    }
+                    c.PendingSkillRestores = existing?.PendingSkillRestores;
 
                     // The server's own copy of the new-character rules. The client is supposed to have applied
                     // these already (CharacterManager.BuildNewCharacter), but the client is the thing being
@@ -324,7 +334,7 @@ namespace ValheimEnforcer.modules.character {
                     // this records are in the YAML that gets written.
                     bool pushSanitized = false;
                     if (full.NewCharacterPolicy != null && state == LoadState.Missing) {
-                        NewCharacterRules.Result sanitized = NewCharacterRules.Apply(c, full.NewCharacterPolicy, recordConfiscation: true);
+                        NewCharacterRules.Result sanitized = NewCharacterRules.Apply(c, full.NewCharacterPolicy, record: true);
                         if (sanitized.Changed) {
                             Logger.LogWarning($"First save for {c.Name} ({c.HostID}) held to the new-character rules: {sanitized.Describe()}");
                             pushSanitized = true;
@@ -346,6 +356,9 @@ namespace ValheimEnforcer.modules.character {
                     // Bound any impossible skill value (>100, negative, NaN) to the valid range, independent
                     // of the enforcement policies above.
                     SkillClamp.Apply(c.SkillLevels, c.Name);
+                    // With the rules above settled this save is the client's word on its skills, so any pending
+                    // restore it now meets has landed.
+                    c.ConsumePendingSkillRestores();
 
                     // Re-serialize from the parsed object so on-disk format is always server-canonical.
                     cache[key] = new Entry { Character = c, Yaml = yamlserializer.Serialize(c) };
@@ -386,6 +399,7 @@ namespace ValheimEnforcer.modules.character {
                     Logger.LogInfo($"Death recorded for {cur.Name} ({cur.HostID}); clearing the stored item list so the grave cannot be duplicated on rejoin.");
                     if (cur.PlayerItems == null) { cur.PlayerItems = new List<PackedItem>(); } else { cur.PlayerItems.Clear(); }
                     cur.ActiveCharacterEffects?.Clear();
+                    cur.Foods?.Clear(); // vanilla empties the stomach on death; null stays null (not tracked)
                     cur.LastDisconnect = DisconnectionState.DirtyDisconnect;
                     cache[key] = new Entry { Character = cur, Yaml = yamlserializer.Serialize(cur) };
                     return key;

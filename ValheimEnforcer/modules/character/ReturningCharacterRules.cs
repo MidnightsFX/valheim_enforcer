@@ -10,8 +10,8 @@ namespace ValheimEnforcer.modules.character {
     ///
     /// On join the client validates its live inventory against the stored character
     /// (<see cref="CharacterManager.LoadAndValidatePlayer"/>): items the stored save does not account for are
-    /// confiscated, skills above the stored level are clamped, custom data and the Forsaken Power are reset to the
-    /// stored copy. That is
+    /// confiscated, skills above the stored level are clamped, custom data, the Forsaken Power and foods are reset
+    /// to the stored copy. That is
     /// exactly the enforcement a modified client skips, then uploads the un-validated result as the new
     /// authoritative save. This re-runs the same decisions on the server, against the stored character, on the
     /// first full save of the session - so the documented Player Sync rules hold regardless of what the client
@@ -34,10 +34,12 @@ namespace ValheimEnforcer.modules.character {
             internal bool ClampSkills;          // PreventExternalSkillRaises
             internal bool ResetCustomData;      // PreventExternalCustomDataChanges
             internal bool ResetGuardianPower;   // PreventExternalForsakenPowerChanges
+            internal bool ResetFoods;           // PreventExternalFoodChanges
             internal bool LenientDirtyRemoval;  // ItemRemovalForDirtyReconnection
+            internal bool RecordReductions;     // RecordSkillReductions
 
             internal bool AnyEnabled {
-                get { return RemoveUntracked || ClampSkills || ResetCustomData || ResetGuardianPower; }
+                get { return RemoveUntracked || ClampSkills || ResetCustomData || ResetGuardianPower || ResetFoods; }
             }
         }
 
@@ -48,7 +50,9 @@ namespace ValheimEnforcer.modules.character {
                 ClampSkills = ValConfig.PreventExternalSkillRaises.Value,
                 ResetCustomData = ValConfig.PreventExternalCustomDataChanges.Value,
                 ResetGuardianPower = ValConfig.PreventExternalForsakenPowerChanges.Value,
+                ResetFoods = ValConfig.PreventExternalFoodChanges.Value,
                 LenientDirtyRemoval = ValConfig.ItemRemovalForDirtyReconnection.Value,
+                RecordReductions = ValConfig.RecordSkillReductions.Value,
             };
         }
 
@@ -57,9 +61,10 @@ namespace ValheimEnforcer.modules.character {
             internal int SkillsClamped;
             internal bool CustomDataReset;
             internal bool GuardianPowerReset;
+            internal bool FoodsReset;
 
             internal bool Changed {
-                get { return ItemsConfiscated > 0 || SkillsClamped > 0 || CustomDataReset || GuardianPowerReset; }
+                get { return ItemsConfiscated > 0 || SkillsClamped > 0 || CustomDataReset || GuardianPowerReset || FoodsReset; }
             }
 
             internal string Describe() {
@@ -68,6 +73,7 @@ namespace ValheimEnforcer.modules.character {
                 if (SkillsClamped > 0) { parts.Add($"{SkillsClamped} skill(s) clamped"); }
                 if (CustomDataReset) { parts.Add("custom data reset"); }
                 if (GuardianPowerReset) { parts.Add("forsaken power reset"); }
+                if (FoodsReset) { parts.Add("foods reset"); }
                 return parts.Count == 0 ? "nothing to do" : string.Join(", ", parts.ToArray());
             }
         }
@@ -75,8 +81,9 @@ namespace ValheimEnforcer.modules.character {
         /// <summary>
         /// Reconciles an uploaded character <paramref name="incoming"/> to the server's <paramref name="stored"/>
         /// copy. Mutates <paramref name="incoming"/> in place (its item list is trimmed, confiscations appended,
-        /// skills clamped, custom data reset) and returns what changed. Confiscations are recorded on the
-        /// incoming character, whose ConfiscatedItems list is the server-owned one by the time this runs.
+        /// skills clamped, custom data reset) and returns what changed. Confiscations and skill reductions are
+        /// recorded on the incoming character, whose ConfiscatedItems and SkillReductions lists are the
+        /// server-owned ones by the time this runs.
         /// </summary>
         internal static Result Apply(DataObjects.Character incoming, DataObjects.Character stored, Policy policy) {
             Result result = new Result();
@@ -121,8 +128,22 @@ namespace ValheimEnforcer.modules.character {
                 List<Skills.SkillType> keys = new List<Skills.SkillType>(incoming.SkillLevels.Keys);
                 foreach (Skills.SkillType skill in keys) {
                     if (!stored.SkillLevels.TryGetValue(skill, out float storedLevel)) { continue; }
-                    if (incoming.SkillLevels[skill] > storedLevel) {
-                        incoming.SkillLevels[skill] = storedLevel;
+                    // An admin's restore raises the ceiling: the level they granted arrives from the client
+                    // looking exactly like an external gain, and must not be taken straight back.
+                    float ceiling = storedLevel;
+                    if (stored.PendingSkillRestores != null
+                        && stored.PendingSkillRestores.TryGetValue(skill, out float pending) && pending > ceiling) {
+                        ceiling = pending;
+                    }
+                    float reported = incoming.SkillLevels[skill];
+                    if (reported > ceiling) {
+                        // The server's own record of the lowering. On an honest client the join clamp already ran
+                        // and recorded it, and the reported level equals the stored one, so this never fires; it
+                        // fires - and records - for the client that skipped the clamp.
+                        if (policy.RecordReductions) {
+                            incoming.AddSkillReduction(skill, reported, ceiling, "Returning character: above the stored level");
+                        }
+                        incoming.SkillLevels[skill] = ceiling;
                         result.SkillsClamped++;
                     }
                 }
@@ -147,6 +168,16 @@ namespace ValheimEnforcer.modules.character {
             if (policy.ResetGuardianPower && stored.GuardianPower != null && incoming.GuardianPower != stored.GuardianPower) {
                 incoming.GuardianPower = stored.GuardianPower;
                 result.GuardianPowerReset = true;
+            }
+
+            // Foods reset to what this character last had here, but only when the upload holds more than that - a food
+            // the stored save does not have, or more burn time on one. The client restores the stored foods exactly on
+            // join and they only drain from there, so an honest first save always holds the same or less, and
+            // resetting it anyway would hand back the few seconds it drained. A stored null predates tracking and has
+            // nothing to reset to, matching the client's FoodSync.RestoreOnJoin.
+            if (policy.ResetFoods && PackedFood.Exceeds(incoming.Foods, stored.Foods)) {
+                incoming.Foods = PackedFood.Copy(stored.Foods);
+                result.FoodsReset = true;
             }
 
             return result;

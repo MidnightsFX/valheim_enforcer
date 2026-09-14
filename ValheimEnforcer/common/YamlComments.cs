@@ -41,13 +41,24 @@ namespace ValheimEnforcer.common {
             internal readonly List<string> Trailing = new List<string>();
 
             /// <summary>
+            /// The comment block the file opened with - the header banner - including the blank lines under it.
+            ///
+            /// Pinned to the top of the file rather than anchored to the first key like every other block. It
+            /// describes the file, not the entry that happens to be written first, and anchoring it to that key
+            /// sent the whole Mods.yaml banner to the bottom as an orphan the day activeMods stopped being written.
+            /// </summary>
+            internal readonly List<string> Leading = new List<string>();
+
+            /// <summary>
             /// True when the file opened with a comment block. Used to decide whether a regenerated file needs
             /// its header banner put back - see ModManager.PersistModSettings.
             /// </summary>
-            internal bool HasLeadingBlock { get; set; }
+            internal bool HasLeadingBlock {
+                get { return Leading.Count > 0; }
+            }
 
             internal bool IsEmpty {
-                get { return Blocks.Count == 0 && Trailing.Count == 0; }
+                get { return Leading.Count == 0 && Blocks.Count == 0 && Trailing.Count == 0; }
             }
 
             internal void Add(string path, List<string> block) {
@@ -92,8 +103,7 @@ namespace ValheimEnforcer.common {
                 if (pending.Count > 0) {
                     List<string> block = TrimLeadingBlanks(pending);
                     if (block.Count > 0) {
-                        captured.Add(path, block);
-                        if (!seenAnchor) { captured.HasLeadingBlock = true; }
+                        if (seenAnchor) { captured.Add(path, block); } else { captured.Leading.AddRange(block); }
                     }
                     pending.Clear();
                 }
@@ -124,6 +134,8 @@ namespace ValheimEnforcer.common {
             PathTracker tracker = new PathTracker();
             HashSet<string> placed = new HashSet<string>();
             StringBuilder output = new StringBuilder();
+
+            foreach (string comment in captured.Leading) { output.Append(comment).Append(newline); }
 
             foreach (string line in lines) {
                 if (!IsComment(line) && !IsBlank(line)) {

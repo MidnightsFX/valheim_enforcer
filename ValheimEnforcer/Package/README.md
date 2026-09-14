@@ -23,8 +23,12 @@ Server saved character progression lock. All of the following features are confi
 - Character progress is saved on the server
 - Prevents characters from bringing untracked items onto the server
 - Prevents characters from raising skills externally
+- Puts a returning character's skills back to the levels the server holds when they arrive lower, the way missing items are handed back, so a character recreated after a deleted local save keeps its progress
+- Records every skill it lowers, so an admin can put one back with a command ([Restoring skills](#restoring-skills))
 - Optionally holds each character's Forsaken Power to the one they selected on this server, and clears it on a character's first join
 - Optionally gives a character joining for the first time a blank map of the world, so a map uncovered in a copy of it elsewhere does not come with them
+- Optionally holds each character's eaten food to what they last had on this server, and clears it on a character's first join
+- Clears the recipes a character joining for the first time discovered elsewhere, so they start crafting and building from what they find here
 - Optionally limits each account to a single character, with an exemption list ([One Character Per Account](#one-character-per-account))
 - Imports existing characters from ServerCharacters so players migrate without losing anything ([Migrating from ServerCharacters](#migrating-from-servercharacters))
 
@@ -56,19 +60,20 @@ The mod list lives in `BepInEx/config/ValheimEnforcer/Mods.yaml`. Both sides nee
 
 The file is regenerated at startup and re-read within `ConfigPollIntervalSeconds` (30 by default) of being edited, so you can change it on a running server. Comments you write on their own line are kept across those rewrites and stay attached to the entry below them; a comment sharing a line with a value is not, since that line gets rewritten from scratch.
 
-#### The five lists
+#### The four lists
 
 | List | Who fills it in | Client has the mod | Client does not |
 | --- | --- | --- | --- |
-| `activeMods` | Generated, every start | — | — |
 | `requiredMods` | Auto-populated, then yours | allowed | **rejected** |
 | `optionalMods` | You | allowed | allowed |
-| `adminOnlyMods` | You | admins only, everyone else **rejected** | allowed |
+| `adminOnlyMods` | You | admins allowed, everyone else **rejected** | allowed, admins included |
 | `serverOnlyMods` | You | **rejected** | allowed |
+
+`adminOnlyMods` permits a mod to admins without requiring it of them — an admin can connect with or without it. It also outranks `requiredMods`: a mod on both is treated as admin-only, and the server logs which mods that applies to at startup.
 
 Every list is keyed by the mod's BepInEx plugin GUID — `Azumatt.AzuCraftyBoxes`, not `AzuCraftyBoxes`. It is the `GUID` in the plugin's `BepInPlugin` attribute, and the surest place to read it off is the server's `LogOutput.log`, where BepInEx lists each plugin as it loads. A mod that appears in none of the lists is rejected.
 
-`activeMods` is what this machine loaded. It is rebuilt from the running plugins on every start and never read back out of the file, so editing it does nothing. That is deliberate: it is also the list each side reports about itself during the handshake, and a list taken from a text file is a list a player can type whatever they like into.
+`ServerActiveMods.yaml`, beside `Mods.yaml`, lists every plugin this machine loaded, sorted by GUID and written exactly like a `Mods.yaml` entry, so you can copy an entry straight into whichever list it belongs in. It is deleted and rewritten on every start, never read, and not synced to anyone, so editing it does nothing. The list each side reports about itself during the handshake is taken from the plugins actually running, never from a file, because a list taken from a text file is a list a player can type whatever they like into.
 
 `serverOnlyMods` is for mods the server runs and nobody else needs — a map generator, a backup tool, a Discord bridge. It keeps them out of `requiredMods` without demanding them of anyone. It is **not** the list for client-side mods: a client that installs a server-only mod is rejected for it, because that mod is on no list that permits it. Client-side mods belong in `optionalMods`.
 
@@ -108,8 +113,9 @@ The client runs the same comparison against the server's list and shows the resu
 
 | What | Controlled by |
 | --- | --- |
-| `activeMods` rebuilt from the plugins actually loaded | always |
+| `ServerActiveMods.yaml` deleted and rewritten from the plugins actually loaded | always |
 | Any loaded plugin not already on a list is added to `requiredMods`, with `enforceVersion: false` | `AutoAddModsToRequired` *(on)* |
+| Any `requiredMods` entry for a mod the server does not have loaded is removed | `RemoveUnloadedModsFromRequired` *(off)* |
 | A mod's `version` is corrected in whichever list holds it when you update the mod | always |
 | The SHA256 of every plugin the server loads is recorded as its accepted hash | `RecordHashesForLoadedMods` *(on)* |
 | Mods pinned with a `thunderstorePackage` are downloaded and hashed | `ResolveThunderstoreHashes` *(off)* |
@@ -131,7 +137,8 @@ All of these are server-side and synced to admins, so an admin can change them i
 | Setting | Section | Default | Effect |
 | --- | --- | --- | --- |
 | `AutoAddModsToRequired` | Mods | `true` | Adds any loaded plugin that is on no list to `requiredMods`. Turn it off to curate the file by hand — mods you have not listed are then rejected rather than adopted |
-| `UpdateLoadedModsOnStartup` | Mods | `true` | Writes version corrections, auto-added mods and recorded hashes back to the file. With it off, all of that still applies for the session but nothing is saved |
+| `RemoveUnloadedModsFromRequired` | Mods | `false` | Removes `requiredMods` entries for mods the server does not have loaded, so a mod you uninstall from the server stops being demanded of clients. Only `requiredMods` is touched. Leave it off if you require a mod the server does not run itself |
+| `UpdateLoadedModsOnStartup` | Mods | `true` | Writes version corrections, auto-added mods, removed mods and recorded hashes back to the file. With it off, all of that still applies for the session but nothing is saved |
 | `HashEnforcement` | Mods | `WhenKnown` | File verification mode — see [Mod File Verification](#mod-file-verification) |
 | `RecordHashesForLoadedMods` | Mods | `true` | Records the hash of every plugin this machine loads. Needs `UpdateLoadedModsOnStartup` to reach disk |
 | `ResolveThunderstoreHashes` | Mods | `false` | Downloads and hashes mods pinned with a `thunderstorePackage`. Off by default because it makes outbound requests |
@@ -147,11 +154,13 @@ All of these are server-side and synced to admins, so an admin can change them i
 
 **Let players use a client-side mod.** Move its entry from `requiredMods` to `optionalMods`, or add it there if the server does not run it. They can then connect with or without it.
 
-**Give admins a tool nobody else may run.** Put it in `adminOnlyMods`. Admin status is read from the server's admin list at connect time, so no client can claim it.
+**Give admins a tool nobody else may run.** Put it in `adminOnlyMods`. Admins who do not want it can leave it uninstalled. If the server runs the mod too, it will already be in `requiredMods`; you can leave that entry, since `adminOnlyMods` wins, or delete it to keep the file tidy. Admin status is read from the server's admin list at connect time, so no client can claim it.
 
 **Stop a server-side mod being demanded of clients.** Move it to `serverOnlyMods`. Note that this also means no one may connect *with* it.
 
-**Require a mod the server does not run.** Add it to `requiredMods` by hand with its GUID, version and name. To verify the file as well, give it a `thunderstorePackage` and turn on `ResolveThunderstoreHashes`.
+**Stop requiring a mod you removed from the server.** Delete its entry from `requiredMods`, or turn on `RemoveUnloadedModsFromRequired` and every mod the server no longer loads is dropped from that list on the next start.
+
+**Require a mod the server does not run.** Add it to `requiredMods` by hand with its GUID, version and name, and keep `RemoveUnloadedModsFromRequired` off — it would remove the entry on the next start. To verify the file as well, give it a `thunderstorePackage` and turn on `ResolveThunderstoreHashes`.
 
 ### Mod File Verification
 
@@ -745,6 +754,9 @@ Type `enforcer-help` for the list, or `enforcer-help items` for one area of it. 
 | `enforcer-items-list` | What has been confiscated from one character |
 | `enforcer-items-return` | Gives confiscated items back |
 | `enforcer-items-clear` | Deletes confiscated items for good |
+| `enforcer-skills-list` | Every skill this mod has lowered for one character, and what it was lowered from |
+| `enforcer-skills-restore` | Puts lowered skills back to where they were |
+| `enforcer-skills-clear` | Forgets recorded skill reductions without restoring them |
 | `enforcer-characters-import` | Imports saves from ServerCharacters ([details](#migrating-from-servercharacters)) |
 | `enforcer-notify-test` | Previews a Discord message ([details](#discord-notifications)) |
 | `enforcer-structures-scan` | Finds cheat-placed structures ([details](#structure-validation)) |
@@ -810,3 +822,19 @@ There are two ways to do so.
 	- Ensure the player is offline (server can be running) 
 	- If you are unsure about the player's account ID, run `enforcer-player-list` in-game to get the player's account ID and character name
 	- Move any item listed under `confiscatedItems` to the `playerItems` list in the player's save file. Player save files are located in `BepInEx\config\ValheimEnforcer\Characters\<PlatformID>\playername.yaml` on the server.
+
+#### Restoring skills
+
+Two of the Player Sync rules lower a skill: `PreventExternalSkillRaises` clamps a returning character back to the level the server has for them, and `NewCharacterSetSkillsToZero` zeroes a first-time character. Both are right in the case they exist for, and both are occasionally wrong — a save that went stale over a crash, or a player treated as new because the mod was installed after they were. So every skill this mod lowers is written into the character's save with the level it was lowered from, the level it was lowered to, when, and why (`RecordSkillReductions`, on by default), and there are commands to act on that record.
+
+- Run `enforcer-player-list` to get the player's account ID and character name
+- Run `enforcer-skills-list AcountID999999 CharacterName` to see what was lowered, and from what
+- Run `enforcer-skills-restore AcountID999999 CharacterName Swords,Bows` (or `all`) to put them back. Each skill goes back to the highest level it was recorded being lowered from, and a skill the player has since levelled past is left alone — a restore never lowers anything. If they are online it is applied straight away; if not, on their next join. Either way the command tells you which.
+- Run `enforcer-skills-clear AcountID999999 CharacterName all` to forget records without restoring anything, for a reduction that was deserved.
+
+Things worth knowing:
+
+- A character whose skills arrive *below* the stored levels has them raised on join (`RestoreSkillsFromPlayerServerSave`, on by default), the same way missing items are handed back — so deleting and recreating a character locally does not lose the progress the server holds. Like the item restore it is skipped on a dirty reconnect unless `ItemReturnForDirtyReconnection` is on.
+- Only reductions this mod makes are recorded. The skill loss on death is the game's own, and a reported level the game could never produce (above 100, negative) is corrected without a record, because there is nothing valid to put it back to.
+- A restore waits on the server, as `pendingSkillRestores` in the save, until the player's client is seen holding the level. So one sent to a player who disconnects that instant, or who is on an older build of the mod, is applied on a later join rather than lost. `enforcer-skills-list` shows what is still waiting.
+- The record sits in the save file under `skillReductions`, so the manual route works here too: while the player is offline, add the skill and the level you want under `pendingSkillRestores` and delete the record.

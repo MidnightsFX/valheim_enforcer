@@ -713,6 +713,88 @@ namespace ValheimEnforcer.common {
             /// </summary>
             [DefaultValue(null)]
             public string GuardianPower { get; set; }
+
+            /// <summary>
+            /// The foods the sender currently has eaten, or null when it is not reporting them - tracking is off, or
+            /// the sender predates it. Null leaves the stored value alone; an empty list is a real value meaning "no
+            /// food". See <see cref="Character.Foods"/>.
+            /// </summary>
+            [DefaultValue(null)]
+            public List<PackedFood> Foods { get; set; }
+        }
+
+        /// <summary>
+        /// One eaten food, recorded the way vanilla's own player profile records it: the item's prefab name and the
+        /// seconds of burn time left. Health, stamina and eitr are not stored because vanilla derives them from the
+        /// burn time on every food tick.
+        /// </summary>
+        [Serializable]
+        public class PackedFood {
+            public string Name { get; set; }
+            public float Time { get; set; }
+
+            // Two captures of the same food moments apart differ only by drain, and a float that has been through
+            // YAML may not round trip exactly. Anything within this is the same serving.
+            internal const float TimeToleranceSeconds = 1f;
+
+            public PackedFood() {
+            }
+
+            internal static List<PackedFood> Copy(List<PackedFood> foods) {
+                if (foods == null) { return null; }
+                List<PackedFood> copy = new List<PackedFood>(foods.Count);
+                foreach (PackedFood food in foods) {
+                    if (food == null) { continue; }
+                    copy.Add(new PackedFood { Name = food.Name, Time = food.Time });
+                }
+                return copy;
+            }
+
+            /// <summary>
+            /// True when <paramref name="candidate"/> holds anything <paramref name="baseline"/> does not account for:
+            /// a food that is not in it, or more burn time on one than it had. Burn time only ever drains, so the
+            /// only ways to get either are eating something or bringing it in from elsewhere. Having less than the
+            /// baseline - a food that drained or ran out - is never an excess. A null candidate is not reporting
+            /// its foods at all and is counted as an excess of any tracked baseline, so that not reporting cannot
+            /// be used to escape the check.
+            /// </summary>
+            internal static bool Exceeds(List<PackedFood> candidate, List<PackedFood> baseline) {
+                if (baseline == null) { return false; }
+                if (candidate == null) { return true; }
+                foreach (PackedFood food in candidate) {
+                    if (food == null) { continue; }
+                    PackedFood match = Find(baseline, food.Name);
+                    if (match == null || food.Time > match.Time + TimeToleranceSeconds) { return true; }
+                }
+                return false;
+            }
+
+            /// <summary>True when both lists hold the same foods, in any order, with burn times within the tolerance.</summary>
+            internal static bool Same(List<PackedFood> a, List<PackedFood> b) {
+                if (a == null || b == null) { return a == b; }
+                if (Count(a) != Count(b)) { return false; }
+                foreach (PackedFood food in a) {
+                    if (food == null) { continue; }
+                    PackedFood match = Find(b, food.Name);
+                    if (match == null || Math.Abs(food.Time - match.Time) > TimeToleranceSeconds) { return false; }
+                }
+                return true;
+            }
+
+            private static PackedFood Find(List<PackedFood> foods, string name) {
+                foreach (PackedFood food in foods) {
+                    if (food != null && food.Name == name) { return food; }
+                }
+                return null;
+            }
+
+            private static int Count(List<PackedFood> foods) {
+                int count = 0;
+                foreach (PackedFood food in foods) {
+                    if (food != null) { count++; }
+                }
+                return count;
+            }
         }
 
         public class CharacterSaveData {
@@ -721,6 +803,30 @@ namespace ValheimEnforcer.common {
 
         public class AccountEntries {
             public Dictionary<string, List<string>> AccountCharacterEntries = new Dictionary<string, List<string>>();
+        }
+
+        /// <summary>
+        /// One forced lowering of a skill by this mod: a returning character clamped back to the level the server
+        /// holds for them, or a new character's skills set to zero. Recorded so an admin can undo it
+        /// (enforcer-skills-restore) the way a confiscated item can be handed back. The game's own skill loss on
+        /// death is not one of these, and neither is the correction of an impossible value (above 100, negative,
+        /// NaN) - there is nothing valid to put such a value back to.
+        /// </summary>
+        [Serializable]
+        public class SkillReduction {
+            public Skills.SkillType Skill { get; set; }
+            /// <summary>The level the skill was lowered from. Kept as reported, even when it is a value the game
+            /// could never produce, because "reduced from 150" tells an admin what actually happened; a restore
+            /// clamps it to the valid range.</summary>
+            public float From { get; set; }
+            public float To { get; set; }
+            public string Reason { get; set; }
+            public DateTime Time { get; set; }
+            /// <summary>Stable per-record identity, assigned once in Character.AddSkillReduction, for the same
+            /// reason PackedItem.confiscationId exists: the client reports what it lowered this session on every
+            /// full push, and the server appends by id so a repeated push neither duplicates nor loses one.</summary>
+            [DefaultValue(null)]
+            public string Id { get; set; }
         }
 
         public class Character {
@@ -737,10 +843,39 @@ namespace ValheimEnforcer.common {
             /// </summary>
             [DefaultValue(null)]
             public string GuardianPower { get; set; }
+            /// <summary>
+            /// The foods this character last had eaten here. Empty and null are different answers, the same way as
+            /// <see cref="GuardianPower"/>: empty means tracked with no food eaten, null means never tracked (the save
+            /// predates PreventExternalFoodChanges, or was written with it off), and a join adopts the live foods
+            /// rather than stripping them. See modules.character.FoodSync.
+            /// </summary>
+            [DefaultValue(null)]
+            public List<PackedFood> Foods { get; set; }
             public Dictionary<string, string> PlayerCustomData { get; set; } = new Dictionary<string, string>();
             public Dictionary<string, PackedStatusEffect> ActiveCharacterEffects { get; set; } = new Dictionary<string, PackedStatusEffect>();
             public List<PackedItem> PlayerItems { get; set; } = new List<PackedItem>();
             public List<PackedItem> ConfiscatedItems { get; set; } = new List<PackedItem>();
+            /// <summary>
+            /// Every forced skill reduction this character has had here that an admin has not yet restored or
+            /// cleared. Server-owned in exactly the way <see cref="ConfiscatedItems"/> is: the client only reports
+            /// what it lowered this session, the server appends by id, and it is withheld from every payload sent to
+            /// a client. Null rather than empty when there are none, so a save with no records is written unchanged.
+            /// See modules.character.SkillReductions.
+            /// </summary>
+            [DefaultValue(null)]
+            public List<SkillReduction> SkillReductions { get; set; }
+            /// <summary>
+            /// Skill levels an admin has restored (enforcer-skills-restore) that the player's client has not yet been
+            /// seen to hold. Server-owned and kept across the client's saves, but - unlike the lists above - sent to
+            /// the client, because the client is what applies it: on join, or straight away when online. An entry
+            /// is dropped by the server the moment a save or delta reports the skill at or above the level, so a
+            /// restore that never reached the client (they disconnected as it was sent, or run a build that
+            /// predates this) is applied on a later join instead of being lost. Also raises the ceiling the
+            /// returning-character skill clamp holds the first save of a session to, so the restored level is not
+            /// read as an external gain and taken straight back.
+            /// </summary>
+            [DefaultValue(null)]
+            public Dictionary<Skills.SkillType, float> PendingSkillRestores { get; set; }
 
             public bool RemoveFromPlayerItems(PackedItem packedItem) {
                 bool removed = false;
@@ -853,6 +988,78 @@ namespace ValheimEnforcer.common {
                     added++;
                 }
                 return added;
+            }
+
+            /// <summary>Records that this mod lowered a skill. Pure data - safe on the CharacterStore worker.</summary>
+            public void AddSkillReduction(Skills.SkillType skill, float from, float to, string reason) {
+                if (SkillReductions == null) { SkillReductions = new List<SkillReduction>(); }
+                SkillReductions.Add(new SkillReduction {
+                    Skill = skill,
+                    From = from,
+                    To = to,
+                    Reason = reason,
+                    Time = DateTime.UtcNow,
+                    Id = Guid.NewGuid().ToString("N"),
+                });
+            }
+
+            /// <summary>
+            /// Server side: fold a client's reported skill reductions into this (authoritative) character's list.
+            /// Append only, keyed on id, for exactly the reasons <see cref="MergeConfiscatedItems"/> gives: the
+            /// client's copy is a report of this session, never a replacement for ours, and a repeated push must be
+            /// idempotent. Entries with no id are legacy mirrors of something already held and are ignored.
+            /// </summary>
+            /// <returns>How many new entries were appended.</returns>
+            public int MergeSkillReductions(List<SkillReduction> incoming) {
+                if (incoming == null || incoming.Count == 0) { return 0; }
+
+                HashSet<string> known = new HashSet<string>();
+                if (SkillReductions != null) {
+                    foreach (SkillReduction existing in SkillReductions) {
+                        if (existing != null && !string.IsNullOrEmpty(existing.Id)) { known.Add(existing.Id); }
+                    }
+                }
+
+                int added = 0;
+                foreach (SkillReduction candidate in incoming) {
+                    if (candidate == null || string.IsNullOrEmpty(candidate.Id)) { continue; }
+                    if (!known.Add(candidate.Id)) { continue; } // already recorded
+                    if (SkillReductions == null) { SkillReductions = new List<SkillReduction>(); }
+                    SkillReductions.Add(candidate);
+                    added++;
+                }
+                return added;
+            }
+
+            /// <summary>Notes that an admin wants this skill put back to <paramref name="level"/>. A higher level
+            /// already pending for the same skill is kept.</summary>
+            public void AddPendingSkillRestore(Skills.SkillType skill, float level) {
+                if (PendingSkillRestores == null) { PendingSkillRestores = new Dictionary<Skills.SkillType, float>(); }
+                if (PendingSkillRestores.TryGetValue(skill, out float current) && current >= level) { return; }
+                PendingSkillRestores[skill] = level;
+            }
+
+            /// <summary>
+            /// Server side, after <see cref="SkillLevels"/> has been replaced by what a client reported: drop every
+            /// pending restore the report shows has landed. The client says nothing about having applied one; it
+            /// simply reports the raised level, and that is the only confirmation worth having. Pure data.
+            /// </summary>
+            /// <returns>How many pending restores were confirmed.</returns>
+            public int ConsumePendingSkillRestores() {
+                if (PendingSkillRestores == null || PendingSkillRestores.Count == 0 || SkillLevels == null) { return 0; }
+                List<Skills.SkillType> landed = new List<Skills.SkillType>();
+                foreach (KeyValuePair<Skills.SkillType, float> pending in PendingSkillRestores) {
+                    // A whisker of tolerance: the level has been through YAML at least once on its way here.
+                    if (SkillLevels.TryGetValue(pending.Key, out float reported) && reported + 0.01f >= pending.Value) {
+                        landed.Add(pending.Key);
+                    }
+                }
+                foreach (Skills.SkillType skill in landed) {
+                    Logger.LogInfo($"Skill restore for {Name} confirmed: {skill} is back at {SkillLevels[skill]}.");
+                    PendingSkillRestores.Remove(skill);
+                }
+                if (PendingSkillRestores.Count == 0) { PendingSkillRestores = null; }
+                return landed.Count;
             }
         }
 

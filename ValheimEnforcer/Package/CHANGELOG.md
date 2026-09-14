@@ -1,3 +1,43 @@
+**0.26.0**
+---
+```
+- Fixes incorrect default coloring of player left message
+- Adds PreventExternalFoodChanges (Player Sync, default off). The character save now records the foods a character has
+  eaten and how long each has left, and puts exactly those back when they join - so food eaten in a solo world or on
+  another server, or a free top-up, cannot be walked in.
+    - A character joining for the first time has all of their food cleared.
+    - A save written before the setting was on has no foods recorded. That character keeps what they arrive with on
+      their next join and is tracked from then on, so switching this on strips nobody.
+    - Re-applied server side on the first save of each session when ServerSideJoinEnforcement is on.
+- Adds NewCharacterClearKnownRecipes (Player Sync, default on): a character joining a server for the first time forgets
+  the recipes and build pieces they discovered elsewhere, along with the materials, crafting stations and trophies
+  that discover them. Only once the server confirms it holds no save for the character, and never in singleplayer.
+- Moves the list of loaded mods out of Mods.yaml into ServerActiveMods.yaml, beside it. Entries are sorted and written
+  exactly like a Mods.yaml entry, ready to copy into a list. The file is deleted and rewritten every start, never read,
+  and not synced.
+    - An existing Mods.yaml drops its activeMods section on the next rewrite, and its header banner has the activeMods
+      line swapped for one pointing at the new file. Comments are unaffected.
+- Adds RemoveUnloadedModsFromRequired (Mods, default true): at startup, removes requiredMods entries for mods the server
+  does not have loaded, so an uninstalled mod stops being demanded of clients.
+- Fixes adminOnlyMods being required of admins. A mod on both adminOnlyMods and requiredMods - which is what adding a mod
+  the server loads to adminOnlyMods usually leaves behind - was treated as required: every client, admins included, had
+  to install it, and non-admins were let in with it. adminOnlyMods now wins, so the mod is optional for admins and
+  refused to everyone else. A startup log line names any mod on both lists.
+- Adds enforcer-skills-list, enforcer-skills-restore and enforcer-skills-clear, and RecordSkillReductions (Player Sync,
+  default on). Every skill this mod lowers - a returning character clamped back to the stored level, a new character's
+  skills set to zero - is now recorded in the character's save with the level it was lowered from and to, when and why,
+  and an admin can put it back.
+    - Restore puts each skill back to the highest level it was recorded being lowered from, and never lowers one. A
+      player who is online gets it straight away; one who is offline gets it on their next join, and a restore that
+      does not reach a player is applied on a later join rather than lost.
+    - The game's own skill loss on death is not recorded, and neither is the correction of a reported level the game
+      could never produce.
+- Adds RestoreSkillsFromPlayerServerSave (Player Sync, default on): a returning character whose skills arrive below the
+  levels the server holds has them raised on join, the way missing items are handed back - so a character recreated
+  after its local save was deleted keeps the progress the server holds instead of pushing blank skills up as the new
+  record. Skipped on a dirty reconnect unless ItemReturnForDirtyReconnection is on.
+```
+
 **0.25.0**
 ---
 ```

@@ -32,12 +32,8 @@ namespace ValheimEnforcer.modules.character {
         internal static void ResetForNewCharacter(string characterName) {
             if (!Enabled) { return; }
 
-            // ResolveSessionCharacter reads "the server has not answered yet" as new, which is the safe direction for
-            // items. It is not the safe direction for a map, so only a definite answer counts here: this machine owns
-            // the store, or the server explicitly said it holds no save.
-            bool confirmedNew = CharacterManager.ThisMachineIsAuthority()
-                || CharacterManager.ServerCharacter == CharacterManager.ServerCharacterState.ServerHasNone;
-            if (!confirmedNew) {
+            // "The server has not answered yet" counts as new for items, but it is not the safe direction for a map.
+            if (!CharacterManager.ConfirmedNewCharacter()) {
                 Logger.LogWarning($"Not resetting the map for {characterName}: the server has not confirmed this is a new character, and a wiped map cannot be given back.");
                 return;
             }

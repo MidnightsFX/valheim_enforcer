@@ -120,6 +120,16 @@ namespace ValheimEnforcer.modules.character {
         }
 
         /// <summary>
+        /// A definite answer that the character is new here: this machine owns the store, or the server explicitly
+        /// said it holds no save. ResolveSessionCharacter also reads "the server has not answered yet" as new, which
+        /// is the safe direction for items - they are recorded and can be handed back. The join rules that cannot be
+        /// undone (MapExploration, KnownRecipes) ask this instead.
+        /// </summary>
+        internal static bool ConfirmedNewCharacter() {
+            return ThisMachineIsAuthority() || ServerCharacter == ServerCharacterState.ServerHasNone;
+        }
+
+        /// <summary>
         /// The one answer to "what does this session start from", and the fix for the bug this whole path
         /// exists around.
         ///
@@ -291,6 +301,7 @@ namespace ValheimEnforcer.modules.character {
                     HostID = playerID,
                     SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level),
                     GuardianPower = ForsakenPower.Capture(__instance),
+                    Foods = FoodSync.Capture(__instance),
                     ConfiscatedItems = null,
                     LastDisconnect = lastDisconnect
                 };
@@ -319,6 +330,7 @@ namespace ValheimEnforcer.modules.character {
                 savableChar.LastDisconnect = lastDisconnect;
                 savableChar.SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
                 savableChar.GuardianPower = ForsakenPower.Capture(__instance);
+                savableChar.Foods = FoodSync.Capture(__instance);
                 Logger.LogDebug($"Updated player skills for {PlayerName} with ID {playerID}.");
                 if (ValConfig.PreventExternalCustomDataChanges.Value) {
                     savableChar.PlayerCustomData = CompatCustomData.SnapshotForTracking(__instance.m_customData);
@@ -406,6 +418,8 @@ namespace ValheimEnforcer.modules.character {
                 // Not part of BuildNewCharacter: the map is not in the character record, and unlike everything that
                 // is, a wrong call cannot be undone - so MapExploration makes its own, stricter, decision.
                 MapExploration.ResetForNewCharacter(PlayerName);
+                // Same reasoning, and after BuildNewCharacter on purpose: rediscovery starts from the items it kept.
+                KnownRecipes.ResetForNewCharacter(player, PlayerName);
             }
 
             // Base enforcement runs on every join. On a *dirty* reconnect the server save can be up to one
@@ -443,11 +457,30 @@ namespace ValheimEnforcer.modules.character {
             }
             Logger.LogDebug($"Validated player items.");
 
+            // An admin's restore lands first, before the clamp below, and lifts the record's own level with it -
+            // otherwise the restored level would read as an external gain and be taken straight back. A new
+            // character has no record here and so nothing pending.
+            if (!isNewCharacter) {
+                SkillReductions.ApplyPendingOnJoin(player, savableChar);
+            }
+
+            // The skill counterpart of the item restore above, under the same dirty-reconnect rule. A stored level
+            // above the live one is progress this server holds that the character no longer has - a local save
+            // deleted and recreated, a death somewhere else - and it goes back on. Never lowers anything; the clamp
+            // below is the other direction.
+            if (!isNewCharacter && ValConfig.RestoreSkillsFromPlayerServerSave.Value && !suppressReturnForDirty) {
+                SkillReductions.RestoreOnJoin(player, savableChar);
+            }
+
             if (ValConfig.PreventExternalSkillRaises.Value) {
                 player.GetSkills().GetSkillList().ForEach(skill => {
                     if (savableChar.SkillLevels.TryGetValue(skill.m_info.m_skill, out float savedLevel)) {
                         if (skill.m_level > savedLevel) {
                             Logger.LogInfo($"Removing external skill gains for {skill.m_info.m_skill} from {savedLevel} to {skill.m_level} from player {savableChar.Name}");
+                            // Written down here, on the side that actually lowers it. The server's own copy of this
+                            // rule (ReturningCharacterRules) finds nothing left to lower on an honest client and
+                            // records nothing, which keeps it to one record per reduction.
+                            SkillReductions.Record(savableChar, skill.m_info.m_skill, skill.m_level, savedLevel, "Join validation: above the stored level");
                             skill.m_level = savedLevel;
                         }
                     }
@@ -455,9 +488,10 @@ namespace ValheimEnforcer.modules.character {
             }
             Logger.LogDebug($"Validated player skills.");
 
-            // A new character's power was already decided by BuildNewCharacter.
+            // A new character's power and foods were already decided by BuildNewCharacter.
             if (!isNewCharacter) {
                 ForsakenPower.RestoreOnJoin(player, savableChar);
+                FoodSync.RestoreOnJoin(player, savableChar);
             }
 
             // Custom data is decided twice, and this is the second time. The first is the Player.Load postfix
@@ -531,6 +565,7 @@ namespace ValheimEnforcer.modules.character {
             }
 
             ForsakenPower.ApplyRecord(player, sanitized, "Server first-save enforcement");
+            FoodSync.ApplyRecord(player, sanitized, "Server first-save enforcement");
 
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
                 player.m_customData = CompatCustomData.ApplyToPlayer(sanitized.PlayerCustomData, player.m_customData);
@@ -579,6 +614,7 @@ namespace ValheimEnforcer.modules.character {
                 HostID = playerID,
                 SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level),
                 GuardianPower = ForsakenPower.Capture(player),
+                Foods = FoodSync.Capture(player),
             };
             foreach (ItemDrop.ItemData item in player.GetInventory().GetAllItems().ToList()) {
                 character.AddItemToPlayerItems(item);
@@ -588,7 +624,7 @@ namespace ValheimEnforcer.modules.character {
             }
 
             NewCharacterRules.Policy policy = NewCharacterRules.Current();
-            NewCharacterRules.Result result = NewCharacterRules.Apply(character, policy, recordConfiscation: true);
+            NewCharacterRules.Result result = NewCharacterRules.Apply(character, policy, record: true);
             if (result.Changed) {
                 Logger.LogInfo($"New character rules applied to {playerName}: {result.Describe()}");
             }
@@ -603,6 +639,9 @@ namespace ValheimEnforcer.modules.character {
             // Same reasoning: Apply only rewrote the record, and only when tracking put a power in it at all.
             if (policy.ClearGuardianPower) {
                 ForsakenPower.StripLive(player, character.Name);
+            }
+            if (policy.ClearFoods) {
+                FoodSync.StripLive(player, character.Name);
             }
 
             // The live inventory still holds everything; ReconcilePlayerToCharacter strips it down to what the
@@ -690,6 +729,7 @@ namespace ValheimEnforcer.modules.character {
             // Vanilla has already applied the death skill penalty and removed every status effect by this point.
             savableChar.SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
             savableChar.GuardianPower = ForsakenPower.Capture(player);
+            savableChar.Foods = FoodSync.Capture(player);
             savableChar.ActiveCharacterEffects.Clear();
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
                 savableChar.PlayerCustomData = CompatCustomData.SnapshotForTracking(player.m_customData);
@@ -716,6 +756,8 @@ namespace ValheimEnforcer.modules.character {
             PlayerCharacter.ActiveCharacterEffects.Clear();
             PlayerCharacter.SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
             PlayerCharacter.GuardianPower = ForsakenPower.Capture(player);
+            // Vanilla has already emptied the stomach by this point (Player.OnDeath clears m_foods).
+            PlayerCharacter.Foods = FoodSync.Capture(player);
             PersistAndPushCharacter(PlayerCharacter.HostID, PlayerCharacter);
         }
 
