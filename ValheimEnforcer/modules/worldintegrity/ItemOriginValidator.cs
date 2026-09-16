@@ -156,5 +156,21 @@ namespace ValheimEnforcer.modules.worldintegrity {
         internal static void Reset() {
             lastReported.Clear();
         }
+
+        /// <summary>Drops a departing player's report cooldown. Called from the ZNet.Disconnect hook. Keys are
+        /// the account spelling the client's delta carried, which matches the socket's only through
+        /// PlatformIds, so this compares rather than looks up - the table is small and this runs once per
+        /// disconnect.</summary>
+        internal static void Forget(string account) {
+            if (string.IsNullOrEmpty(account)) { return; }
+            List<string> gone = null;
+            foreach (string key in lastReported.Keys) {
+                if (PlatformIds.Matches(key, account)) { (gone ??= new List<string>()).Add(key); }
+            }
+            if (gone == null) { return; }
+            foreach (string key in gone) { lastReported.Remove(key); }
+        }
+
+        internal static int TrackedCount => lastReported.Count;
     }
 }

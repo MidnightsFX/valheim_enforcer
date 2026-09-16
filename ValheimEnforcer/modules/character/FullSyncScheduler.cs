@@ -69,6 +69,12 @@ namespace ValheimEnforcer.modules.character {
         private float nextCycle;
         private bool cycleRunning;
 
+        // Once a minute: drop the small per-character tables that would otherwise grow with every character
+        // ever seen, and write the memory summary when an admin has asked for one on a schedule.
+        private const float HousekeepingSeconds = 60f;
+        private float nextHousekeeping;
+        private float nextMemoryReport;
+
         private void Start() {
             // Don't fire immediately on boot; wait a full interval. Freshly-joined players already push a full
             // save on connect (LoadAndValidatePlayer), so there is nothing to reconcile right away.
@@ -84,6 +90,7 @@ namespace ValheimEnforcer.modules.character {
             // repair is not delayed by a wave that happens to be in flight.
             DrainDriftResyncs();
             DrainSanitizedPushes();
+            Housekeeping();
 
             if (cycleRunning) { return; }
             if (Time.unscaledTime < nextCycle) { return; }
@@ -98,8 +105,32 @@ namespace ValheimEnforcer.modules.character {
         private static void DrainSanitizedPushes() {
             CharacterStore.SanitizedPush push;
             while ((push = CharacterStore.TryDequeueSanitizedPush()) != null) {
-                ValConfig.SendSanitizedCharacterToClient(push.Sender, push.HostID, push.Name);
+                ValConfig.SendSanitizedYamlToClient(push.Sender, push.Name, push.StrippedYaml);
             }
+        }
+
+        private void Housekeeping() {
+            float now = Time.unscaledTime;
+            if (now >= nextHousekeeping) {
+                nextHousekeeping = now + HousekeepingSeconds;
+                ValConfig.PruneDriftResyncTracking();
+            }
+
+            int reportMinutes = ValConfig.MemoryReportIntervalMinutes != null ? ValConfig.MemoryReportIntervalMinutes.Value : 0;
+            if (reportMinutes <= 0) {
+                nextMemoryReport = 0f; // switched off; switching back on starts a fresh interval
+                return;
+            }
+            float interval = reportMinutes * 60f;
+            if (nextMemoryReport <= 0f) {
+                nextMemoryReport = now + interval; // first report one interval after it is switched on
+                return;
+            }
+            // A shortened interval takes effect at once rather than after the old one runs out.
+            if (nextMemoryReport > now + interval) { nextMemoryReport = now + interval; }
+            if (now < nextMemoryReport) { return; }
+            nextMemoryReport = now + interval;
+            MemoryReport.LogSummary();
         }
 
         private static void DrainDriftResyncs() {

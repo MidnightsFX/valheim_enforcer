@@ -207,6 +207,8 @@ namespace ValheimEnforcer.modules.network {
             records.Remove(hostId);
         }
 
+        internal static int TrackedCount => records.Count;
+
         internal static void Reset() {
             records.Clear();
         }

@@ -334,6 +334,9 @@ namespace ValheimEnforcer.modules.audit {
             evictScratch.Clear();
         }
 
+        /// <summary>Containers whose previous contents are held, for enforcer-memory. Main thread.</summary>
+        internal static int SnapshotCount => snapshots.Count;
+
         /// <summary>Drops all per-world state. Called from the ZNet.Shutdown teardown.</summary>
         internal static void Reset() {
             inboundPeer = null;

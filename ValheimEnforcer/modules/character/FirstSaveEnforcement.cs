@@ -86,6 +86,14 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
+        /// <summary>How many peers are armed on each track, for enforcer-memory.</summary>
+        internal static void Counts(out int armedNew, out int armedReturning) {
+            lock (gate) {
+                armedNew = pending.Count;
+                armedReturning = returning.Count;
+            }
+        }
+
         /// <summary>
         /// Whether the next full save from this sender should be run through the new-character rules. Only
         /// true when the server's own connect-time lookup found nothing AND an admin has asked for server-side

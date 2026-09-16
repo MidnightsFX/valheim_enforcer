@@ -635,5 +635,13 @@ namespace ValheimEnforcer.modules.worldintegrity {
             ClearPacketState();
             lastNotified.Clear();
         }
+
+        /// <summary>Drops a departing player's notification cooldown. Called from the ZNet.Disconnect hook so
+        /// the table tracks connected players rather than everyone flagged since startup.</summary>
+        internal static void Forget(string hostId) {
+            if (!string.IsNullOrEmpty(hostId)) { lastNotified.Remove(hostId); }
+        }
+
+        internal static int TrackedCount => lastNotified.Count;
     }
 }

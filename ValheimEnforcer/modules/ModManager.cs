@@ -1082,6 +1082,11 @@ namespace ValheimEnforcer.modules {
                 ValidatedHosts.Remove(hostId);
                 Attestation.Clear(hostId);
                 network.PeerTrust.Clear(hostId);
+                // The per-player cooldown tables. Each is tiny, but each would otherwise hold an entry for
+                // every player who has ever tripped it since startup.
+                network.RpcGuardPolicy.Forget(hostId);
+                worldintegrity.StructureValidator.Forget(hostId);
+                worldintegrity.ItemOriginValidator.Forget(hostId);
             }
         }
 

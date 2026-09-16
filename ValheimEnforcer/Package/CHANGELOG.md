@@ -1,3 +1,14 @@
+**0.27.0**
+---
+```
+- Reduces player memory footprint
+    - Adds CharacterCacheIdleMinutes (Advanced, default 30): a character untouched for this long is dropped from
+      memory and read back from its file on the next update. 0 keeps everything until restart, as before.
+- Adds enforcer-memory (Diagnostics): process and managed heap size, what the mod is holding, and the world's
+  object counts including the game's own per-peer object tables. MemoryReportIntervalMinutes (Advanced, default
+  0 = off) writes the same summary to the server log on a schedule.
+```
+
 **0.26.0**
 ---
 ```

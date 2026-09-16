@@ -79,6 +79,8 @@ namespace ValheimEnforcer {
         public static ConfigEntry<int> FullSyncMaxConcurrentPlayers;
         public static ConfigEntry<bool> EnforceRoutedRpcSender;
         public static ConfigEntry<int> StallWarningThresholdMs;
+        public static ConfigEntry<int> CharacterCacheIdleMinutes;
+        public static ConfigEntry<int> MemoryReportIntervalMinutes;
 
         public static ConfigEntry<bool> EnableCheatDetection;
         public static ConfigEntry<bool> DetectCheatEngine;
@@ -314,6 +316,13 @@ namespace ValheimEnforcer {
             ThunderstoreMaxArchiveMB = BindServerConfig("Advanced", "ThunderstoreMaxArchiveMB", 128, "Largest Thunderstore archive, in megabytes, the server will download when resolving mod hashes. Archives are held in memory while their DLLs are hashed, so this is also the peak transient allocation; packages are resolved one at a time so it is never multiplied. Larger archives are skipped and logged.", advanced: true, valmin: 1, valmax: 512);
             FullSyncMaxConcurrentPlayers = BindServerConfig("Advanced", "FullSyncMaxConcurrentPlayers", 5, "Maximum number of players the server asks to upload a full character save at the same time. Larger player counts are staggered into successive waves of this size to avoid a bandwidth spike. 10 is safe on a healthy server; lower it on constrained upload/VPS hosts.", advanced: true, valmin: 1, valmax: 50);
             EnforceRoutedRpcSender = BindServerConfig("Advanced", "EnforceRoutedRpcSender", true, "If enabled (the default), the server verifies the sender id on every routed network message against the connection it actually arrived on, and corrects it if they disagree. Valheim's routed RPC carries a sender id that the sending client writes and the server never checks, so without this a modified client can impersonate any other connected player - running admin commands, getting someone else banned, or overwriting another player's character save. This affects only forged packets; an honest client is never touched. Leave it on unless another mod is misbehaving because of it, in which case report the mod - turning this off re-opens sender spoofing for this mod AND every other routed RPC on the server.", advanced: true);
+
+            CharacterCacheIdleMinutes = BindServerConfig("Advanced", "CharacterCacheIdleMinutes", 30, "How long, in minutes, the server keeps a character's save in memory after that character was last touched - a save, an incremental update, a death record, or a login. Saves on disk are always the authority, so an entry dropped from memory costs one file read the next time that player's data changes; this exists so a busy server's memory reflects who is playing now rather than everyone who has joined since the last restart. Keep it above FullSyncPullIntervalMinutes so players who are online but idle are not reloaded after every periodic pull. 0 keeps every character in memory until restart, which is what earlier versions did. Not used with InternalStorageMode.", advanced: true, valmin: 0, valmax: 1440);
+            // Read from the character store's worker thread through a volatile snapshot; keep that snapshot
+            // current from the main thread, including on config reload and server sync.
+            CharacterCacheIdleMinutes.SettingChanged += (sender, args) => modules.character.CharacterStore.SetIdleEvictionMinutes(CharacterCacheIdleMinutes.Value);
+            modules.character.CharacterStore.SetIdleEvictionMinutes(CharacterCacheIdleMinutes.Value);
+            MemoryReportIntervalMinutes = BindServerConfig("Advanced", "MemoryReportIntervalMinutes", 0, "When above 0, writes the summary enforcer-memory prints to the server log every this-many minutes: process working set, managed heap, what this mod is holding (cached characters, audit buffers, per-player tables) and the world's object counts. Purely diagnostic. Off by default.", advanced: true, valmin: 0, valmax: 1440);
 
             EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Master switch for client-side cheat scanning. When enabled the client checks running processes, the DLLs loaded into the game, and open window titles against a catalog of known cheat tools. Only matched entries are reported to the server - the player's full process list is never transmitted.");
             DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Detect ValheimTooler by the namespace of the types it loads (rename-proof), including assemblies injected mid-session. A confirmed detection is always auto-banned regardless of ActionOnDetection. High confidence, very low cost.");
@@ -616,43 +625,49 @@ namespace ValheimEnforcer {
                 return SendCharacterToClientAsZpackage(chara);
             }
 
-            // Disk mode. Prefer the in-memory store (kept current by the async writer, so it can be newer
-            // than disk while a write is pending) and fall back to disk, warming the store so the player's
-            // first deltas can be applied without re-reading the file. If the on-disk file has been edited
-            // out-of-band (e.g. an admin edited the save while the player was offline) since we cached it, the
-            // store reports a miss so the edited file is re-read and re-seeded below.
+            // Disk mode. The file is the authority: the async store holds parsed objects for the characters
+            // being played and no serialized copy, so a login reads the file. The one way the file can trail
+            // the store is a change the worker has applied but not yet written - a save or delta inside the
+            // last second or so - and a login that close behind a save is a fast rejoin, whose previous
+            // session's last save is exactly what must be sent. So wait for that write, bounded: a burst of
+            // other players' saves must not hold a connection handshake for long.
             var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, $"{saveId}");
             string fullpath = Path.Combine(charFile, $"{saveName}.yaml");
-            bool exists = File.Exists(fullpath);
-            DateTime diskMtime = exists ? File.GetLastWriteTimeUtc(fullpath) : DateTime.MinValue;
-
-            // Both branches below strip ConfiscatedItems before the payload goes out (see
-            // SendCharacterToClientAsZpackage). That costs a parse + re-serialize on a path that otherwise just
-            // forwards a cached string, which is accepted deliberately: this runs once per player connect, not on
-            // the save-burst path the async store exists to protect, and the disk branch already does file I/O.
-            // If connect latency ever becomes a concern, cache the stripped form on CharacterStore.Entry and have
-            // the worker thread produce it.
-            string cached = modules.character.CharacterStore.GetYamlIfCurrent(saveId, saveName, diskMtime);
-            if (cached != null) {
-                return CharacterPayload(StripServerOwnedFromYaml(cached), CharPayloadCharacter);
+            if (modules.character.CharacterStore.HasUnwrittenChanges(saveId, saveName)) {
+                StallWatch wait = StallWatch.Start("Character login (waiting for a pending save write)");
+                try {
+                    if (!modules.character.CharacterStore.Flush(LoginFlushBound, pollMs: 5)) {
+                        Logger.LogWarning($"A save was still being written when {saveName} ({saveId}) connected; the character sent to them may be one update behind.");
+                    }
+                } finally {
+                    wait.Stop();
+                }
             }
 
-            if (!exists) {
+            if (!File.Exists(fullpath)) {
                 // TryResolveSave said the save was there, so this is a race with a delete rather than a new
                 // character. Do not arm first-save enforcement on it.
                 Logger.LogWarning($"path: {fullpath} vanished between lookup and read, no character data will be sent.");
                 return CharacterPayload("", CharPayloadNone);
             }
+            // The whole file as one string is unavoidable here - it becomes the payload - but this runs once
+            // per connect rather than on the save path, and the stripping below (see SendCharacterToClientAsZpackage)
+            // costs a parse + re-serialize that is accepted for the same reason.
             string filecontents = File.ReadAllText(fullpath);
-            // Seed the store with the FULL save - it is the server's authoritative copy. Only the outbound
-            // payload is stripped.
-            modules.character.CharacterStore.Seed(saveId, saveName, filecontents, diskMtime);
+            DateTime diskMtime = File.GetLastWriteTimeUtc(fullpath);
+            // Tell the store what is on disk, so a copy it parsed before an offline edit is re-read rather than
+            // written back over the edit. Never replaces a copy with an unwritten change.
+            modules.character.CharacterStore.Seed(saveId, saveName, diskMtime);
             return CharacterPayload(StripServerOwnedFromYaml(filecontents), CharPayloadCharacter);
         }
 
         // Coarse DoS guards on inbound client payloads. None of these are tight - they exist so a single
         // packet cannot exhaust memory or stall the main thread, not to constrain a legitimate one. A full
         // character save with a large modded inventory is generously bounded; a delta is small by design.
+        // How long a connect may wait for the character store to finish a write already in flight, so the
+        // save sent to a fast rejoin is the one their previous session ended on. See SendSavedCharacter.
+        internal static readonly TimeSpan LoginFlushBound = TimeSpan.FromMilliseconds(750);
+
         internal const int MaxCharacterPayloadBytes = 8 * 1024 * 1024;
         internal const int MaxDeltaPayloadBytes = 1 * 1024 * 1024;
         internal const int MaxCheatReportBytes = 64 * 1024;
@@ -843,15 +858,12 @@ namespace ValheimEnforcer {
             SendSanitizedPayload(sender, chara.Name, payload);
         }
 
-        /// <summary>Overload for the async store, which holds the authoritative copy as YAML rather than as a
-        /// parsed object.</summary>
-        internal static void SendSanitizedCharacterToClient(long sender, string hostId, string name) {
-            string yaml = modules.character.CharacterStore.GetYaml(hostId, name);
-            if (string.IsNullOrEmpty(yaml)) {
-                Logger.LogWarning($"Sanitized character for {name} ({hostId}) is no longer cached; the client will pick it up on its next connect instead.");
-                return;
-            }
-            SendSanitizedPayload(sender, name, CharacterPayload(StripServerOwnedFromYaml(yaml), CharPayloadSanitized));
+        /// <summary>Counterpart for the async store, whose worker has already serialized the character with the
+        /// server-owned lists withheld (CharacterStore.SanitizedPush). Nothing is read back out of the store:
+        /// by the time the main thread drains the push the entry may have moved on, or been dropped.</summary>
+        internal static void SendSanitizedYamlToClient(long sender, string name, string strippedYaml) {
+            if (string.IsNullOrEmpty(strippedYaml)) { return; }
+            SendSanitizedPayload(sender, name, CharacterPayload(strippedYaml, CharPayloadSanitized));
         }
 
         private static void SendSanitizedPayload(long sender, string name, ZPackage payload) {
@@ -1418,6 +1430,18 @@ namespace ValheimEnforcer {
         // every flush for as long as it lasted. Not exposed as config, matching FullSyncScheduler.WaveStaggerSeconds.
         private const double DriftResyncCooldownSeconds = 60d;
         private static readonly ConcurrentDictionary<string, DateTime> lastDriftResync = new ConcurrentDictionary<string, DateTime>();
+
+        /// <summary>Main thread. Drops cooldown entries old enough that they can no longer suppress anything,
+        /// so the table tracks characters recently asked for a resync rather than every character ever asked.
+        /// Called from the scheduler's housekeeping tick.</summary>
+        internal static void PruneDriftResyncTracking() {
+            DateTime cutoff = DateTime.UtcNow.AddSeconds(-2 * DriftResyncCooldownSeconds);
+            foreach (KeyValuePair<string, DateTime> entry in lastDriftResync) {
+                if (entry.Value < cutoff) { lastDriftResync.TryRemove(entry.Key, out _); }
+            }
+        }
+
+        internal static int DriftResyncTrackedCount => lastDriftResync.Count;
 
         /// <summary>
         /// Main thread only. Ask a client for a full character save because a delta merge found our copy had

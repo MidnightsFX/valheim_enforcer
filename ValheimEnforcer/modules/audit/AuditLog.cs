@@ -61,6 +61,11 @@ namespace ValheimEnforcer.modules.audit {
         /// <summary>Events not yet on disk, oldest first. Appends only ever land at the end.</summary>
         private static readonly List<AuditEvent> buffer = new List<AuditEvent>();
 
+        /// <summary>Events waiting for the next flush, for enforcer-memory. Safe on any thread.</summary>
+        internal static int BufferedCount {
+            get { lock (bufferLock) { return buffer.Count; } }
+        }
+
         private static readonly ConcurrentQueue<Action> backgroundJobs = new ConcurrentQueue<Action>();
         private static readonly ConcurrentQueue<Action> mainThreadWork = new ConcurrentQueue<Action>();
 

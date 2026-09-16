@@ -169,5 +169,24 @@ namespace ValheimEnforcer.modules.network {
         internal static void Reset() {
             reported.Clear();
         }
+
+        /// <summary>
+        /// Drops one departing player's suppression entries. Called from the ZNet.Disconnect hook, so the
+        /// table tracks connected players rather than everyone who has tripped a guard since startup. A
+        /// player who reconnects starts with a clean cooldown, which only means their next refusal is logged
+        /// rather than counted - the right side to err on.
+        /// </summary>
+        internal static void Forget(string hostId) {
+            if (string.IsNullOrEmpty(hostId)) { return; }
+            string prefix = hostId + "|";
+            List<string> gone = null;
+            foreach (string key in reported.Keys) {
+                if (key.StartsWith(prefix, StringComparison.Ordinal)) { (gone ??= new List<string>()).Add(key); }
+            }
+            if (gone == null) { return; }
+            foreach (string key in gone) { reported.Remove(key); }
+        }
+
+        internal static int TrackedCount => reported.Count;
     }
 }

@@ -40,6 +40,7 @@ namespace ValheimEnforcer.common {
             RegisterNetworkCommands();
             RegisterItemOriginCommands();
             RegisterAuditCommands();
+            RegisterMemoryCommands();
 
             Logger.LogDebug($"Registered {Registry.Count} ValheimEnforcer console commands.");
         }

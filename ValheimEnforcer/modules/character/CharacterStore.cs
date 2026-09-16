@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Threading;
 using ValheimEnforcer.common;
 using static ValheimEnforcer.common.DataObjects;
@@ -18,24 +19,46 @@ namespace ValheimEnforcer.modules.character {
     /// (de)serialization and disk I/O onto a single background worker thread and coalesces repeated
     /// writes to the same character, so a save/delta burst can never block the main thread.
     ///
+    /// What it holds, and for how long: the file on disk is the authority, and every change reaches it
+    /// within a drain (about a second). So the store keeps only the parsed object for a character, only
+    /// while that character is being played, and never a serialized copy. It used to keep the whole YAML
+    /// string as well and rebuild it on every incremental update - a fresh copy of the entire save, hundreds
+    /// of kilobytes, per player per update - and it kept every character it had ever seen until restart.
+    /// On a large server that is what memory did with uptime. Entries idle for longer than
+    /// <see cref="ValConfig.CharacterCacheIdleMinutes"/> are dropped; the next update for that character
+    /// reads the file back, on the worker.
+    ///
     /// Threading contract:
-    ///  - The main thread only ever calls the Submit*/Seed/GetYaml/IsCached/Flush/Shutdown API and hands
-    ///    the worker immutable strings (or objects it will not touch again after handoff).
+    ///  - The main thread only ever calls the Submit*/Seed/IsCached/HasUnwrittenChanges/Snapshot/Flush/
+    ///    Shutdown API and hands the worker immutable strings (or objects it will not touch again after
+    ///    handoff). It never dereferences a cached <see cref="DataObjects.Character"/>.
     ///  - The worker thread is the SOLE owner and mutator of cached <see cref="DataObjects.Character"/>
-    ///    objects. The main thread only reads the cached YAML string (an immutable snapshot), so reads
-    ///    are race-free without locking.
+    ///    objects, and the only thread that reads or writes an entry's fields, with two exceptions that are
+    ///    each a single word: <see cref="Entry.Dirty"/> is volatile and the main thread reads it, and
+    ///    <see cref="Entry.LastTouchedTicks"/> is written with Interlocked from both sides.
     ///  - Internal-storage (ZDO) writes are intentionally NOT handled here: ZDOs are main-thread only.
     ///    Callers use this store for disk mode and keep the existing synchronous path for internal mode.
     /// </summary>
     internal static class CharacterStore {
 
         private sealed class Entry {
-            public DataObjects.Character Character; // may be null when seeded from YAML only; parsed lazily by the worker
-            public string Yaml;
-            // UTC last-write time of the on-disk file this cached YAML corresponds to. MinValue = unknown
-            // (never written/seeded from disk), which always compares as older than a real file mtime so an
-            // external edit is detected. Used by GetYamlIfCurrent to spot out-of-band edits at login.
+            // Worker-only. Null is a placeholder: a login (or an out-of-band edit) said the file exists, and
+            // nothing has needed the parsed object yet - GetOrLoadEntry reads the file on first use.
+            public DataObjects.Character Character;
+            // UTC last-write time of the on-disk file this entry corresponds to. MinValue = unknown (an
+            // applied change not yet written, which always compares as older than a real file mtime, so an
+            // external edit is detected). Worker-only after construction; Seed reads it on the main thread,
+            // and a stale read there only ever costs one extra file read on the worker.
             public DateTime SourceMtime;
+            // Set by the worker when Apply changes Character, cleared only after a successful write. The one
+            // field the main thread reads on a live entry (HasUnwrittenChanges, Snapshot), hence volatile.
+            public volatile bool Dirty;
+            // UTC ticks of the last Seed, load or Apply. Read by the sweep; written through Interlocked
+            // because a login touches it from the main thread.
+            public long LastTouchedTicks;
+            // Peer uid of the last message applied. If an admin's out-of-band write replaces this entry before
+            // the change is written, that client is asked for a full save so the change is not simply lost.
+            public long LastSender;
         }
 
         private abstract class Message { }
@@ -66,11 +89,15 @@ namespace ValheimEnforcer.modules.character {
 
         /// <summary>The worker sanitized a first save and the client needs to be told, so its live inventory
         /// matches what the server now holds. Sending needs ZNet, so - exactly like DriftResync - the request
-        /// is handed back to the main thread instead of being sent from the worker.</summary>
+        /// is handed back to the main thread instead of being sent from the worker. It carries the payload,
+        /// serialized once on the worker with the server-owned lists withheld, so the main thread has nothing
+        /// to read back out of the store - which may have moved on, or dropped the entry, by the time it is
+        /// drained.</summary>
         internal sealed class SanitizedPush {
             public long Sender;
             public string HostID;
             public string Name;
+            public string StrippedYaml;
         }
 
         /// <summary>A delta merge on the worker thread found our copy had drifted from the client's baseline.
@@ -79,6 +106,19 @@ namespace ValheimEnforcer.modules.character {
             public long Sender;
             public string HostID;
             public string Name;
+        }
+
+        /// <summary>What the store is holding, for enforcer-memory. Safe to take on the main thread.</summary>
+        internal struct Stats {
+            public int Cached;
+            public int Parsed;
+            public int Placeholders;
+            public int Dirty;
+            public int QueueDepth;
+            public int IdleMinutes;
+            public int LastSweepEvicted;
+            public int TotalEvicted;
+            public DateTime LastSweepUtc;
         }
 
         private static readonly ConcurrentDictionary<string, Entry> cache = new ConcurrentDictionary<string, Entry>();
@@ -90,6 +130,22 @@ namespace ValheimEnforcer.modules.character {
         private static Thread worker;
         private static volatile bool running;
         private static volatile bool workerBusy;
+
+        // ---- Idle eviction --------------------------------------------------------------------------------
+
+        /// <summary>How often the worker looks for idle entries. Not configurable: the idle threshold is the
+        /// meaningful knob, and a minute of slack on top of it changes nothing.</summary>
+        private static readonly TimeSpan SweepInterval = TimeSpan.FromMinutes(1);
+
+        // Snapshot of CharacterCacheIdleMinutes, written only from the main thread (SetIdleEvictionMinutes)
+        // and read by the worker's sweep. 0 = never evict. Starts at 0 so nothing is evicted before the
+        // config is bound.
+        private static volatile int idleEvictionMinutes;
+
+        // Worker-only, except the counters the report reads, which are single words.
+        private static DateTime lastSweepUtc = DateTime.UtcNow;
+        private static volatile int lastSweepEvicted;
+        private static volatile int totalEvicted;
 
         internal static string KeyFor(string id, string name) {
             return $"{id}/{name}";
@@ -170,66 +226,109 @@ namespace ValheimEnforcer.modules.character {
 
         /// <summary>Drop any cached state for a character so the next access reloads from disk. Used
         /// after a synchronous out-of-band write (e.g. the admin confiscated-item return path) so the
-        /// async store cannot later overwrite it with a stale cached copy.</summary>
+        /// async store cannot later overwrite it with a stale cached copy. A change the worker had applied
+        /// but not yet written is not written over the admin's file; that client is asked for a full save
+        /// instead (see DrainOnce).</summary>
         internal static void Invalidate(string id, string name) {
             cache.TryRemove(KeyFor(id, name), out _);
         }
 
-        /// <summary>True if we already hold authoritative state for this character (so an incoming delta
-        /// can be applied instead of requesting a full sync).</summary>
+        /// <summary>True if we already hold state for this character - parsed, or known to be on disk - so
+        /// an incoming delta can be applied instead of requesting a full sync.</summary>
         internal static bool IsCached(string id, string name) {
             return cache.ContainsKey(KeyFor(id, name));
         }
 
-        /// <summary>Latest serialized YAML for a character, or null if not cached. Safe on any thread.</summary>
-        internal static string GetYaml(string id, string name) {
-            return cache.TryGetValue(KeyFor(id, name), out Entry e) ? e.Yaml : null;
+        /// <summary>
+        /// True when the file on disk may be behind what the store holds: a change applied and not yet
+        /// written, or anything still queued. The login path asks this before reading the file, and waits
+        /// (bounded) when the answer is yes. Coarse on purpose - it does not know which character a queued
+        /// message is for - because the cost of a false yes is a wait of a few milliseconds on one connect.
+        /// </summary>
+        internal static bool HasUnwrittenChanges(string id, string name) {
+            if (cache.TryGetValue(KeyFor(id, name), out Entry e) && e.Dirty) { return true; }
+            return !messages.IsEmpty || workerBusy;
         }
 
-        /// <summary>Latest serialized YAML for a character, but only when the on-disk save has NOT been
-        /// modified out-of-band since we cached it. Returns null when there is no cached entry, or when
-        /// <paramref name="diskMtime"/> is strictly newer than the cached copy's source mtime (an external
-        /// edit) — the caller should then reload from disk and re-seed. A pending async write leaves the disk
-        /// mtime unchanged/older than what we recorded, so the (newer) cache still wins via the equality case.
-        /// Safe on any thread.</summary>
-        internal static string GetYamlIfCurrent(string id, string name, DateTime diskMtime) {
+        /// <summary>
+        /// Tell the store what is on disk for a character, from the connect-time read. Adds a placeholder if
+        /// the character is not held at all, so its first delta applies without a full-sync round trip. If a
+        /// parsed copy is held and the file is newer than the copy came from - an admin edited the save while
+        /// the player was offline - the copy is dropped so the worker re-reads the edited file rather than
+        /// writing the old contents back over it. Never touches an entry with an unwritten change: that entry
+        /// is newer than the file, and the login path has already waited for its write.
+        /// </summary>
+        internal static void Seed(string id, string name, DateTime sourceMtime) {
             string key = KeyFor(id, name);
-            if (!cache.TryGetValue(key, out Entry e)) { return null; }
-            if (diskMtime > e.SourceMtime) {
-                Logger.LogInfo($"On-disk save for {key} is newer than cache; reloading from disk.");
-                return null;
+            long now = DateTime.UtcNow.Ticks;
+            Entry fresh = new Entry { Character = null, SourceMtime = sourceMtime, LastTouchedTicks = now };
+            if (cache.TryAdd(key, fresh)) { return; }
+            if (!cache.TryGetValue(key, out Entry existing)) {
+                cache.TryAdd(key, fresh); // removed between the two calls; either outcome is fine
+                return;
             }
-            return e.Yaml;
+            if (existing.Dirty) { return; }
+            if (sourceMtime > existing.SourceMtime) {
+                // Conditional on the reference, so a worker replacement in the same instant is never clobbered.
+                cache.TryUpdate(key, fresh, existing);
+                return;
+            }
+            Touch(existing); // a login is activity; do not evict the character somebody just joined with
         }
 
-        /// <summary>Warm the cache from an already-loaded save (e.g. the connect-time disk read) without
-        /// enqueuing a write. Stores the YAML only; the worker parses the <see cref="Character"/> lazily
-        /// on the first delta, keeping this call cheap on the connection path.</summary>
-        internal static void Seed(string id, string name, string yaml, DateTime sourceMtime) {
-            if (string.IsNullOrEmpty(yaml)) { return; }
-            cache[KeyFor(id, name)] = new Entry { Character = null, Yaml = yaml, SourceMtime = sourceMtime };
+        /// <summary>What the store is holding right now. Safe on any thread.</summary>
+        internal static Stats Snapshot() {
+            Stats stats = new Stats {
+                IdleMinutes = idleEvictionMinutes,
+                LastSweepEvicted = lastSweepEvicted,
+                TotalEvicted = totalEvicted,
+                LastSweepUtc = lastSweepUtc,
+            };
+            foreach (KeyValuePair<string, Entry> kv in cache) {
+                stats.Cached++;
+                if (kv.Value.Character != null) { stats.Parsed++; } else { stats.Placeholders++; }
+                if (kv.Value.Dirty) { stats.Dirty++; }
+            }
+            stats.QueueDepth = messages.Count;
+            return stats;
         }
 
-        /// <summary>Block until currently-queued work has been drained to disk. Intended for shutdown /
-        /// world-save; do not call on a hot path. Bounded by <paramref name="timeout"/>.</summary>
-        internal static void Flush(TimeSpan timeout) {
-            if (!running) { return; }
+        /// <summary>Main thread only. Re-reads the idle threshold into the worker's snapshot; wired to the
+        /// setting's SettingChanged so a config reload takes effect at the next sweep.</summary>
+        internal static void SetIdleEvictionMinutes(int minutes) {
+            idleEvictionMinutes = minutes < 0 ? 0 : minutes;
+        }
+
+        /// <summary>Block until currently-queued work has been drained to disk, or the timeout passes. Intended
+        /// for shutdown / world-save / a login that arrived behind a pending write; do not call on a hot path.
+        /// Returns false when the timeout passed with work still pending.</summary>
+        internal static bool Flush(TimeSpan timeout, int pollMs = 15) {
+            if (!running) { return true; }
             signal.Set();
             DateTime deadline = DateTime.UtcNow + timeout;
             while (DateTime.UtcNow < deadline) {
-                if (messages.IsEmpty && !workerBusy) { return; }
-                Thread.Sleep(15);
+                if (messages.IsEmpty && !workerBusy) { return true; }
+                Thread.Sleep(pollMs);
             }
-            Logger.LogWarning("CharacterStore flush timed out; some pending saves may not have been written.");
+            return messages.IsEmpty && !workerBusy;
         }
 
         /// <summary>Flush and stop the worker. Called from the server shutdown path.</summary>
         internal static void Shutdown() {
             if (!running) { return; }
-            Flush(TimeSpan.FromSeconds(10));
+            if (!Flush(TimeSpan.FromSeconds(10))) {
+                Logger.LogWarning("CharacterStore flush timed out; some pending saves may not have been written.");
+            }
             running = false;
             signal.Set();
-            worker?.Join(TimeSpan.FromSeconds(5));
+            bool joined = worker?.Join(TimeSpan.FromSeconds(5)) ?? true;
+            if (joined) {
+                // Nothing will read these again on this server; a listen host that returns to the menu and hosts
+                // again should not start with the last world's characters in memory.
+                cache.Clear();
+            } else {
+                Logger.LogWarning("CharacterStore worker did not stop in time; its cached characters are kept until it does.");
+            }
         }
 
         // ---------------------------------------------------------------------------------------------
@@ -240,6 +339,7 @@ namespace ValheimEnforcer.modules.character {
             while (running) {
                 signal.WaitOne(1000);
                 DrainOnce();
+                SweepIfDue();
             }
             DrainOnce(); // final drain so nothing queued before Shutdown() is lost
         }
@@ -247,27 +347,40 @@ namespace ValheimEnforcer.modules.character {
         private static void DrainOnce() {
             workerBusy = true;
             try {
-                // Apply every message in order (updates must not be reordered), collecting the set of
-                // characters that changed. Writing per distinct key AFTER draining coalesces a burst of
-                // updates for the same character into a single disk write.
-                HashSet<string> dirty = new HashSet<string>();
+                // Apply every message in order (updates must not be reordered), collecting the entries that
+                // changed. Writing per distinct key AFTER draining coalesces a burst of updates for the same
+                // character into a single serialize and a single disk write.
+                Dictionary<string, Entry> dirty = new Dictionary<string, Entry>();
                 while (messages.TryDequeue(out Message msg)) {
                     try {
-                        string key = Apply(msg);
-                        if (key != null) { dirty.Add(key); }
+                        Entry changed = Apply(msg, out string key);
+                        if (changed != null) { dirty[key] = changed; }
                     } catch (Exception e) {
                         Logger.LogWarning($"CharacterStore failed to apply an update: {e.Message}");
                     }
                 }
-                foreach (string key in dirty) {
-                    if (cache.TryGetValue(key, out Entry entry) && entry.Character != null && entry.Yaml != null) {
-                        try {
-                            // Record the mtime the OS reports for our own write so a later login can tell an
-                            // out-of-band edit apart from a file we wrote ourselves.
-                            entry.SourceMtime = WriteToDisk(entry.Character, entry.Yaml);
-                        } catch (Exception e) {
-                            Logger.LogWarning($"CharacterStore failed to write {key} to disk: {e.Message}");
+                foreach (KeyValuePair<string, Entry> kv in dirty) {
+                    Entry entry = kv.Value;
+                    if (entry.Character == null) { continue; }
+                    if (!cache.TryGetValue(kv.Key, out Entry current) || !ReferenceEquals(current, entry)) {
+                        // Invalidate (an admin's own synchronous write) or a login that found the file newer took
+                        // the entry out from under this change. The file they wrote wins: writing ours would put
+                        // back whatever the admin just took out. The change itself is not lost - the client still
+                        // has it, so ask them for a full save, which lands on top of the admin's file.
+                        Logger.LogInfo($"Not writing {kv.Key}: its stored copy was replaced while an update was pending; asking the client for a full save instead.");
+                        if (entry.LastSender != 0L) {
+                            driftResyncs.Enqueue(new DriftResync { Sender = entry.LastSender, HostID = entry.Character.HostID, Name = entry.Character.Name });
                         }
+                        continue;
+                    }
+                    try {
+                        // Record the mtime the OS reports for our own write so a later login can tell an
+                        // out-of-band edit apart from a file we wrote ourselves.
+                        entry.SourceMtime = WriteToDisk(entry.Character);
+                        entry.Dirty = false;
+                    } catch (Exception e) {
+                        // Stays dirty: never evicted, and written on the next attempt for this character.
+                        Logger.LogWarning($"CharacterStore failed to write {kv.Key} to disk: {e.Message}");
                     }
                 }
             } finally {
@@ -275,9 +388,46 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
-        // Applies a single message to the in-memory cache and returns the coalescing key that now needs a
-        // disk write, or null if nothing should be written.
-        private static string Apply(Message msg) {
+        /// <summary>
+        /// Drops entries nobody has touched for longer than the idle threshold. The file is the authority and
+        /// an idle entry has no unwritten change (a dirty one is never dropped), so dropping it loses nothing;
+        /// the next update for that character reads the file back. This is what keeps memory proportional to
+        /// who is playing rather than to who has ever joined.
+        /// </summary>
+        private static void SweepIfDue() {
+            int idleMinutes = idleEvictionMinutes;
+            if (idleMinutes <= 0) { return; }
+            DateTime now = DateTime.UtcNow;
+            if (now - lastSweepUtc < SweepInterval) { return; }
+            lastSweepUtc = now;
+
+            long cutoff = now.Ticks - TimeSpan.FromMinutes(idleMinutes).Ticks;
+            int evicted = 0;
+            // Removing through the collection interface removes the pair only while the value is still the
+            // exact entry inspected, so a placeholder Seed put in the same instant survives.
+            ICollection<KeyValuePair<string, Entry>> pairs = cache;
+            foreach (KeyValuePair<string, Entry> kv in cache) {
+                Entry entry = kv.Value;
+                if (entry.Dirty) { continue; }
+                if (Interlocked.Read(ref entry.LastTouchedTicks) > cutoff) { continue; }
+                if (pairs.Remove(kv)) { evicted++; }
+            }
+            lastSweepEvicted = evicted;
+            if (evicted > 0) {
+                totalEvicted += evicted;
+                Logger.LogDebug($"CharacterStore dropped {evicted} character(s) idle for over {idleMinutes} minute(s); {cache.Count} still held.");
+            }
+        }
+
+        private static void Touch(Entry entry) {
+            Interlocked.Exchange(ref entry.LastTouchedTicks, DateTime.UtcNow.Ticks);
+        }
+
+        // Applies a single message to the in-memory cache and returns the entry that now needs a disk write
+        // (with its coalescing key), or null if nothing should be written. Never serializes: that happens
+        // once per changed character in DrainOnce, however many messages for it this drain carried.
+        private static Entry Apply(Message msg, out string key) {
+            key = null;
             switch (msg) {
                 case FullSaveMessage full: {
                     DataObjects.Character c = yamldeserializer.Deserialize<DataObjects.Character>(full.RawYaml);
@@ -293,17 +443,18 @@ namespace ValheimEnforcer.modules.character {
                     if (!IdentityMatchesSender(c, full)) { return null; }
 
                     // Shed pass-through compat keys (the ExtraSlots inventory backup) before the save is
-                    // merged and re-serialized below - also scrubs the stale copies saves written before
+                    // merged and written below - also scrubs the stale copies saves written before
                     // pass-through handling still carry. Safe here: CompatCustomData reads a volatile
                     // snapshot rather than a ConfigEntry.
                     compat.CompatCustomData.StripPassthroughKeys(c.PlayerCustomData);
 
-                    string key = KeyFor(c.HostID, c.Name);
+                    key = KeyFor(c.HostID, c.Name);
                     // The incoming save replaces everything EXCEPT the confiscated list, which the server owns:
                     // the client only reports what it confiscated this session, and an overwrite would resurrect
                     // entries an admin cleared or returned mid-session. See Character.MergeConfiscatedItems.
                     List<PackedItem> reported = c.ConfiscatedItems;
-                    DataObjects.Character existing = GetOrLoad(key, c.HostID, c.Name, out LoadState state);
+                    Entry existingEntry = GetOrLoadEntry(key, c.HostID, c.Name, out LoadState state);
+                    DataObjects.Character existing = existingEntry?.Character;
                     c.ConfiscatedItems = existing?.ConfiscatedItems ?? new List<PackedItem>();
                     int appended = c.MergeConfiscatedItems(reported);
                     if (appended > 0) {
@@ -330,8 +481,8 @@ namespace ValheimEnforcer.modules.character {
                     // is not `existing == null`: that would also be true for a save that exists but failed to
                     // parse, and stripping one of those would wipe a real character over a corrupt file.
                     //
-                    // Placed after the confiscation merge and before the re-serialize below, so the entries
-                    // this records are in the YAML that gets written.
+                    // Placed after the confiscation merge and before the entry is published below, so the
+                    // entries this records are in the file that gets written.
                     bool pushSanitized = false;
                     if (full.NewCharacterPolicy != null && state == LoadState.Missing) {
                         NewCharacterRules.Result sanitized = NewCharacterRules.Apply(c, full.NewCharacterPolicy, record: true);
@@ -360,21 +511,31 @@ namespace ValheimEnforcer.modules.character {
                     // restore it now meets has landed.
                     c.ConsumePendingSkillRestores();
 
-                    // Re-serialize from the parsed object so on-disk format is always server-canonical.
-                    cache[key] = new Entry { Character = c, Yaml = yamlserializer.Serialize(c) };
-                    // Queued strictly AFTER the cache entry is published. The main thread answers this request
-                    // by reading the cached YAML back out, and it runs concurrently with this worker - enqueuing
-                    // first would let it read the pre-sanitization copy, or none at all.
+                    // A full save is a new object, not a mutation, so it replaces the entry. The file mtime
+                    // carries over: the file is still the one the previous copy came from, until DrainOnce
+                    // writes this one.
+                    Entry fresh = new Entry {
+                        Character = c,
+                        Dirty = true,
+                        LastSender = full.Sender,
+                        SourceMtime = existingEntry?.SourceMtime ?? DateTime.MinValue,
+                        LastTouchedTicks = DateTime.UtcNow.Ticks,
+                    };
+                    cache[key] = fresh;
+                    // Queued strictly AFTER the cache entry is published, and carrying its own copy of the
+                    // payload: the main thread drains this concurrently with the worker, and by then the
+                    // entry may have been replaced by a later save or dropped by the sweep.
                     if (pushSanitized) {
-                        sanitizedPushes.Enqueue(new SanitizedPush { Sender = full.Sender, HostID = c.HostID, Name = c.Name });
+                        sanitizedPushes.Enqueue(new SanitizedPush { Sender = full.Sender, HostID = c.HostID, Name = c.Name, StrippedYaml = SerializeStripped(c) });
                     }
                     Logger.LogInfo($"Recieved Player data update - {c.Name}|{c.HostID}");
-                    return key;
+                    return fresh;
                 }
                 case DeltaMessage deltaMsg: {
                     DeltaSummaryUpdate d = deltaMsg.Delta;
-                    string key = KeyFor(d.HostID, d.Name);
-                    DataObjects.Character cur = GetOrLoad(key, d.HostID, d.Name, out _);
+                    key = KeyFor(d.HostID, d.Name);
+                    Entry entry = GetOrLoadEntry(key, d.HostID, d.Name, out _);
+                    DataObjects.Character cur = entry?.Character;
                     if (cur == null) {
                         // No authoritative save to apply onto (the main thread requests a full sync when it
                         // can detect this up front; here it means a save vanished between check and apply).
@@ -385,13 +546,15 @@ namespace ValheimEnforcer.modules.character {
                         // Worker thread - queue the recovery request rather than touching ZNet from here.
                         driftResyncs.Enqueue(new DriftResync { Sender = deltaMsg.Sender, HostID = d.HostID, Name = d.Name });
                     }
-                    cache[key] = new Entry { Character = cur, Yaml = yamlserializer.Serialize(cur) };
+                    entry.Dirty = true;
+                    entry.LastSender = deltaMsg.Sender;
                     Logger.LogInfo($"Saved delta update for {cur.Name}.");
-                    return key;
+                    return entry;
                 }
                 case DeathMessage death: {
-                    string key = KeyFor(death.HostID, death.Name);
-                    DataObjects.Character cur = GetOrLoad(key, death.HostID, death.Name, out _);
+                    key = KeyFor(death.HostID, death.Name);
+                    Entry entry = GetOrLoadEntry(key, death.HostID, death.Name, out _);
+                    DataObjects.Character cur = entry?.Character;
                     if (cur == null) { return null; } // no stored save; nothing to clear, nothing to dupe
                     bool alreadyCleared = (cur.PlayerItems == null || cur.PlayerItems.Count == 0)
                                           && cur.LastDisconnect == DisconnectionState.DirtyDisconnect;
@@ -401,8 +564,8 @@ namespace ValheimEnforcer.modules.character {
                     cur.ActiveCharacterEffects?.Clear();
                     cur.Foods?.Clear(); // vanilla empties the stomach on death; null stays null (not tracked)
                     cur.LastDisconnect = DisconnectionState.DirtyDisconnect;
-                    cache[key] = new Entry { Character = cur, Yaml = yamlserializer.Serialize(cur) };
-                    return key;
+                    entry.Dirty = true;
+                    return entry;
                 }
             }
             return null;
@@ -439,32 +602,51 @@ namespace ValheimEnforcer.modules.character {
             return true;
         }
 
-        // Worker-thread only. Returns the authoritative character for a key, parsing a seeded YAML entry
-        // or reading from disk on demand.
+        // Worker-thread only. The character as the client is sent it: the server-owned lists withheld, the
+        // same way every other server -> client character payload withholds them (see
+        // ValConfig.SendSanitizedCharacterToClient). The object is restored before this returns; it is the
+        // authoritative copy and must never be left stripped.
+        private static string SerializeStripped(DataObjects.Character c) {
+            List<PackedItem> held = c.ConfiscatedItems;
+            List<SkillReduction> heldReductions = c.SkillReductions;
+            try {
+                c.ConfiscatedItems = null;
+                c.SkillReductions = null;
+                return yamlserializer.Serialize(c);
+            } finally {
+                c.ConfiscatedItems = held;
+                c.SkillReductions = heldReductions;
+            }
+        }
+
+        // Worker-thread only. Returns the authoritative character for a key, or null with the reason.
+        private static DataObjects.Character GetOrLoad(string key, string id, string name, out LoadState state) {
+            return GetOrLoadEntry(key, id, name, out state)?.Character;
+        }
+
+        // Worker-thread only. Returns the entry holding the authoritative character for a key, reading the
+        // file on demand when the entry is a placeholder or absent.
         //
         // state says WHY the result is null, which callers need: Missing means this character has genuinely
         // never been stored here, Unreadable means a save is sitting on disk that could not be parsed. Those
         // used to be the same answer (null), which is fine for "drop this delta" but is not fine for any
         // decision that treats a first-time character differently from a returning one.
-        private static DataObjects.Character GetOrLoad(string key, string id, string name, out LoadState state) {
-            if (cache.TryGetValue(key, out Entry e)) {
-                if (e.Character != null) { state = LoadState.Found; return e.Character; }
-                if (!string.IsNullOrEmpty(e.Yaml)) {
-                    try {
-                        e.Character = yamldeserializer.Deserialize<DataObjects.Character>(e.Yaml);
-                        if (e.Character != null) { state = LoadState.Found; return e.Character; }
-                        Logger.LogWarning($"CharacterStore parsed the seeded save for {key} to nothing. Falling back to disk.");
-                    } catch (Exception ex) {
-                        Logger.LogWarning($"CharacterStore failed to parse seeded save for {key}: {ex.Message}. Falling back to disk.");
-                    }
-                }
+        private static Entry GetOrLoadEntry(string key, string id, string name, out LoadState state) {
+            if (cache.TryGetValue(key, out Entry e) && e.Character != null) {
+                Touch(e);
+                state = LoadState.Found;
+                return e;
             }
 
             string path = Path.Combine(ValConfig.CharacterFilePath, id, $"{name}.yaml");
             if (!File.Exists(path)) { state = LoadState.Missing; return null; }
             try {
-                string text = File.ReadAllText(path);
-                DataObjects.Character c = yamldeserializer.Deserialize<DataObjects.Character>(text);
+                // Streamed rather than File.ReadAllText: a save is hundreds of kilobytes, and this is the path
+                // every dropped-then-touched character comes back through.
+                DataObjects.Character c;
+                using (StreamReader reader = new StreamReader(path, Encoding.UTF8, true, 16 * 1024)) {
+                    c = yamldeserializer.Deserialize<DataObjects.Character>(reader);
+                }
                 if (c == null) {
                     // An empty or whitespace-only file deserializes to null WITHOUT throwing. Reporting that as
                     // Found-with-nothing would quietly disable the first-save check for this character (a save
@@ -474,9 +656,10 @@ namespace ValheimEnforcer.modules.character {
                     state = LoadState.Unreadable;
                     return null;
                 }
-                cache[key] = new Entry { Character = c, Yaml = text, SourceMtime = File.GetLastWriteTimeUtc(path) };
+                Entry loaded = new Entry { Character = c, SourceMtime = File.GetLastWriteTimeUtc(path), LastTouchedTicks = DateTime.UtcNow.Ticks };
+                cache[key] = loaded;
                 state = LoadState.Found;
-                return c;
+                return loaded;
             } catch (Exception ex) {
                 // Leave a present-but-corrupt save alone; dropping the update avoids overwriting it.
                 Logger.LogWarning($"CharacterStore failed to load existing save for {key}: {ex.Message}. Update dropped.");
@@ -487,14 +670,14 @@ namespace ValheimEnforcer.modules.character {
 
         // Returns the UTC last-write time the OS records for the file we just wrote, so the caller can store
         // it as the entry's SourceMtime and later distinguish our own write from an out-of-band edit.
-        private static DateTime WriteToDisk(DataObjects.Character c, string yaml) {
+        private static DateTime WriteToDisk(DataObjects.Character c) {
             Directory.CreateDirectory(ValConfig.CharacterFilePath);
             string dir = Path.Combine(ValConfig.CharacterFilePath, c.HostID);
             Directory.CreateDirectory(dir);
             string path = Path.Combine(dir, $"{c.Name}.yaml");
-            File.WriteAllText(path, yaml);
+            DateTime written = AtomicFile.WriteYaml(path, c, yamlserializer);
             Logger.LogInfo($"Writing to {path}");
-            return File.GetLastWriteTimeUtc(path);
+            return written;
         }
     }
 }

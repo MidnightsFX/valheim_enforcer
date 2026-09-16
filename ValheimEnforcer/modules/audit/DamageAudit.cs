@@ -54,6 +54,9 @@ namespace ValheimEnforcer.modules.audit {
 
         private static readonly Dictionary<string, Window> windows = new Dictionary<string, Window>(StringComparer.Ordinal);
 
+        /// <summary>Players with a live damage ring, for enforcer-memory. Main thread.</summary>
+        internal static int WindowCount => windows.Count;
+
         // ---- Observation ----------------------------------------------------------------------------------
 
         /// <summary>
