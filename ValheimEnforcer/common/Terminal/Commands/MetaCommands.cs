@@ -138,7 +138,15 @@ namespace ValheimEnforcer.common {
 
             List<string> list = ZNet.instance.GetAdminList();
             ReportAdminList(args, list, "adminlist.txt");
-            if (admin) { return; }
+            if (admin) {
+                // The one admin power that is not obvious from anywhere else in game. An admin who joined on an
+                // unapproved mod set has no other way to tell whether this server let them in on purpose or
+                // whether the mod gate is simply not working.
+                if (ValConfig.ModValidationExemptAdmins != null && ValConfig.ModValidationExemptAdmins.Value) {
+                    args.Output.Detail("ModValidationExemptAdmins is on here, so your connection is not held to the server's mod list.", log: false);
+                }
+                return;
+            }
 
             string canonical = AdminIds.Canonical(host);
             if (canonical == null) {

@@ -922,28 +922,48 @@ namespace ValheimEnforcer.modules {
                     return;
                 }
                 Mods clientMods = new Mods().FromZPackage(data);
-                bool isadmin = ZNet.instance.IsAdmin(sender.m_socket.GetHostName());
-                Logger.LogDebug($"Server received server mod data from {peerAddress} Admin?{isadmin}: Required: {clientMods.RequiredMods.Count}, Optional: {clientMods.OptionalMods.Count}, AdminOnly: {clientMods.AdminOnlyMods.Count} mods");;
                 string validatingHost = sender.m_socket?.GetHostName();
+                bool isadmin = ZNet.instance.IsAdmin(validatingHost);
+                // Whether anything found below is allowed to end this connection. The checks themselves still
+                // run either way: an operator who turned this on wants to read what their admin actually
+                // carried, and skipping the work as well would leave them nothing to read.
+                bool exemptAdmin = ExemptFromModValidation(validatingHost);
+                Logger.LogDebug($"Server received server mod data from {peerAddress} Admin?{isadmin}: Required: {clientMods.RequiredMods.Count}, Optional: {clientMods.OptionalMods.Count}, AdminOnly: {clientMods.AdminOnlyMods.Count} mods");;
 
                 // Checked before the mod list itself. A failure here says the declaration below was not
                 // generated for this connection, so it is not worth reasoning about its contents in detail -
                 // and under Require it is a rejection on its own.
-                if (!CheckAttestation(sender, validatingHost, clientMods, peerAddress)) { return; }
+                if (!CheckAttestation(sender, validatingHost, clientMods, peerAddress, exemptAdmin)) { return; }
 
                 bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, adminStatusKnown: true, out string summary, out string details, out ModMismatchDetail detail);
-                if (modsvalid) {
+                if (modsvalid || exemptAdmin) {
                     // Positive record: this host actually sent a mod list and it passed. ZNet_RPC_PeerInfo_ModRejection
                     // refuses any host that reaches PeerInfo in neither the validated nor the rejected set, which is
                     // what stops a client that simply never runs the handshake (rather than failing it) from joining.
+                    // An exempt admin is recorded too, or that same gate would go on to refuse the connection this
+                    // check just decided to allow.
                     if (!string.IsNullOrEmpty(validatingHost)) { ValidatedHosts.Add(validatingHost); }
+                }
+                if (modsvalid) {
                     // Recorded here, where we know both what this client declared and that we accepted it. If a
                     // server-side guard later refuses something this peer sends, that declaration is the other
                     // half of the contradiction.
+                    //
+                    // Deliberately not recorded for an exempt admin whose list FAILED. PeerTrust's whole inference
+                    // rests on the peer running only mods the server approved, which is the premise the exemption
+                    // just set aside; no record is the honest answer, and PeerTrust already reports that case in
+                    // words rather than guessing.
                     network.PeerTrust.Declare(validatingHost, clientMods, ModSettings);
                 }
                 if (modsvalid == false) {
                     Logger.LogWarning($"Mod compatibility check failed for client at {peerAddress}\n{summary}");
+                    if (exemptAdmin) {
+                        // Logged, never notified. A Discord mod-mismatch message exists to tell staff somebody was
+                        // turned away; nobody was. Paging the channel every time an admin joins on their test build
+                        // is how a useful alert becomes one people stop reading.
+                        Logger.LogInfo($"Letting the client at {peerAddress} in regardless: ModValidationExemptAdmins is on and this connection is on the server's admin list.");
+                        return;
+                    }
                     if (ValConfig.DiscordNotifyWrongMods.Value) {
                         string playerName = ResolvePeerName(sender) ?? peerAddress;
                         DiscordNotifier.Notify(NotificationEvent.ModMismatch, new Dictionary<string, string> {
@@ -979,6 +999,19 @@ namespace ValheimEnforcer.modules {
         private static readonly HashSet<string> ValidatedHosts = new HashSet<string>();
 
         /// <summary>
+        /// Whether this connection is held to the mod gate at all.
+        ///
+        /// Admin status is decided by <c>ZNet.IsAdmin</c> against the host name of the socket the handshake
+        /// arrived on - the game's own check, against the server's own adminlist.txt - so a client cannot
+        /// claim it. Off by default, and worth being deliberate about: with it on, a line in that file is the
+        /// only thing between an account and every check in this file.
+        /// </summary>
+        private static bool ExemptFromModValidation(string hostId) {
+            if (ValConfig.ModValidationExemptAdmins == null || !ValConfig.ModValidationExemptAdmins.Value) { return false; }
+            return !string.IsNullOrEmpty(hostId) && ZNet.instance != null && ZNet.instance.IsAdmin(hostId);
+        }
+
+        /// <summary>
         /// Server side: refuse a peer that failed mod validation.
         ///
         /// The "Error" RPC on its own is only advisory. Vanilla ZNet.RPC_Error assigns m_connectionStatus and
@@ -1004,7 +1037,7 @@ namespace ValheimEnforcer.modules {
         /// claim - see <see cref="Attestation"/> - so it is deliberately not treated as evidence about the
         /// contents of the declaration, only about its freshness.
         /// </summary>
-        private static bool CheckAttestation(ZRpc sender, string hostId, Mods clientMods, string peerAddress) {
+        private static bool CheckAttestation(ZRpc sender, string hostId, Mods clientMods, string peerAddress, bool exemptAdmin) {
             Attestation.Verdict verdict = Attestation.Check(hostId, clientMods);
             if (verdict == Attestation.Verdict.Pass) { return true; }
 
@@ -1028,6 +1061,15 @@ namespace ValheimEnforcer.modules {
 
             if (Attestation.Policy() != Attestation.Require) {
                 Logger.LogWarning($"Attestation check failed for the client at {peerAddress}: {why}. Allowed, because AttestationPolicy is {Attestation.Policy()}.");
+                return true;
+            }
+
+            // Covered by the exemption on purpose. The commonest reason an admin has no usable attestation is
+            // that they are testing an older or hand-built ValheimEnforcer, which is precisely the case
+            // ModValidationExemptAdmins exists for; rejecting them here would leave the setting unable to
+            // deliver what it promises on any server running Require.
+            if (exemptAdmin) {
+                Logger.LogInfo($"Attestation check failed for the client at {peerAddress}: {why}. Allowed anyway: ModValidationExemptAdmins is on and this connection is on the server's admin list.");
                 return true;
             }
 
@@ -1061,6 +1103,14 @@ namespace ValheimEnforcer.modules {
                 // like. Only the ModSync RPC (registered when ModSettings is ready) can populate the set, so do
                 // not refuse before this server is itself ready to validate.
                 if (ModSettings != null && !ValidatedHosts.Contains(hostId)) {
+                    // The one gate an exempt admin has to be let through here rather than earlier: a client with
+                    // no ValheimEnforcer on it never reaches the mod RPC at all, so nothing there ever ran to
+                    // record it. Without this, "admins may connect with any mods" would stop short of the case
+                    // an operator is most likely to want it for - joining on a plain, unmodded client.
+                    if (ExemptFromModValidation(hostId)) {
+                        Logger.LogInfo($"No mod list was received from {hostId} before PeerInfo, but ModValidationExemptAdmins is on and this connection is on the server's admin list; allowing it.");
+                        return true;
+                    }
                     Logger.LogWarning($"Refusing peer info from {hostId}: no mod list was received before PeerInfo (the ValheimEnforcer handshake did not run).");
                     rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorVersion);
                     return false;

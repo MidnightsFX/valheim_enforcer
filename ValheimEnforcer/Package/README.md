@@ -39,6 +39,7 @@ Mod Enforcement. All of the following features are configurable (server authorat
 - Optional SHA256 file verification of client plugin DLLs, so a recompiled mod is rejected even when its version string is untouched
 - Optional allowlisting of BepInEx **patchers**, the DLLs that load before any plugin and rewrite the game's assemblies ([Patchers](#patchers))
 - Optional per-connection attestation, so a client's mod report cannot be a canned answer replayed from a previous session ([Attestation](#attestation))
+- Optionally exempts admins from the whole mod gate, so a new mod can be tested against the live server without editing the list first ([Admin Bypass](#admin-bypass))
 
 Nothing needs configuring for the default behaviour — every mod the server loads becomes a required mod. [Mod List](#mod-list) covers the file for when you want something else.
 
@@ -288,6 +289,29 @@ Without it, a client reports the same plugin list and the same file hashes every
 | `Require` | A missing or wrong attestation is a rejection |
 
 **Before setting `Require`:** a player on an older ValheimEnforcer sends no attestation at all, and is rejected too. Roll the pack out first. If the server's own record of a connection's nonce goes missing, that connection is *allowed* rather than refused - our bookkeeping failing is not the player's fault.
+
+### Admin Bypass
+
+Off by default. Set `ModValidationExemptAdmins` to `true` and anyone on the server's admin list may connect with any mods at all.
+
+That means all of it: missing required mods, mods the server does not allow, mismatched versions, modified mod files, unlisted BepInEx patchers, and a missing or wrong [attestation](#attestation) even under `Require`. It also covers an admin running **no ValheimEnforcer at all**, who is otherwise refused for never sending a mod list — which is usually the case you actually want it for.
+
+The point is to try a mod against the live server before committing it to `Mods.yaml`, rather than editing the list, restarting, and editing it back.
+
+**The check still runs.** Everything a normal client's list is put through is still computed and still written to the server log, so you can read exactly what your admin was carrying. Only the rejection is skipped. The Discord mod-mismatch notification is not sent for an exempt admin, because nobody was turned away and a channel that pings every time an admin joins on a test build is a channel people stop reading.
+
+**Know what it costs.** With this on, a line in `adminlist.txt` is the only thing between an account and every mod check in this mod. Every id in that file needs to be somebody you would trust with an arbitrary client. Admin status is read by the server from its own admin list, against the connection the request arrived on, so no client can claim it — but nothing else stands behind it either.
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `ModValidationExemptAdmins` | `false` | Admins are not rejected for anything the mod gate finds. The gate still runs and still logs |
+
+#### Things worth knowing
+
+- An admin whose list failed gets **no client-contradiction declaration on file** ([Client Contradictions](#client-contradictions)). That feature reasons from "this peer only runs mods the server approved", which is the premise this setting sets aside, so a later guard trip from them is reported as having no declaration rather than being measured against one that was never enforced.
+- The oversize-payload guard is not part of the exemption. A mod list too large to parse is refused whoever sent it; that is a resource bound, not a mod policy.
+- This covers mod validation only. The cheat-tool scan, the server-authoritative guards and the character rules have their own admin exemptions, listed with each feature.
+- `enforcer-whoami` says when it is on, so an admin who joined with an unapproved mod set can tell they were let in on purpose.
 
 ### Item Origins
 

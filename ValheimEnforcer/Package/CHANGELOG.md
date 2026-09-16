@@ -1,6 +1,24 @@
+**0.27.1**
+---
+```
+    - Adds an Admin override config (NOT SERVER SYNCED, must be set on the server itself)
+```
+
 **0.27.0**
 ---
 ```
+- Adds ModValidationExemptAdmins (Mods, default off): anyone on the server's adminlist may connect with any mods at
+  all - missing required mods, mods the server does not allow, mismatched versions, modified files, unlisted BepInEx
+  patchers, and a missing or wrong attestation even under Require. It also covers an admin running no ValheimEnforcer
+  at all, who is otherwise refused for never sending a mod list. Meant for testing a mod against the live server
+  without editing Mods.yaml first.
+    - The checks still run and their result still goes to the server log, so you can read what the admin was
+      carrying; only the rejection is skipped.
+    - The Discord mod-mismatch notification is not sent for an exempt admin - nobody was turned away.
+    - An exempt admin whose list failed gets no client-contradiction declaration on file, since that feature reasons
+      from a premise this setting sets aside.
+    - The oversize mod-list guard is not part of the exemption.
+    - enforcer-whoami reports when it is on.
 - Reduces player memory footprint
     - Adds CharacterCacheIdleMinutes (Advanced, default 30): a character untouched for this long is dropped from
       memory and read back from its file on the next update. 0 keeps everything until restart, as before.
