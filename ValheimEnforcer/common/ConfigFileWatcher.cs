@@ -10,7 +10,15 @@ namespace ValheimEnforcer.common {
         private class WatchEntry {
             public DateTime LastWriteUTC { get; set; }
             public long FileLength { get; set; }
-            public Action<string> Callback;
+
+            /// <summary>
+            /// Every owner that asked to hear about this file, in registration order.
+            ///
+            /// A list rather than one delegate because a file can legitimately have two owners: the generic
+            /// config dispatch in <see cref="ValConfig"/> watches every yaml file it creates, and a module
+            /// that owns one of those files may want its own reload as well.
+            /// </summary>
+            public readonly List<Action<string>> Callbacks = new List<Action<string>>();
 
             public void Update(DateTime lastwrite, long len) {
                 LastWriteUTC = lastwrite;
@@ -30,15 +38,39 @@ namespace ValheimEnforcer.common {
             Logger.LogDebug("ConfigFileWatcher initialized.");
         }
 
+        /// <summary>
+        /// Starts watching a file, or adds another callback to one already watched.
+        ///
+        /// Registering the same path twice used to be Dictionary.Add, which threw - and every Register call in
+        /// the mod runs from the ValConfig constructor, which runs from Awake, so one duplicated path did not
+        /// just lose a callback. It left Awake at "cfg = new ValConfig(Config)" and took the whole of the rest
+        /// of it: the asset bundle, the SetModsActive hooks, TerminalManager (every enforcer command),
+        /// CheatDetector, CharacterDeltaTracker - and Harmony.CreateAndPatchAll, so not one patch was applied.
+        /// The plugin loaded, logged one line about a dictionary key, and enforced nothing. Loadouts.yaml was
+        /// registered twice exactly this way. A second owner is a normal thing to want, and is now just added.
+        /// </summary>
         internal static void Register(string fullPath, Action<string> onChanged) {
-            if (File.Exists(fullPath)) {
-                var info = new FileInfo(fullPath);
-                DateTime mtime = info.LastWriteTimeUtc;
-                long size = info.Length;
-                WatchedFiles.Add(fullPath, new WatchEntry() { LastWriteUTC = mtime, FileLength = size, Callback = onChanged });
-            } else {
-                WatchedFiles.Add(fullPath, new WatchEntry() { LastWriteUTC = DateTime.MinValue, FileLength = 0, Callback = onChanged });
+            if (string.IsNullOrEmpty(fullPath) || onChanged == null) { return; }
+
+            if (WatchedFiles.TryGetValue(fullPath, out WatchEntry existing)) {
+                // Delegate equality compares target and method, so re-running the same registration - a
+                // reloaded module calling Initialize twice - does not stack a second identical callback.
+                if (existing.Callbacks.Contains(onChanged)) {
+                    Logger.LogDebug($"ConfigFileWatcher already watching {fullPath} with this callback.");
+                    return;
+                }
+                existing.Callbacks.Add(onChanged);
+                Logger.LogDebug($"ConfigFileWatcher added another callback for {fullPath} ({existing.Callbacks.Count} total).");
+                return;
             }
+
+            WatchEntry entry = new WatchEntry() { LastWriteUTC = DateTime.MinValue, FileLength = 0 };
+            if (File.Exists(fullPath)) {
+                FileInfo info = new FileInfo(fullPath);
+                entry.Update(info.LastWriteTimeUtc, info.Length);
+            }
+            entry.Callbacks.Add(onChanged);
+            WatchedFiles.Add(fullPath, entry);
             Logger.LogDebug($"ConfigFileWatcher watching {fullPath}");
         }
 
@@ -77,7 +109,12 @@ namespace ValheimEnforcer.common {
             private static void Poll() {
                 if (WatchedFiles.Count == 0) { return; }
 
-                foreach (string key in WatchedFiles.Keys) {
+                // Snapshot: a callback is free to Register another file - a module reading one config that
+                // names a second - and mutating the dictionary mid-foreach would throw out of Poll, past the
+                // per-callback guard below, and then again on every frame after that.
+                List<string> keys = new List<string>(WatchedFiles.Keys);
+
+                foreach (string key in keys) {
                     if (File.Exists(key) == false) { continue; }
 
                     FileInfo info = new FileInfo(key);
@@ -89,15 +126,16 @@ namespace ValheimEnforcer.common {
                     //Logger.LogDebug($"Comparing file details:\n lastwrite: {mtime} == {we.LastWriteUTC} ({mtime == we.LastWriteUTC})\n  size {size} == {we.FileLength} ({size == we.FileLength})");
                     if (mtime == we.LastWriteUTC && size == we.FileLength) { continue; }
 
-                    WatchedFiles[key].LastWriteUTC = mtime;
-                    WatchedFiles[key].FileLength = size;
+                    we.Update(mtime, size);
 
-                    try {
-                        if (we.Callback != null) {
-                            we.Callback(key);
+                    // Guarded one at a time: with several owners on a file, the first one throwing must not
+                    // cost the others their notification. ToArray so a callback may register its own.
+                    foreach (Action<string> callback in we.Callbacks.ToArray()) {
+                        try {
+                            callback(key);
+                        } catch (Exception e) {
+                            Logger.LogWarning($"ConfigFileWatcher callback for {key} threw: {e.Message}");
                         }
-                    } catch (Exception e) {
-                        Logger.LogWarning($"ConfigFileWatcher callback for {key} threw: {e.Message}");
                     }
                 }
             }

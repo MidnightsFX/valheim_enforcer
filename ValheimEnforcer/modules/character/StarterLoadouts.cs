@@ -36,15 +36,31 @@ namespace ValheimEnforcer.modules.character {
         // consistent set - the same shape as NewCharacterRules.StartingPrefabs and AccountCharacterLimit.
         private static Loadouts loaded = new Loadouts();
 
+        /// <summary>
+        /// Reads the file once at startup.
+        ///
+        /// Deliberately does NOT register a watcher. Loadouts.yaml is one of the files
+        /// <see cref="ValConfig.LoadYamlConfigs"/> creates and watches, and its edits arrive back here through
+        /// <see cref="LoadFromText"/> - the same route KnownCheaters.yaml and Notifications.yaml take. Doing
+        /// both threw on the duplicate path and, because this runs from the ValConfig constructor, took the
+        /// rest of the plugin's startup with it.
+        /// </summary>
         internal static void Initialize() {
             Load();
-            ConfigFileWatcher.Register(FilePath, _ => Load());
         }
 
         internal static void Load() {
             try {
                 if (!File.Exists(FilePath)) { loaded = new Loadouts(); return; }
-                string text = File.ReadAllText(FilePath);
+                LoadFromText(File.ReadAllText(FilePath));
+            } catch (Exception e) {
+                Report(e);
+            }
+        }
+
+        /// <summary>Parses loadouts from yaml text - the file watcher's reload path.</summary>
+        internal static void LoadFromText(string text) {
+            try {
                 Loadouts parsed = DataObjects.yamldeserializer.Deserialize<Loadouts>(text);
                 // A file that parses to nothing, or whose one key is absent, is an empty set rather than a
                 // null one. Every reader below would otherwise have to guard, and one that forgot would take
@@ -54,11 +70,15 @@ namespace ValheimEnforcer.modules.character {
                 loaded = parsed;
                 Logger.LogInfo($"Loaded {loaded.loadouts.Count} starter loadout(s) from {FileName}.");
             } catch (Exception e) {
-                // The previous set is kept. A file an admin has just broken should not silently remove the
-                // kit every new player is getting - and unlike the mod list there is nothing here that a
-                // half-read file could make LESS strict.
-                Logger.LogError($"Could not read {FileName} ({e.Message}). Keeping the {loaded.loadouts.Count} loadout(s) already loaded; fix the file and it will be re-read.");
+                Report(e);
             }
+        }
+
+        // The previous set is kept. A file an admin has just broken should not silently remove the kit every
+        // new player is getting - and unlike the mod list there is nothing here that a half-read file could
+        // make LESS strict.
+        private static void Report(Exception e) {
+            Logger.LogError($"Could not read {FileName} ({e.Message}). Keeping the {loaded.loadouts.Count} loadout(s) already loaded; fix the file and it will be re-read.");
         }
 
         /// <summary>Every loadout name, for the commands and their tab completion.</summary>

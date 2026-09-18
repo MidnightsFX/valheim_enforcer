@@ -617,6 +617,10 @@ namespace ValheimEnforcer {
                     // mid-edit would get their file rewritten under them one poll after every save.
                     NotificationTemplates.LoadFromText(filetext);
                     break;
+                case modules.character.StarterLoadouts.FileName:
+                    Logger.LogDebug("Triggering starter loadout update.");
+                    modules.character.StarterLoadouts.LoadFromText(filetext);
+                    break;
             }
         }
 

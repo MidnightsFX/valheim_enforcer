@@ -1,3 +1,9 @@
+**0.28.2**
+---
+```
+- Fixes empty loadouts causing errors
+```
+
 **0.28.1**
 ---
 ```
