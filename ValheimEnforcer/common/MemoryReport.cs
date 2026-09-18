@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using ValheimEnforcer.modules.audit;
@@ -96,6 +96,7 @@ namespace ValheimEnforcer.common {
             FirstSaveEnforcement.Counts(out int armedNew, out int armedReturning);
             return $"drift resync cooldowns {ValConfig.DriftResyncTrackedCount}, guard report cooldowns {RpcGuardPolicy.TrackedCount}, " +
                    $"structure notify cooldowns {StructureValidator.TrackedCount}, item origin cooldowns {ItemOriginValidator.TrackedCount}, " +
+                   $"inventory grid cooldowns {InventoryBoundsValidator.TrackedCount}, " +
                    $"trust records {PeerTrust.TrackedCount}, first-save armed {armedNew} new / {armedReturning} returning, " +
                    $"known player ids {KnownPlayerIds.Count()}";
         }

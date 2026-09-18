@@ -108,6 +108,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
             StructureIndex.Invalidate();
             ItemOriginIndex.Invalidate();
             ItemOriginValidator.Reset();
+            InventoryBoundsValidator.Reset();
         }
     }
 }

@@ -1,4 +1,4 @@
-# Valheim Enforcer — Documentation
+﻿# Valheim Enforcer — Documentation
 
 Full reference for every feature. If you just want the short version, the [project README](../README.md) summarises what each feature does.
 
@@ -16,7 +16,7 @@ Full reference for every feature. If you just want the short version, the [proje
 | [Player Activity Audit](player-audit.md) | **on** | What a player is carrying, how they got it, and what they are hitting things for |
 | [Structure Validation](structure-validation.md) | off | Catching world-generation geometry spawned as if it were built, and indestructible pieces |
 | [Network Integrity](network-integrity.md) | off | Guards on the vanilla RPCs the server otherwise relays unchecked |
-| [Item Origins](item-origins.md) | off | Equipment that appears with no crafter and no route into this world |
+| [Item Origins](item-origins.md) | mixed | Equipment that appears with no crafter and no route into this world (off), and items sitting in inventory slots that inventory does not have (on) |
 | [Save Archives](save-archives.md) | off | Rolling compressed archives of the world **and** the character saves together |
 | [Emergency Crash Recovery](crash-recovery.md) | off | Sealed character snapshots held by clients, adopted back after an unclean shutdown |
 | [Discord Notifications](discord.md) | off | Joins, bans, refusals and server status, with fully rewritable messages |

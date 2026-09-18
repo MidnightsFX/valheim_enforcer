@@ -151,6 +151,10 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> DetectUnknownCrafterIds;
         public static ConfigEntry<bool> ItemOriginExemptAdmins;
         public static ConfigEntry<string> IgnoredItemOriginPrefabs;
+        public static ConfigEntry<bool> DetectInventoryGrid;
+        public static ConfigEntry<bool> InventoryGridExemptAdmins;
+        public static ConfigEntry<int> MaxInventoryWidth;
+        public static ConfigEntry<int> MaxInventoryHeight;
 
         public static ConfigEntry<bool> EnableRpcGuards;
         public static ConfigEntry<bool> GuardChatSenderName;
@@ -449,6 +453,10 @@ namespace ValheimEnforcer {
             DetectUnknownCrafterIds = BindServerConfig("World Integrity", "DetectUnknownCrafterIds", true, "Report equipment whose crafter is a player id nobody on this server has ever reported. Somebody who spawns gear and then stamps a crafter on it has to invent a number, and an invented one belongs to no player here. Trading is unaffected: the question is whether the id is known, not whether it is yours, so a sword one player made and gave to another is fine. Ids are collected from connected players and kept in PlayerIds.yaml. Expect some noise at first - an item crafted by somebody who has not joined since you enabled this has a crafter the registry does not know yet - and note that nothing is reported at all until the registry has somebody in it. Requires DetectItemOrigins.");
             ItemOriginExemptAdmins = BindServerConfig("World Integrity", "ItemOriginExemptAdmins", true, "Whether admins are exempt from item origin checks. On by default, matching StructureValidationExemptAdmins: spawning items is an ordinary thing to do with devcommands and an admin should not have to notice this feature exists.");
             IgnoredItemOriginPrefabs = BindServerConfig("World Integrity", "IgnoredItemOriginPrefabs", "", "Comma-separated allowlist of item prefab names never reported, matched as a case-insensitive substring so one entry can cover a family. Applied before every other check. This is the escape hatch for a mod that hands out gear by a route the prefab scan cannot see - a quest reward written in code, an item granted by a script - and it is the thing to reach for rather than turning the feature off.");
+            DetectInventoryGrid = BindServerConfig("World Integrity", "DetectInventoryGrid", true, "Report items sitting in an inventory cell that inventory does not have. Every item records the grid cell it occupies, so an item in column 11 of an eight-column inventory is not suspicious, it is impossible - the only way to produce one is to have resized the grid, which is a feature of the injected cheat menus and of nothing else. Only items that have just appeared are examined, never whole inventories, so nothing a character already had is re-examined and no migration is needed. This warns; it never confiscates. What it also does is record a contradiction against the connection, so it counts toward ContradictionThreshold alongside the network guards - see enforcer-trust.");
+            InventoryGridExemptAdmins = BindServerConfig("World Integrity", "InventoryGridExemptAdmins", true, "Whether admins are exempt from the inventory grid check. On by default, matching ItemOriginExemptAdmins.");
+            MaxInventoryWidth = BindServerConfig("World Integrity", "MaxInventoryWidth", 8, "Columns a player inventory may legitimately have. 8 is correct for vanilla and for every inventory mod in wide use: vanilla builds the player inventory eight columns wide and offers no way to change that - Player.SetInventorySize takes ROWS only - and ExtraSlots, AzuExtendedPlayerInventory and EquipmentAndQuickSlots all add rows and leave the width alone. Raise it only if a mod on your server genuinely widens the grid; 0 disables the column check. Requires DetectInventoryGrid.", advanced: true, valmin: 0, valmax: 64);
+            MaxInventoryHeight = BindServerConfig("World Integrity", "MaxInventoryHeight", 0, "Rows a player inventory may legitimately have, or 0 to not check rows at all. Off by default because, unlike the width, there is no answer that is right for everybody: vanilla itself sells rows at the trader up to nine, and ExtraSlots, AzuExtendedPlayerInventory and EquipmentAndQuickSlots each add more on top, some of them hidden. Set this only if you know what your own mod set produces - count the rows on a fully equipped player and add a margin - and watch the log before trusting it. A vanilla server can use 9. Requires DetectInventoryGrid.", advanced: true, valmin: 0, valmax: 64);
             IgnoredStructurePrefabs = BindServerConfig("World Integrity", "IgnoredStructurePrefabs", "", "Comma-separated allowlist of prefab names never flagged, matched as a case-insensitive substring so one entry can cover a family of prefabs (e.g. 'dvergrprops_' covers all of them). Applied last, so it overrides every check above. This is the escape hatch when a mod on your server legitimately creates an object this detector does not recognise - reach for it rather than turning the whole feature off, and reach for it before enabling RemoveDetectedStructures.");
 
             EnableRpcGuards = BindServerConfig("Network Integrity", "EnableRpcGuards", false, "Master switch for server-side validation of the vanilla routed RPCs a client can send. Valheim relays these without checking anything about who sent them or what they contain, so one modified client can teleport everybody into the ocean, delete a base, impersonate an admin in chat or one-shot another player. Each guard below inspects the packet on the server, where a client cannot lie about it, and drops the ones no legitimate client produces. Off by default; every guard is inert until this is on.");
@@ -1859,10 +1867,25 @@ loadouts: {}
             // The admin question is only asked when something will use the answer. ZNet.IsAdmin builds several
             // strings per call and this runs for every delta from every player, while the detector it feeds is
             // off by default.
-            if (modules.worldintegrity.ItemOriginValidator.Enabled()) {
-                bool senderIsAdmin = modules.character.PeerIdentity.IsAdmin(ZNet.instance?.GetPeer(sender));
-                modules.worldintegrity.ItemOriginValidator.InspectDelta(
-                    deltaUpdate, deltaUpdate.HostID, deltaUpdate.Name, senderIsAdmin);
+            // Both detectors below want the same two answers, and both are expensive enough to be worth not
+            // asking for twice: ZNet.IsAdmin builds several strings per call, and this runs for every delta
+            // from every player. Resolved once, and only when something will use the result.
+            bool inspectOrigins = modules.worldintegrity.ItemOriginValidator.Enabled();
+            bool inspectGrid = modules.worldintegrity.InventoryBoundsValidator.Enabled();
+            if (inspectOrigins || inspectGrid) {
+                ZNetPeer senderPeerForInspection = ZNet.instance?.GetPeer(sender);
+                bool senderIsAdmin = modules.character.PeerIdentity.IsAdmin(senderPeerForInspection);
+                if (inspectOrigins) {
+                    modules.worldintegrity.ItemOriginValidator.InspectDelta(
+                        deltaUpdate, deltaUpdate.HostID, deltaUpdate.Name, senderIsAdmin);
+                }
+                // Same placement and the same reasons as the origin check above: after the identity binding,
+                // so the report names the character this connection is really playing, and before the merge,
+                // so an impossible grid position is written down whether or not the save that follows works.
+                if (inspectGrid) {
+                    modules.worldintegrity.InventoryBoundsValidator.InspectDelta(
+                        deltaUpdate, senderPeerForInspection, deltaUpdate.HostID, deltaUpdate.Name, senderIsAdmin);
+                }
             }
 
             // Same placement, and for the same two reasons: after the identity binding above, so a recorded

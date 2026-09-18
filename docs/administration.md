@@ -26,6 +26,7 @@ Type `enforcer-help` for the list, or `enforcer-help items` for one area of it. 
 | `enforcer-audit-available` | What audit history the server still holds for a player |
 | `enforcer-audit-download` | Saves a player's history to your own machine |
 | `enforcer-memory` | Memory use: what the mod is holding, and the world's object counts ([details](#memory)) |
+| `enforcer-harden` | Which defences against an injected cheat menu are off, and what each leaves open ([details](cheat-detection.md#hardening-against-injected-menus)) |
 
 Everything except `enforcer-help` and `enforcer-whoami` needs admin rights on the server. Those two run for anybody, because the person who needs them most is the one being refused everything else; see [When the server does not think you are an admin](#when-the-server-does-not-think-you-are-an-admin). If you would rather ordinary players could not even see the command list, set `AllowPublicDiagnosticCommands` (Advanced) to false and both go back to being admin-only.
 

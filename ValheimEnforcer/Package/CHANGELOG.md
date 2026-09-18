@@ -1,32 +1,33 @@
 ﻿**0.29.0**
 ---
 ```
-- Adds detection for injected cheat menus - cheats that are not mods and that every existing check
-  therefore misses. The prompting case is Valheaven (internally ValheimAdminMenu), which ships as a
-  version.dll dropped beside valheim.exe: Windows loads it ahead of the real one, and it boots a managed
-  assembly into the game, taking BepInEx's Harmony when BepInEx is there and loading its own when it is
-  not. It has no file in BepInEx/plugins to hash, it is not chainloaded so it is not in the mod list the
-  client declares at join, it has no process of its own, and it draws inside the game so it has no window.
-  Two new vectors see it, and both key on what it is rather than what it is called:
-    - Adds DetectInjectedCheatAssemblies (Anti-Cheat, default on): matches the namespaces of the managed
-      types loaded into the game against the catalog, as they load and on a periodic sweep, so a menu that
-      arrives after mod validation has passed is still caught. Covers ValheimTooler and Valheaven; both are
-      auto-banned on a confirmed detection. This generalises the ValheimTooler check, which was a pair of
-      hardcoded constants - the next menu is now an entry in the catalog rather than a code change.
-      DetectValheimTooler still gates its own tool, the way DetectCheatEngine does inside DetectCheatTools,
-      so a server that had turned it off keeps the behaviour it asked for.
-    - Adds DetectProxyLoaders (Anti-Cheat, default on, requires ScanLoadedModules): reports a Windows
-      system DLL loaded into the game from somewhere other than the Windows directory. The name is not the
-      signal - version.dll, winmm.dll and the rest are genuine DLLs the game legitimately loads - the path
-      is, which is why this survives the tool being renamed or rebuilt. Known builds are identified by
-      SHA256 and reported under the tool's own name; an unrecognised one says a loader is installed, not
-      which one, and follows ActionOnDetection.
-    - BepInEx's own doorstop is a winhttp.dll proxy and is recognised by the files Doorstop ships beside
-      it. The graphics names (dxgi, d3d9/10/11/12, ddraw, opengl32) are how ReShade, Special K and ENB
-      install, so a sighting there is low confidence: reported and logged, never enforced on its own.
-      IgnoredCheatProcesses overrides the proxy check as it does everything else.
+- Adds detection for injected cheat menus
+- Adds the inventory grid check (World Integrity, DetectInventoryGrid, default on). Every item records the
+  grid cell it occupies, so an item in column 11 of an eight-column inventory is not suspicious, it is
+  impossible - resizing the grid is a feature of the injected menus and of nothing else. Valheaven announces
+  its own grid as it changes it ("Inv 12x8", then "10x8", then "8x8" as one player walked it back).
+    - Width is the check; rows are not. Vanilla builds the player inventory eight columns wide and offers no
+      way to change that - Player.SetInventorySize takes ROWS only - while rows are genuinely mod territory:
+      vanilla sells them at the trader up to nine, ExtraSlots and AzuExtendedPlayerInventory add more, and
+      EquipmentAndQuickSlots writes the height directly for its visible and hidden slot rows. All of them
+      leave the width at eight. So MaxInventoryWidth (Advanced) ships at 8, correct for vanilla and for all
+      three, and MaxInventoryHeight (Advanced) ships at 0, meaning rows are not checked at all.
+    - Only items that have just appeared are examined, so nothing a character already had is re-examined and
+      no migration is needed. Negative coordinates are never flagged - (-1,-1) is the "no position" sentinel.
+      An ExtraSlots equipment slot is never flagged either; those sit outside the ordinary grid flow.
+    - Warns and never confiscates, like the item origin checks beside it. It does record a contradiction
+      against the connection, so it counts toward ContradictionThreshold and shows up in enforcer-trust.
+    - It cannot see a resize that stays inside legal bounds. The 8x8 the player above settled on is a legal
+      vanilla inventory; only the 12x8 and 10x8 phases were ever catchable this way.
+- Adds enforcer-harden: reports which of this server's defences against an injected cheat menu are switched
+  off and what each one leaves open, then the actions currently configured. Reads settings and changes
+  nothing. Most of what a cheat menu DOES already runs into code the server runs for itself - the spawner
+  into BlockSpawnObjectRPC, impossible damage into GuardDamageRpc, free building into GuardGlobalKeys - and
+  most of that ships off, which is hard to see reading the config file top to bottom. A setting that is on
+  but whose prerequisite is off reports as ineffective rather than on.
 - Fixes the documented DetectSpeedhack setting, which has not existed for some time - its field, its
-  binding and the loop behind it were all commented out, and the settings table still listed it as on.
+  binding and the loop behind it were all commented out, and the settings table still listed it as on
+- Fixes a chance that customdata will become stale
 ```
 
 **0.28.3**

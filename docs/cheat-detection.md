@@ -74,6 +74,28 @@ Window *titles* are ignored on windows that display content rather than run it �
 *What the server does refuse to take on trust is anything it can decide for itself. The sender of every network message is verified against the connection it arrived on, so a modified client cannot act as another player — it cannot run an admin's commands, get someone else banned, or write to another account's character. A character save or inventory delta is only ever accepted for the account and character the connection joined as. The join rules (item confiscation, skill clamping, custom-data reset) are re-run on the server for returning characters, not just applied on the client, and a first save from a brand-new character is held to the new-character rules server-side. These are the parts a client cannot lie its way past; the caveats above are about the parts — what mods it runs, what it has in its inventory this instant — that it still can. [Network Integrity](network-integrity.md) extends the same principle to the vanilla RPCs the server relays: chat names, player teleports, mass object deletion, damage values and global keys are all checked against what the server itself knows, so no amount of patching the client gets past them.*
 
 
+## Hardening against injected menus
+
+Run **`enforcer-harden`** on the server console. It reports which of these are off and what each one leaves open, and changes nothing.
+
+Most of what a cheat menu actually *does* already runs into code the server runs for itself — and most of that ships **off**, because each switch has a cost to somebody. Worth going through deliberately if a menu has turned up on your server:
+
+| What the menu does | What stops it | Ships |
+| --- | --- | --- |
+| Item, creature and boss spawner | `BlockSpawnObjectRPC` — `ZNetScene.SpawnObject` has no legitimate caller anywhere in the game | off, needs `EnableStructureValidation` |
+| Placing world-generation geometry | `DetectNonBuildableStructures` | off, needs `EnableStructureValidation` |
+| Million-damage weapons, one-hit kills | `GuardDamageRpc` + `MaxAllowedHitDamage` | off, needs `EnableRpcGuards` |
+| Free building, altered damage rates, self-granted boss kills | `GuardGlobalKeys` | off, needs `EnableRpcGuards` |
+| Teleporting other players | `GuardPlayerTeleportRpc` | off, needs `EnableRpcGuards` |
+| Terrain brush, mass deletion | `GuardZdoDestruction` | off, needs `EnableRpcGuards` |
+| Resized inventory | [`DetectInventoryGrid`](item-origins.md#impossible-inventory-slots) | **on** |
+| Spawned gear | [`DetectItemOrigins`](item-origins.md) | off |
+| Skipping the join rules client-side | `ServerSideJoinEnforcement` | **on** |
+
+Two of these are worth singling out. **`BlockSpawnObjectRPC`** is the highest-value switch on the list: nothing in vanilla Valheim ever sends `SpawnObject` from a client, so there is no legitimate traffic for it to refuse. And **`ContradictionAction`** (default `Log`) is what turns the rest into consequences — each guard above records the connection that tripped it, and a client tripping several distinct guards is a toolkit rather than a coincidence. Read [`enforcer-trust`](network-integrity.md#client-contradictions) before raising it.
+
+One thing a menu advertises that is *not* a gap: Valheaven claims "anti-cheat scrubbing" that cleans the vanilla "gotten by cheated means" flags before they are written. It can also stamp a plausible crafter on a spawned item, which defeats the no-crafter check by design. What it cannot invent is a crafter this server has actually seen — `DetectUnknownCrafterIds` compares against `PlayerIds.yaml`, which is built from players who really joined.
+
 ## Settings
 
 | Setting | Default | What it does |

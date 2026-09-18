@@ -1448,6 +1448,7 @@ namespace ValheimEnforcer.modules {
                 network.RpcGuardPolicy.Forget(hostId);
                 worldintegrity.StructureValidator.Forget(hostId);
                 worldintegrity.ItemOriginValidator.Forget(hostId);
+                worldintegrity.InventoryBoundsValidator.Forget(hostId);
             }
         }
 

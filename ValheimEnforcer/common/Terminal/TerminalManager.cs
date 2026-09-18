@@ -45,6 +45,7 @@ namespace ValheimEnforcer.common {
             RegisterBackupCommands();
             RegisterRecoveryCommands();
             RegisterMemoryCommands();
+            RegisterHardeningCommands();
 
             Logger.LogDebug($"Registered {Registry.Count} ValheimEnforcer console commands.");
         }

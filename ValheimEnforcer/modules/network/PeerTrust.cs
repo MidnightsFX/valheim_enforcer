@@ -93,9 +93,15 @@ namespace ValheimEnforcer.modules.network {
         /// <summary>
         /// Notes that a server-authoritative guard refused something this peer sent.
         ///
-        /// Called from the two places that produce such a refusal: <see cref="RpcGuardPolicy"/> and the
-        /// structure validator. Only enforced refusals reach here - a correction the guard made silently (a
-        /// rebound chat name) is not evidence of anything, because an ordinary chat mod produces it too.
+        /// Called from <see cref="RpcGuardPolicy"/>, the structure validator, and the inventory grid check.
+        /// Only enforced refusals reach here - a correction the guard made silently (a rebound chat name) is
+        /// not evidence of anything, because an ordinary chat mod produces it too.
+        ///
+        /// The inventory check warns rather than refuses and still belongs here, because what it reports is
+        /// the same KIND of thing: not a judgement about whether an item looks earned, but a statement about
+        /// the payload that the server checked against bounds it holds itself. An item in a cell no inventory
+        /// on this server has is a contradiction of the client's own declared mod set, which is exactly what
+        /// this class exists to correlate.
         /// </summary>
         internal static void NoteGuardTrip(ZNetPeer peer, string guard, string detail) {
             if (!Enabled() || peer == null) { return; }
