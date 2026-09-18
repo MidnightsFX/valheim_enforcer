@@ -1,3 +1,9 @@
+**0.28.1**
+---
+```
+- Documentation overhaul and readme condense
+```
+
 **0.28.0**
 ---
 ```
