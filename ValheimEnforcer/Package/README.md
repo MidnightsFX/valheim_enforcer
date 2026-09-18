@@ -1,1074 +1,99 @@
 # Valheim Enforcer
-Valheim Enforcer is a lightweight Mod Synchronization, and Server sided character progression enforce tool.
 
-This mod is designed to be a drop-in, no maintenance solution for those who are wary of configuration, or those that would rather spend time playing than configuring.
+Lightweight mod synchronization and server-side character progression for Valheim.
 
-By default this mod will enforce character server saves and require clients to only connect with mods that are installed on the server. All of this is configurable.
-
-## Feature Roadmap
-The following features are not yet implemented but currently planned:
-
-- Automatic Mod suggestions/download-links for clients that are missing mods or have incorrect versions
-- Platform ID based 'Moderator' mod list that allows server owners to easily give mod permissions to specific players without making them admins
-
-
-Got a bug to report or just want to chat about the mod? Drop by the discord or github.
+A drop-in, no-maintenance solution for people who would rather play than configure. Install it on the server and on your clients and it works: **every mod the server loads becomes a required mod**, and **characters are saved on the server** rather than trusted from the player's own machine. All of it is configurable, and the server always decides.
 
 [![discord logo](https://i.imgur.com/uE6umQE.png)](https://discord.gg/Dmr9PQTy9m) [![github logo](https://i.imgur.com/lvbP5OF.png)](https://github.com/MidnightsFX/valheim_enforcer)
 
+**[Full documentation](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/README.md)** — every feature, setting and command explained.
+
+---
+
+## Install
+
+1. Install on the **server** and on every **client**. Both sides need it; only the server's copy decides anything.
+2. Start the server.
+
+That is the whole setup. There is no mod list to write — the server publishes the plugins it loaded and requires them of everyone. Characters are already server-side.
+
+Requires BepInEx, Jotunn and YamlDotNet (handled for you by any mod manager).
+
+> **Already have players?** Anyone joining for the first time since you installed this has no save yet and counts as a **new character**. Check the [new-character rules](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/character-progression.md#new-characters) first.
+>
+> **Coming from ServerCharacters?** [Import your saves](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/migration.md) so nobody loses anything. The two mods cannot run at the same time.
+
+---
 
 ## Features
 
-Server saved character progression lock. All of the following features are configurable (server authoratative).
-- Character progress is saved on the server
-- Prevents characters from bringing untracked items onto the server
-- Prevents characters from raising skills externally
-- Puts a returning character's skills back to the levels the server holds when they arrive lower, the way missing items are handed back, so a character recreated after a deleted local save keeps its progress
-- Records every skill it lowers, so an admin can put one back with a command ([Restoring skills](#restoring-skills))
-- Optionally holds each character's Forsaken Power to the one they selected on this server, and clears it on a character's first join
-- Optionally gives a character joining for the first time a blank map of the world, so a map uncovered in a copy of it elsewhere does not come with them
-- Optionally holds each character's eaten food to what they last had on this server, and clears it on a character's first join
-- Clears the recipes a character joining for the first time discovered elsewhere, so they start crafting and building from what they find here
-- Optionally holds a character's map, known recipes, trophies, statistics and spawn point on the server too, so they cannot be edited in offline and are not lost with a corrupted character file ([Server-Synced Progression](#server-synced-progression))
-- Optionally hands a character joining for the first time a configurable starter kit - items, skill levels and a spawn point ([Starter Loadouts](#starter-loadouts))
-- Optionally limits each account to a single character, with an exemption list ([One Character Per Account](#one-character-per-account))
-- Imports existing characters from ServerCharacters so players migrate without losing anything ([Migrating from ServerCharacters](#migrating-from-servercharacters))
+### On by default
 
-Mod Enforcement. All of the following features are configurable (server authoratative).
-- All mods are checked on connection, allows strict version enforcement
-- Prevents users connecting with mods not listed
-- Optional per-mod lists for required, optional, admin-only and server-only mods
-- Optional SHA256 file verification of client plugin DLLs, so a recompiled mod is rejected even when its version string is untouched
-- Optional allowlisting of BepInEx **patchers**, the DLLs that load before any plugin and rewrite the game's assemblies ([Patchers](#patchers))
-- Optional per-connection attestation, so a client's mod report cannot be a canned answer replayed from a previous session ([Attestation](#attestation))
-- Optionally exempts admins from the whole mod gate, so a new mod can be tested against the live server without editing the list first ([Admin Bypass](#admin-bypass))
+**Mod enforcement** — every client is checked at connect against the mods this server allows, and is told exactly what to fix when it does not match. Optional per-mod lists for required, optional, admin-only and server-only mods; strict version pinning; SHA256 file verification that catches a mod recompiled with the version string untouched; an allowlist for BepInEx patchers; and per-connection attestation so a mod report cannot be a replayed canned answer.
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/mod-enforcement.md)
 
-Nothing needs configuring for the default behaviour — every mod the server loads becomes a required mod. [Mod List](#mod-list) covers the file for when you want something else.
+**Character progression** — items, skills and custom data live on the server. Untracked items are confiscated and kept so you can hand them back, skills raised elsewhere are clamped and every reduction is recorded so it can be undone, and a character whose local save was lost gets its progress back. Optionally holds Forsaken Power, eaten food, the map, known recipes, trophies, statistics and spawn point too; optionally hands new characters a starter kit or limits an account to one character.
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/character-progression.md)
 
-Save archives. Off by default.
-- Rolling, compressed archives of the world save and the character saves from the same moment
-- The game's own backups keep two uncompressed copies of the world only, and none of your players' characters
-- Configurable history, size ceiling and destination ([Save Archives](#save-archives))
+**Cheat detection** — clients are checked against a catalog of known cheat tools across running processes, DLLs injected into the game, and open window titles. Log, kick or ban; dedicated game-cheating loaders are banned on sight, and the *server* makes that call from its own catalog. Only matched entries ever leave the player's machine.
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/cheat-detection.md)
 
-Emergency crash recovery. Off by default.
-- Each player holds a sealed, signed snapshot of their own character that only the server can open
-- After an unclean shutdown the server asks for them back and adopts the ones that verify and are newer
-- Narrow window, every restore logged, and an honest note about the duplication it can cause ([Emergency Crash Recovery](#emergency-crash-recovery))
+**Player activity audit** — the evidence layer under everything else. What a player is carrying, what they gained and lost, what they took from or put into chests, graves, ships and carts, and a rolling summary of the damage they are dealing. Seven days on disk, searchable with `grep`, downloadable to your own machine. It records and reports only — it never kicks, bans or confiscates.
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/player-audit.md)
 
-Player activity audit. Off by default; the evidence layer under everything above.
-- What a player is carrying, what they gained and lost, and what they took from or put into chests
-- A rolling summary of how much damage each player is dealing
-- Kept for seven days on the server, and downloadable to an admin's own machine ([Player Activity Audit](#player-activity-audit))
+### Off until you switch them on
 
-Discord notifications. Optional, off until you paste in a webhook URL.
-- Joins, leaves, server startup/shutdown/save, cheat bans, and refused connections
-- Each category can post to a channel of its own, or all of them to one
-- Every message is a template you can rewrite, including role pings ([Discord Notifications](#discord-notifications))
+**Structure validation** — catches a client spawning world-generation geometry (dungeon rooms, dvergr towns, ruins) instead of building, and pieces whose health has been set above what the prefab allows, which is how an indestructible structure is made. Blueprint and bulk-build mods cannot trip it, by design. `enforcer-structures-scan` finds what is already in your world.
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/structure-validation.md)
 
-### Mod List
+**Network integrity** — guards on the vanilla RPCs the server otherwise relays without looking at them. Binds chat messages to the name the server holds, refuses the player-teleport message from non-admins, filters mass object deletion down to what the sender owns, drops impossible damage values, and optionally re-decides PvP and restricts global keys. **These read packets the server already holds, so there is nothing for a client to lie about.**
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/network-integrity.md)
 
-The mod list lives in `BepInEx/config/ValheimEnforcer/Mods.yaml`. Both sides need the mod installed, but only the **server's** copy decides anything: the only thing a server reads out of a client is the list of plugins that client actually loaded.
+**Item origins** — reports equipment that appears with no crafter and that nothing in this world drops, sells or spawns, and equipment crafted by a player id nobody here has ever been. Only looks at items that have just appeared, so existing characters are never re-examined. Warns, never confiscates.
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/item-origins.md)
 
-**You do not have to write this file.** Install the mod, start the server, and every plugin the server loaded is now required of everyone. The rest of this section is for when you want something other than "everybody runs exactly what the server runs".
+**Save archives** — rolling compressed archives holding the world save **and** the character saves from the same moment. The game's own backups keep two uncompressed copies of the world only, and none of your players' characters. Configurable history, size ceiling and destination.
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/save-archives.md)
 
-The file is regenerated at startup and re-read within `ConfigPollIntervalSeconds` (30 by default) of being edited, so you can change it on a running server. Comments you write on their own line are kept across those rewrites and stay attached to the entry below them; a comment sharing a line with a value is not, since that line gets rewritten from scratch.
+**Emergency crash recovery** — each player holds a sealed, signed snapshot of their own character that only the server can open. After an unclean shutdown the server asks for them back and adopts the ones that verify and are newer. Narrow window, every restore logged, and an honest note about the item duplication it can cause.
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/crash-recovery.md)
 
-#### The four lists
+**Discord notifications** — joins, leaves, startup, shutdown, saves, cheat bans and refused connections. Each category can post to a channel of its own, and every message is a template you can rewrite, role pings included. Paste in a webhook URL and it starts posting; nothing else needs configuring.
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/discord.md)
 
-| List | Who fills it in | Client has the mod | Client does not |
-| --- | --- | --- | --- |
-| `requiredMods` | Auto-populated, then yours | allowed | **rejected** |
-| `optionalMods` | You | allowed | allowed |
-| `adminOnlyMods` | You | admins allowed, everyone else **rejected** | allowed, admins included |
-| `serverOnlyMods` | You | **rejected** | allowed |
+---
 
-`adminOnlyMods` permits a mod to admins without requiring it of them — an admin can connect with or without it. It also outranks `requiredMods`: a mod on both is treated as admin-only, and the server logs which mods that applies to at startup.
+## Console commands
 
-Every list is keyed by the mod's BepInEx plugin GUID — `Azumatt.AzuCraftyBoxes`, not `AzuCraftyBoxes`. It is the `GUID` in the plugin's `BepInPlugin` attribute, and the surest place to read it off is the server's `LogOutput.log`, where BepInEx lists each plugin as it loads. A mod that appears in none of the lists is rejected.
-
-`ServerActiveMods.yaml`, beside `Mods.yaml`, lists every plugin this machine loaded, sorted by GUID and written exactly like a `Mods.yaml` entry, so you can copy an entry straight into whichever list it belongs in. It is deleted and rewritten on every start, never read, and not synced to anyone, so editing it does nothing. The list each side reports about itself during the handshake is taken from the plugins actually running, never from a file, because a list taken from a text file is a list a player can type whatever they like into.
-
-`serverOnlyMods` is for mods the server runs and nobody else needs — a map generator, a backup tool, a Discord bridge. It keeps them out of `requiredMods` without demanding them of anyone. It is **not** the list for client-side mods: a client that installs a server-only mod is rejected for it, because that mod is on no list that permits it. Client-side mods belong in `optionalMods`.
-
-#### An entry
-
-```yaml
-requiredMods:
-  Azumatt.AzuCraftyBoxes:
-    pluginID: Azumatt.AzuCraftyBoxes
-    version: 1.8.13
-    name: AzuCraftyBoxes
-    enforceVersion: true
-```
-
-| Field | What it does |
-| --- | --- |
-| `pluginID` | The plugin GUID again. The key above it is what lookups actually use |
-| `version` | The version to compare against, kept current for you |
-| `name` | Human-readable label, for logs and the disconnect screen |
-| `enforceVersion` | When `true`, a client's version must match exactly. Defaults to `false` |
-| `keepWhenUnloaded` | When `true`, this entry is never dropped just because the server does not load the mod. Defaults to `false` — see [`RemoveUnloadedModsFromRequired`](#settings) |
-| `acceptedHashes`, `hashSource`, `thunderstorePackage`, `hashEnforcement` | File verification — see [Mod File Verification](#mod-file-verification) |
-
-The same table is written into the top of `Mods.yaml` and `ServerActiveMods.yaml`, so you do not need this page open to edit the file.
-
-Version comparison is an exact string match, so `1.0` and `1.0.0` count as a mismatch. Fields sitting at their default are not written out, which is why most entries are three lines. If you find a `versionStrictness` field in an older file, it does nothing and can be deleted.
-
-An empty list is written as a bare key with nothing under it:
-
-```yaml
-optionalMods:
-adminOnlyMods:
-```
-
-Add entries by indenting them two spaces beneath. Older versions wrote `optionalMods: {}` instead, and adding entries under *that* is not valid YAML — if you have a file still written that way, delete the `{}` first.
-
-#### What happens when someone connects
-
-| Situation | Result |
-| --- | --- |
-| Missing a mod from `requiredMods` | Rejected, and told which |
-| Running a mod that is on no list | Rejected as a non-allowed mod |
-| Version differs where `enforceVersion` is set | Rejected as a version mismatch, naming the version to install |
-| Running an `adminOnlyMods` mod without being an admin | Rejected |
-
-The client runs the same comparison against the server's list and shows the result in the connection error window, but that is only feedback for the player — the server decides, from its own file. With [Discord notifications](#discord-notifications) enabled, a rejection is posted with the offending mods listed.
-
-#### Handled for you
-
-| What | Controlled by |
-| --- | --- |
-| `ServerActiveMods.yaml` deleted and rewritten from the plugins actually loaded | always |
-| Any loaded plugin not already on a list is added to `requiredMods`, with `enforceVersion: false` | `AutoAddModsToRequired` *(on)* |
-| Any `requiredMods` entry for a mod the server does not have loaded is removed, unless it is marked `keepWhenUnloaded` | `RemoveUnloadedModsFromRequired` *(on)* |
-| A mod's `version` is corrected in whichever list holds it when you update the mod | always |
-| The SHA256 of every plugin the server loads is recorded as its accepted hash | `RecordHashesForLoadedMods` *(on)* |
-| Mods pinned with a `thunderstorePackage` are downloaded and hashed | `ResolveThunderstoreHashes` *(off)* |
-| The file is rewritten with all of the above | `UpdateLoadedModsOnStartup` *(on)* |
-| The previous file is copied to `Mods.yaml.bak` before each rewrite | always |
-| Edits are picked up without a restart | `ConfigPollIntervalSeconds` *(30)* |
-
-Updating a mod on the server therefore needs no edit here at all — the version follows it, in whichever list you put it in.
-
-#### What you write yourself
-
-- Membership of `optionalMods`, `adminOnlyMods` and `serverOnlyMods`. Nothing is ever added to these automatically; move an entry out of `requiredMods` by hand.
-- `enforceVersion: true`. Auto-added mods are always written with it off, so a client that is a patch version behind is not locked out of a server that never asked for exact versions.
-- `keepWhenUnloaded: true`, on any `requiredMods` entry for a mod the server does not run itself.
-- `thunderstorePackage`, `hashEnforcement`, and any `Manual` hash.
-
-#### If the file will not parse
-
-`Mods.yaml` is rewritten on startup, so a file the server cannot read is a file whose contents are at risk. Two things protect it:
-
-- Before every rewrite, the previous file is copied to `Mods.yaml.bak`. Once per launch, so a restart cannot overwrite the backup with the file it just generated.
-- If the file fails to parse, it is copied to `Mods.yaml.unreadable-<date>-<time>.bak` *first*, and the server logs an error naming the line and column that broke, along with what it managed to load. It then writes a fresh file and carries on, so the server still starts.
-
-If your lists come back empty after a restart, look for that error in the log and for an `unreadable` file beside `Mods.yaml` — your entries are in it.
-
-You do not need to restart to fix it. The file is re-read within `ConfigPollIntervalSeconds` of being saved, and a duplicate top-level key — the same list written twice, which used to be silently discarded — is now reported rather than quietly dropping whichever copy came first.
-
-#### Settings
-
-All of these are server-side and synced to admins, so an admin can change them in-game and the server stays the authority.
-
-| Setting | Section | Default | Effect |
-| --- | --- | --- | --- |
-| `AutoAddModsToRequired` | Mods | `true` | Adds any loaded plugin that is on no list to `requiredMods`. Turn it off to curate the file by hand — mods you have not listed are then rejected rather than adopted |
-| `RemoveUnloadedModsFromRequired` | Mods | `true` | Removes `requiredMods` entries for mods the server does not have loaded, so a mod you uninstall from the server stops being demanded of clients. Only `requiredMods` is touched. Put `keepWhenUnloaded: true` on any entry you require but do not run yourself, rather than turning this off for everything |
-| `UpdateLoadedModsOnStartup` | Mods | `true` | Writes version corrections, auto-added mods, removed mods and recorded hashes back to the file. With it off, all of that still applies for the session but nothing is saved |
-| `HashEnforcement` | Mods | `WhenKnown` | File verification mode — see [Mod File Verification](#mod-file-verification) |
-| `RecordHashesForLoadedMods` | Mods | `true` | Records the hash of every plugin this machine loads. Needs `UpdateLoadedModsOnStartup` to reach disk |
-| `ResolveThunderstoreHashes` | Mods | `false` | Downloads and hashes mods pinned with a `thunderstorePackage`. Off by default because it makes outbound requests |
-| `ConfigPollIntervalSeconds` | Advanced | `30` | How often the file is checked for edits |
-| `HashComputeTimeoutSeconds` | Advanced | `30` | Safety valve for a stalled disk during startup hashing, not a tuning knob |
-| `ThunderstoreMaxArchiveMB` | Advanced | `128` | Largest package the resolver will download; bigger ones are skipped and logged |
-
-`Discord.NotifyWrongMods` (on) posts a message naming the mods whenever a player is rejected for a mismatch. It can go to a channel of its own, and the wording is yours to change — see [Discord Notifications](#discord-notifications).
-
-#### Recipes
-
-**Lock the pack to exact versions.** Set `enforceVersion: true` on every entry you care about. There is no global switch — it is per mod on purpose, so one mod that is fussy about its version does not force the whole list to be.
-
-**Let players use a client-side mod.** Move its entry from `requiredMods` to `optionalMods`, or add it there if the server does not run it. They can then connect with or without it.
-
-**Give admins a tool nobody else may run.** Put it in `adminOnlyMods`. Admins who do not want it can leave it uninstalled. If the server runs the mod too, it will already be in `requiredMods`; you can leave that entry, since `adminOnlyMods` wins, or delete it to keep the file tidy. Admin status is read from the server's admin list at connect time, so no client can claim it.
-
-**Stop a server-side mod being demanded of clients.** Move it to `serverOnlyMods`. Note that this also means no one may connect *with* it.
-
-**Stop requiring a mod you removed from the server.** Delete its entry from `requiredMods`, or leave `RemoveUnloadedModsFromRequired` on and every mod the server no longer loads is dropped from that list on the next start, apart from any marked `keepWhenUnloaded`.
-
-**Require a mod the server does not run.** Add it to `requiredMods` by hand with its GUID, version and name, and give it `keepWhenUnloaded: true` — without that, `RemoveUnloadedModsFromRequired` drops the entry on the next start. To verify the file as well, give it a `thunderstorePackage` and turn on `ResolveThunderstoreHashes`.
-
-### Mod File Verification
-
-Version checks only compare the version string a client declares, so somebody who downloads a mod, edits the numbers and rebuilds it — keeping the version the same — passes. File verification closes that by comparing a SHA256 of the DLL each plugin was actually loaded from.
-
-`HashEnforcement` (server config, `Mods` section) controls it:
-
-| Value | Server has a hash for the mod | No hash, required/admin mod | No hash, optional mod |
-| --- | --- | --- | --- |
-| `Off` | not checked | not checked | not checked |
-| `WhenKnown` *(default)* | **enforced** | allowed | allowed |
-| `Strict` | **enforced** | **rejected** | allowed |
-
-`WhenKnown` means turning this on breaks nothing: only mods you have actually pinned are enforced. `Strict` is for a fully pinned server and deliberately fails loudly when a required mod has no hash on file.
-
-Any mod in `Mods.yaml` can override the server setting with `hashEnforcement: Off | WhenKnown | Strict`. The usual setup is `WhenKnown` globally with `hashEnforcement: Strict` on the handful of mods that actually affect balance.
-
-#### Getting hashes on file
-
-- **Mods the server loads** pin themselves. `RecordHashesForLoadedMods` (on by default) writes the hash of every plugin the server runs into `Mods.yaml` at startup.
-- **Client-only mods** — a UI or QoL plugin the server never loads — need one of:
-  - **By hand.** Put the SHA256 in `acceptedHashes` and set `hashSource: Manual`. `Get-FileHash -Algorithm SHA256 <file>.dll` produces it. Nothing else ever overwrites a `Manual` entry.
-  - **From Thunderstore.** Set `thunderstorePackage: Owner-ModName-Version` and enable `ResolveThunderstoreHashes`. The server downloads that package, hashes the DLLs inside it in memory, records them and discards the download. It re-downloads only when you change the pinned version. Only `thunderstore.io` and its CDN are ever contacted — arbitrary download URLs are not supported on purpose.
-
-```yaml
-requiredMods:
-  shudnal.ExtraSlots:
-    pluginID: shudnal.ExtraSlots
-    version: 1.1.20
-    name: Extra Slots
-    thunderstorePackage: shudnal-ExtraSlots-1.1.20
-    hashEnforcement: Strict
-```
-
-#### Things worth knowing
-
-- Recorded hashes are sent to clients on purpose, so the disconnect screen can name the mod that failed. They are not secrets — anyone can download the package and hash it themselves.
-- **A recorded hash pins the version too.** A different build of a mod is a different file, so a client on another version fails the file check whether or not `enforceVersion` is set on that entry. That rejection is reported as a version mismatch, naming the version to install — "modified mod files" is kept for a file whose version matches the server's and whose contents do not, which is the case where reinstalling actually helps.
-- Plugins loaded from memory rather than from a file (BepInEx ScriptEngine, in-game plugin loaders) cannot be verified. They report as `dynamic` and will be rejected once the server enforces that mod. The client logs a warning about this at startup, before you try to connect.
-- Under `Strict`, enforcement is deferred for mods whose `thunderstorePackage` has not resolved yet, but only until the first resolve pass after server start finishes. That window is bounded and logged; it exists so a restart does not lock everyone out for the few seconds the downloads take.
-- BepInEx *patchers* (`BepInEx/patchers/`) are not plugins and are not covered by any of this.
-
-Item origins. Off by default, server authoritative.
-- Reports equipment that appears with no crafter, and that nothing in this world drops, sells or spawns
-- Reports equipment crafted by a player id nobody here has ever been
-- Only looks at items that have just appeared, so existing characters are never re-examined ([Item Origins](#item-origins))
-
-Structure validation. Off by default, server authoritative.
-- Catches a client spawning world-generation geometry — dungeon rooms, dvergr towns, ruins — instead of building
-- Catches a piece whose health has been set above what its prefab allows, which is how an indestructible structure is made
-- Blueprint and bulk-building mods cannot trip it, by design ([Structure Validation](#structure-validation))
-
-Network integrity. Off by default, server authoritative.
-- Binds every chat message to the name the server holds for that connection, so nobody can talk as somebody else
-- Refuses the player-teleport message from non-admins, the one-packet way to drop a whole server into the ocean
-- Filters mass object deletion down to what the sender actually owns or is standing next to
-- Drops hits carrying impossible damage, and optionally re-decides PvP and restricts which global keys a client may set ([Network Integrity](#network-integrity))
-- Optionally ties what a client declared at join to what the guards later catch it doing ([Client Contradictions](#client-contradictions))
-
-Cheat detection (enabled by default, configurable).
-- Automatic log, kick or ban for common cheating utilities
-- ValheimTooler is detected even when injected mid-session (after mod validation) and is always auto-banned
-- Optional [Discord notification](#discord-notifications) whenever a player is banned for cheating, routable to a staff-only channel
-
-Clients are checked against a catalog of known cheat tools across three vectors:
-
-| Vector | What it looks at | Why it exists |
-| --- | --- | --- |
-| Process | Names of running programs, including ones run as administrator and background services | Catches the tool while it is open |
-| Module | DLLs loaded into Valheim itself | Sees a cheat that already injected and then closed its launcher, and survives renaming the tool |
-| Window | Window classes and titles | Catches tools renamed to dodge the process check (a "Cheat Engine" window title does not change when you rename the exe) |
-
-When Valheim's own runtime lists processes, it silently leaves out anything it is not allowed to open. That covers every program started as administrator and every background service, roughly a third of what runs on a typical desktop. On Windows the process scan therefore reads names from a system snapshot, which needs no access to the processes themselves. `ScanElevatedProcesses` (Advanced, on) switches back to the old list.
-
-Detected by default: **WeMod / Wand / Infinity** (the app, its auxiliary service, the `TrainerHost` injector, and the trainer DLLs it loads into the game), **Cheat Engine** (including the `magic-engine` fork and injected speedhack/DBK modules), **ArtMoney** (SE and Pro), **PLITCH**, **Speed Gear**, **Squalr**, **WPE Pro**, generic trainers such as FLiNG and Cheat Happens, and the loaders used to deliver Valheim cheats — **ValheimTooler**, **ValHack**, **Valheim Mod Menu**, **SharpMonoInjector**, **Xenos** and **Extreme Injector**.
-
-Tools with no purpose other than cheating (the loaders and injectors above) are banned on sight. Everything else follows `ActionOnDetection`, which defaults to `Kick`. The auto-ban decision is made by the *server* from its own catalog — a client only ever reports what it saw, so a tampered client cannot get another player banned.
-
-Some window signatures are *low confidence*: Cheat Engine's `TfrmMain`/`TfrmMemView` classes are Delphi's default names for forms called `frmMain`/`frmMemView`, and plenty of legitimate Delphi software carries them. A low-confidence sighting is reported and shows up in the server log marked `(weak)`, but it is **never** kicked or banned on its own, regardless of `ActionOnDetection` — enforcement requires a strong signal (process name, injected module, or window title).
-
-Window *titles* are ignored on windows that display content rather than run it — browsers and Electron apps, UWP frames, File Explorer, and terminals. A YouTube tab titled "cheat engine tutorial", a Discord channel discussing ArtMoney, or a folder named after a tool will not match, and because those windows are skipped outright, browser tab titles are never sent to the server.
-
-**Privacy:** only matched entries are sent to the server. A player's full process list never leaves their machine.
-
-**False positives:** generic framework window classes are logged but never enforced, and browser/Explorer/terminal titles are not matched at all (see above), so neither a Delphi utility in the tray nor a YouTube tab about a cheat tool can get anyone kicked. Developer tools that also read game memory — x64dbg, Process Hacker / System Informer, HxD, ReClass.NET, Frida, Fiddler — are deliberately **not** detected by default, because modders and streamers use them routinely. Add them to `AdditionalCheatProcesses` if your server wants them treated as cheats. `Aurora`, `Process Lasso`, `AutoHotkey`, and overlay tools like MSI Afterburner and OBS are excluded on purpose and are not recommended additions; see the config file comments for the reasoning. If something legitimate trips a detection, add it to `IgnoredCheatProcesses`, which overrides everything else.
-
-*Disclaimer: Valheim is client authoratative and without extremely invasive measures, cheating cannot be fully prevented. Process-name detection in particular is a speed bump rather than a wall — renaming Cheat Engine is a documented feature of the tool, and trainer executables are renameable by design. The module and window-title checks exist because they survive a rename, but a client that can cheat can also lie about what it is running. The same applies to mod file verification: the hash is computed and reported by the client, so it stops a recompiled mod, not a patched enforcer. What it changes is the cost — from "edit one file and rebuild" to "reverse engineer and patch the anti-cheat", which is a real barrier to the people who actually do the former and none at all to the people who can do the latter.*
-
-*What the server does refuse to take on trust is anything it can decide for itself. The sender of every network message is verified against the connection it arrived on, so a modified client cannot act as another player — it cannot run an admin's commands, get someone else banned, or write to another account's character. A character save or inventory delta is only ever accepted for the account and character the connection joined as. The join rules (item confiscation, skill clamping, custom-data reset) are re-run on the server for returning characters, not just applied on the client, and a first save from a brand-new character is held to the new-character rules server-side. These are the parts a client cannot lie its way past; the caveats above are about the parts — what mods it runs, what it has in its inventory this instant — that it still can. [Network Integrity](#network-integrity) extends the same principle to the vanilla RPCs the server relays: chat names, player teleports, mass object deletion, damage values and global keys are all checked against what the server itself knows, so no amount of patching the client gets past them.*
-
-### Patchers
-
-Off by default. Set `ValidatePatchers` to `true` and clients are held to a list of allowed BepInEx **patchers**, the same way they are held to a list of allowed mods.
-
-Patchers are not plugins. They are the DLLs in `BepInEx/patchers`, and BepInEx loads them *before any plugin exists*, handing each one the game's assemblies to rewrite on the way in. That is a strictly more powerful position than any plugin has, this one included. Until now nothing here looked at that folder, so dropping a cheat there bypassed mod validation completely.
-
-They are keyed by file path relative to `BepInEx/patchers`, not by GUID, because a patcher carries no BepInEx metadata at all - no plugin id, no version. The file hash is the only thing there is to hold one to.
-
-| List | Who fills it in | Client has it | Client does not |
-| --- | --- | --- | --- |
-| `activePatchers` | Generated, every start | - | - |
-| `allowedPatchers` | Auto-populated from the server's own, then yours | allowed | allowed |
-
-**It is an allowlist, not a required list.** A client carrying no patchers always passes, which matters because almost no player has any while a server may well run several. Only a patcher a client *has* and the server has *not* allowed is refused. A patcher allowed by name is still checked against its recorded hash, since "any file under this name" would let a hostile DLL inherit an allowlisted one.
-
-Patchers are enumerated and logged whether or not `ValidatePatchers` is on, so leave it off for a while first and read the log to see what your players actually carry.
-
-| Setting | Default | Effect |
-| --- | --- | --- |
-| `ValidatePatchers` | `false` | Enforce the allowlist. Enumeration and logging happen either way |
-| `AutoAddPatchersToAllowed` | `true` | Adds the server's own patchers, with hashes, at startup. Hashes are only ever added, never replaced |
-
-### Attestation
-
-Off by default. `AttestationPolicy` makes each client prove its mod report was generated *for this connection*.
-
-Without it, a client reports the same plugin list and the same file hashes every session, forever - so a client patched to skip the work can capture one valid payload and replay it indefinitely. The server now hands each connection a random value during the handshake, and the client returns a digest over that value and the exact mod and patcher list it is sending. The server recomputes it and compares.
-
-**Be clear on what a pass means.** It proves the report was produced now, by code that actually ran. It does **not** prove the report is true: a client that keeps the original DLLs on disk and hashes those still passes. What it costs an attacker is the difference between returning a constant and keeping a working hashing path alive per connection. That is a real increase, and it is not a wall.
-
-| Value | Effect |
-| --- | --- |
-| `Off` | Nothing is issued and nothing is checked |
-| `Report` | A missing or wrong attestation is logged; the player connects |
-| `Require` | A missing or wrong attestation is a rejection |
-
-**Before setting `Require`:** a player on an older ValheimEnforcer sends no attestation at all, and is rejected too. Roll the pack out first. If the server's own record of a connection's nonce goes missing, that connection is *allowed* rather than refused - our bookkeeping failing is not the player's fault.
-
-### Admin Bypass
-
-Off by default. Set `ModValidationExemptAdmins` to `true` and anyone on the server's admin list may connect with any mods at all.
-
-That means all of it: missing required mods, mods the server does not allow, mismatched versions, modified mod files, unlisted BepInEx patchers, and a missing or wrong [attestation](#attestation) even under `Require`. It also covers an admin running **no ValheimEnforcer at all**, who is otherwise refused for never sending a mod list — which is usually the case you actually want it for.
-
-The point is to try a mod against the live server before committing it to `Mods.yaml`, rather than editing the list, restarting, and editing it back.
-
-**The check still runs.** Everything a normal client's list is put through is still computed and still written to the server log, so you can read exactly what your admin was carrying. Only the rejection is skipped. The Discord mod-mismatch notification is not sent for an exempt admin, because nobody was turned away and a channel that pings every time an admin joins on a test build is a channel people stop reading.
-
-**Know what it costs.** With this on, a line in `adminlist.txt` is the only thing between an account and every mod check in this mod. Every id in that file needs to be somebody you would trust with an arbitrary client. Admin status is read by the server from its own admin list, against the connection the request arrived on, so no client can claim it — but nothing else stands behind it either.
-
-| Setting | Default | Effect |
-| --- | --- | --- |
-| `ModValidationExemptAdmins` | `false` | Admins are not rejected for anything the mod gate finds. The gate still runs and still logs |
-
-#### Things worth knowing
-
-- An admin whose list failed gets **no client-contradiction declaration on file** ([Client Contradictions](#client-contradictions)). That feature reasons from "this peer only runs mods the server approved", which is the premise this setting sets aside, so a later guard trip from them is reported as having no declaration rather than being measured against one that was never enforced.
-- The oversize-payload guard is not part of the exemption. A mod list too large to parse is refused whoever sent it; that is a resource bound, not a mod policy.
-- This covers mod validation only. The cheat-tool scan, the server-authoritative guards and the character rules have their own admin exemptions, listed with each feature.
-- `enforcer-whoami` says when it is on, so an admin who joined with an unapproved mod set can tell they were let in on purpose.
-
-### Item Origins
-
-Off by default. Set `DetectItemOrigins` to `true` and the server watches the items appearing in players' inventories for gear nobody ever made.
-
-A crafted item records who made it. An item conjured with `give`, devcommands or a mod menu records nobody, because only the crafting path ever writes that field. Two checks follow from that:
-
-| Check | What it reports |
-| --- | --- |
-| `DetectUncraftedEquipment` | Equipment with no crafter, that nothing in this world drops, sells or spawns |
-| `DetectUnknownCrafterIds` | Equipment crafted by a player id nobody on this server has ever reported |
-
-**Having no crafter is not suspicious on its own.** Every loot drop, chest item, boss drop and trader purchase in the game has none, so flagging that alone would report a Dvergr circlet and a fishing rod bought from Haldor. The server therefore works out, from the prefabs this world actually loaded, which equipment has *no uncrafted route at all* - reading drop tables, creature drops, pickables and trader stock - and only reports that. A modded boss with a custom weapon drop is covered without anyone listing it. Run `enforcer-item-origins` to see the list; the answer to "why was this flagged" is always in it.
-
-The second check exists because somebody who spawns gear and then thinks to stamp a crafter on it has to invent a number, and an invented one belongs to no player here. Ids are collected from connected players into `PlayerIds.yaml`. **Trading is unaffected**: the question is whether the id is *known*, not whether it is *yours*, so a sword one player made and gave to another is fine because its maker is on file.
-
-**Only items that have just appeared are examined**, never whole inventories. A character carrying gear from before you enabled this is never re-examined, so there is no migration, no grace period and no one-time baseline to sit through.
-
-This **warns and never confiscates**, on purpose.
-
-#### Things worth knowing
-
-- **The crafter id comes from the client.** It arrives inside the item payload the client wrote, so a client that thinks to set the field to a plausible value defeats both checks. What this catches is items that were *spawned* - which is how the tools actually in circulation hand out gear, none of them bothering with a crafter. It is a good detector of careless cheating, not an item-integrity guarantee.
-- **Expect some noise from `DetectUnknownCrafterIds` at first.** An item crafted by somebody who has not joined since you switched it on has a crafter the registry has not met yet. Nothing is reported at all until the registry has somebody in it, and it fills as people play.
-- **`IgnoredItemOriginPrefabs` is the escape hatch** for a mod that hands out gear by a route the prefab scan cannot see - a quest reward written in code, an item granted by a script. Reach for it rather than turning the feature off.
-- Admins are exempt by default (`ItemOriginExemptAdmins`), because spawning items is an ordinary thing to do with devcommands.
-
-### Structure Validation
-
-Off by default. Set `EnableStructureValidation` to `true` and the server starts checking the objects clients create, instead of taking every one of them on trust.
-
-It is the answer to a specific report: large structures appearing on a server that show no "Crafted by" on hover, cannot be destroyed, and flattened the terrain where they landed. All three are the same thing — somebody spawning **world-generation geometry**. A dvergr archway, a crypt room and a stone ruin are ordinary prefabs with ordinary health; what they are not is anything a player can build. There is no craftsman on them because nobody crafted them.
-
-Valheim gives the server nothing to work with here. There is no "place piece" message — a client instantiates the object locally and its data arrives in the same stream as everything else, which the game accepts without checking the prefab, the position, or a single value in it. So this checks it.
-
-#### The two checks
-
-| Check | What it looks at | Setting |
-| --- | --- | --- |
-| Non-buildable structure | A client creates something that is in no build menu | `DetectNonBuildableStructures` |
-| Excessive health | A client sets a piece's health above what its prefab allows | `DetectExcessiveStructureHealth` |
-
-**Blueprint mods are safe, and not because of an allowlist.** What makes a prefab placeable is being in a piece table, and *every* build path uses those tables — the hammer, the hoe, the cultivator, and every blueprint, bulk-build or planned-piece mod, because they all place out of the same menus. Mods register their own pieces into those tables too, so a server's custom content is covered without anybody listing it. A prefab with no table entry is one no build tool can reach.
-
-**Repairing is never flagged.** Valheim has no invulnerability flag; an unbreakable piece is just an absurd number in the health field. The ceiling is the prefab's own maximum, including any increase from a world modifier, and a full repair writes exactly that.
-
-**Nobody is blamed for somebody else's structure.** Ownership of an object moves to whichever player is nearest, every couple of seconds. Health that was already too high before a client wrote to it is attributed to no one, so walking past a cheated structure — or hitting it — cannot get an innocent player reported. `enforcer-structures-scan` is how those get found.
-
-There is a second door: `SpawnObject`, a routed message nothing in the game ever sends, which asks the server to instantiate any prefab by hash — a creature or an item as easily as a structure. `BlockSpawnObjectRPC` (on) refuses every one of them and, by default, posts the block to your moderation channel; it follows `StructureValidationAction` for what happens to the player, which defaults to `Log`, so out of the box it blocks and reports without kicking or banning. A structure spawned this way is reported as a structure detection either way. Turn it off to fall back to refusing only non-buildable structures through `SpawnObject`, if a mod on your server legitimately uses the call.
-
-#### Settings
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `EnableStructureValidation` | `false` | Master switch. Everything below is inert until this is on |
-| `DetectNonBuildableStructures` | `true` | The build-menu check |
-| `BlockSpawnObjectRPC` | `true` | Refuse every client-sent `SpawnObject` RPC (all prefabs, not just structures) and post it to the moderation channel |
-| `DetectExcessiveStructureHealth` | `true` | The health-ceiling check |
-| `StructureValidationAction` | `Log` | What happens to the player: `Log`, `Kick` or `Ban`. Detections are logged and posted to Discord regardless |
-| `RemoveDetectedStructures` | `false` | Whether the structure itself is deleted |
-| `StructureValidationExemptAdmins` | `true` | Whether the adminlist is exempt |
-| `StructureHealthAllowedMultiplier` | `1` | Headroom on the health ceiling, for mods that raise piece health at runtime rather than on the prefab |
-| `IgnoredStructurePrefabs` | *(empty)* | Prefab names never flagged, matched as a substring |
-
-`RemoveDetectedStructures` is deliberately a separate switch from the action, and starts off. Run with it off first and read the log for a few days: a wrong detection that only writes a line costs you nothing, and a wrong detection that deletes something costs a player their build. `IgnoredStructurePrefabs` is the fix when you find one — reach for it rather than turning the whole feature off.
-
-**Admins are exempt by default**, unlike every other exemption in this mod. Spawning a non-buildable prefab is what `devcommands` is *for*, and an admin decorating with it should not have to know this feature exists. Set it to `false` to hold admins to the same rule as everyone else.
-
-#### Finding what is already there
-
-The live check only sees a structure as it arrives, which is no help to a server that was hit last month. `enforcer-structures-scan` walks every object in the world and reports the ones that look placed rather than generated — prefab, coordinates, health and crafter — grouped by prefab so the shape of it is visible at a glance.
-
-```
-enforcer-structures-scan scan
-enforcer-structures-scan scan dvergrtown
-enforcer-structures-scan remove confirm dvergrtown
-```
-
-`scan` changes nothing. Removal needs the word `confirm` typed out, because it is the one thing here that cannot be undone. Both forms take an optional prefab filter, matched as a substring, which is how you act on one finding out of a long report. It runs from the server console or from a connected **admin's** client, and non-admins are refused server side.
-
-The scan runs both checks whatever your `Detect*` settings say — you asked for a picture of the world, so you get the whole picture. It works in slices across frames, so a large world does not stall the server while it runs.
-
-**It never touches generated content.** Real dungeons and ruins are non-buildable structures too, so anything inside a zone the world generated a location into is excluded, and the report says how many were skipped that way. The cost is stated plainly: a structure spawned right next to real ruins is excluded along with them. Missing one is recoverable and deleting a dungeon is not — and the live check catches that case anyway, wherever it happens.
-
-Removal also refuses to delete more than 500 objects at once without a prefab filter. A number that large means this server's content classifies differently from vanilla's, not that somebody placed five hundred structures by hand.
-
-#### Things worth knowing
-
-- **The terrain is not put back.** The flattening arrives as separate objects from the structure, so removing the structure leaves the ground as the cheat left it. Re-terraforming is still yours to do.
-- **What is detected is a *structure*.** Something with no piece component at all — scenery, a plant, a creature — is outside the first check on purpose. Requiring one is what keeps tombstones, dropped items, arrows and animals out of a detector that can delete things.
-- **Detections name the connection, not the character.** A character name is whatever a client says it is, and the crafter field on a cheated piece is empty by definition. Structures found by a scan are reported with no player at all, because nothing durable records who created an object.
-- **A world-generated piece can be damaged.** Locations spawn with their pieces pre-damaged, which is below the ceiling and never flagged.
-
-### Network Integrity
-
-Off by default. Set `EnableRpcGuards` to `true` and the server starts checking the vanilla network messages that it otherwise relays without looking at them.
-
-These are a different kind of check from everything else in this mod. Cheat detection and mod verification ask the client about itself and have to take the answer on trust; these guards read the packet the server already has in its hands, so **there is nothing for a client to lie about**. A patched Enforcer gets past the first kind and not past this one.
-
-Each guard covers one vanilla RPC that validates nothing:
-
-| Guard | The RPC | What a client can do with it today | What the guard does |
-| --- | --- | --- | --- |
-| `GuardChatSenderName` | `ChatMessage` | The display name travels *inside* the message, written by the sender. Talk as any player, or as an admin | Rewrites the name to the one the server holds. The message still arrives |
-| `GuardPlayerTeleportRpc` | `RPC_TeleportPlayer` | Teleports whoever *receives* it, and can be addressed to everybody at once | Refused for non-admins |
-| `GuardZdoDestruction` | `DestroyZDO` | Names a list of objects and the server deletes every one. No ownership check, no limit | Keeps the ids the sender owns or is near, drops the rest |
-| `GuardDamageRpc` | `RPC_Damage` | Damage is applied from numbers the attacker's client wrote. One-shot anything | Drops hits that are NaN, infinite, negative or above `MaxAllowedHitDamage` |
-| `GuardPvpDamage` | `RPC_Damage` | The hit's ignore-PvP flag is written by the attacker, so setting it kills players who never opted in | Re-decides it on the server, where the flag carries no weight. Off by default |
-| `GuardGlobalKeys` | `SetGlobalKey` | Sets any world key — every boss defeated, free building, altered damage rates | Allows only keys a loaded prefab actually sets |
-
-Everything is refused *and logged*; `RpcGuardAction` decides whether the player is also kicked or banned, and defaults to `Log`. Run it that way for a while first — a mod doing something unusual shows up here as a refusal, and the log names it. Repeat offences from the same player collapse into one line per 30 seconds, so a script cannot flood the log.
-
-Admins are exempt by default (`RpcGuardExemptAdmins`), because vanilla's own admin-only `recall` command sends the teleport message, and admins legitimately clean up objects they do not own. **The chat name binding ignores that exemption** — an admin has no reason to speak under another player's name, and it is the most valuable name to borrow.
-
-#### Global keys
-
-This one is off even when `EnableRpcGuards` is on, and it is the only guard with an asymmetric failure mode: a key wrongly refused stops progression registering, quietly. Turn it on deliberately.
-
-There is no list to maintain. Every key a client legitimately sets is written on a prefab — the key a creature sets when it dies, the one an offering bowl sets when a boss is summoned, the one a runestone sets when it is read — so the allowed set is read out of the prefabs this world actually loaded, the same way structure validation reads buildable pieces out of piece tables. A modded boss with its own key is covered without anyone listing it. `activeBosses` and `AshlandsOcean` are set from code rather than a prefab field and are built in.
-
-`AllowedClientGlobalKeys` is the escape hatch: comma-separated key names, added on top of what the scan found. Matched on the key name alone, so `activeBosses` also permits `activeBosses 2`. When a legitimate key is refused, the log names it — that is what you paste in here.
-
-Removal is judged separately. Nothing in normal gameplay removes a global key; only console commands and world setup do. `BlockClientGlobalKeyRemoval` (on) refuses removal from non-admins outright rather than checking it against the allowlist, since otherwise a client could erase the very keys it is allowed to set.
-
-Nothing is filtered until the prefab scan has succeeded, and keys the server sets itself are never filtered.
-
-#### Client Contradictions
-
-Off by default. Set `ReportClientContradictions` to `true` and the server ties the two halves of this mod together.
-
-Every player who gets past the join gate is, by construction, running only mods this server approved - that is what the gate is for. So when one of the guards above refuses something they sent, an approved mod set has produced traffic the server does not sanction, and the guard is the half of that sentence that **cannot be forged**. The report names the player, the guard, and the mod list they claimed at join, which is what makes it something a moderator can act on rather than two unrelated log lines.
-
-**It does not decide who lied.** A guard trip cannot tell "the client lied about its mods" apart from "a mod you really did approve legitimately sends this", and nothing can work that out in general. Where the inference *is* tight - the client declared only mods this server itself requires, and the server offers no optional mods - the report says so explicitly, because there nothing they declared can account for it.
-
-| Setting | Default | Effect |
-| --- | --- | --- |
-| `ReportClientContradictions` | `false` | Correlate declarations with guard trips |
-| `ContradictionThreshold` | `2` | How many **distinct** guards before the action applies |
-| `ContradictionAction` | `Log` | What happens then. Separate from `RpcGuardAction` on purpose |
-
-Distinct guards rather than total trips: one player hitting the same guard four hundred times is a single behaviour the guard already stopped, while tripping the teleport, global-key and object-destroy guards once each is a toolkit. Run `enforcer-trust` to see who has tripped what before acting.
-
-Only *enforced* refusals count. A correction a guard made quietly - a rebound chat name - is not evidence, because an ordinary chat mod that decorates names produces exactly the same thing on the wire.
-
-#### Things worth knowing
-
-- **`GuardDamageRpc` is a sanity bound, not a damage model.** Deciding whether a *plausible* hit was earned would mean modelling every weapon, skill, buff and world modifier on the server, and getting that wrong deletes real combat. It catches the class that matters — non-finite values that corrupt a health bar for good, and the absurd totals used to one-shot players and bosses. Raise `MaxAllowedHitDamage` if a mod on your server legitimately hits harder than the 5000 default.
-- **`GuardZdoDestruction` filters, it does not drop.** A legitimate batch and a hostile id can arrive in the same packet, and cancelling the whole thing would leave destroyed objects alive on the server. Ownership is the real test; `ZdoDestroyProximityMetres` is the tolerance for the moment where a client has claimed something and the server has not caught up yet.
-- **`GuardPvpDamage` is off even with the guards on.** Vanilla already refuses player-on-player damage to somebody with PvP off — but it skips that check whenever the hit's ignore-PvP flag is set, and the attacker writes that flag. This re-decides it server side. Self-damage is always allowed, since standing in your own fire is exactly the case vanilla sets the flag for. The cost: an area-effect prefab that sets the flag deliberately loses its pass-through, and a PvP arena mod may rely on it. Watch the log first.
-- **Chat name mismatches are never kicked.** The rewrite is the whole fix, and a chat mod that decorates names looks identical on the wire. It is logged as a correction and left there.
-
-### Player Activity Audit
-
-Off by default. Every other feature in this mod answers "was a specific rule broken". This one answers the question you actually get asked: *what has this player been doing?*
-
-Somebody reports that Bjorn emptied the guild chest and is one-shotting trolls. By the time you log in the chest is empty, the items are spread across four other players, and nothing anywhere says who took what. The audit is already running by the time that happens, so there is something to look at — which is the whole reason it is on by default rather than waiting to be switched on.
-
-**It records and reports only.** It never kicks, bans, confiscates, or blocks a single packet. It is not a detector and it makes no accusations — it is the evidence layer the detectors sit on top of.
-
-#### What it records
-
-| | Where it comes from | Can a modified client avoid it? |
-| --- | --- | --- |
-| Items gained and lost | The character sync the server already receives | Yes — a client that stops reporting stops producing these |
-| Containers opened, taken from, stored into | The chest's own world data, read on the server | **No** |
-| Damage dealt | The damage message the server relays | **No** |
-
-The two halves are worth having together precisely because they fail differently. A player who gains a sword with no matching container loss, or who deals damage while reporting no inventory change at all, has produced a contradiction — and the two server-observed signals are the ones that cannot be talked out of.
-
-Containers means chests, ships, carts **and graves**, so somebody looting a grave that is not theirs lands in the same record.
-
-#### Reading it
-
-| Command | What it answers |
-| --- | --- |
-| `enforcer-audit-inventory <account> <character>` | What are they carrying, and who crafted it? |
-| `enforcer-audit-history <account> <character> [minutes] [filter]` | How did they get it? |
-| `enforcer-audit-damage [character]` | What are they doing with it, right now? |
-| `enforcer-audit-available <account> <character>` | What history does the server still have? |
-| `enforcer-audit-download <account> <character> [days]` | Give me a copy to keep. |
-
-A worked example — a report comes in about `Bjorn`:
-
-```
-enforcer-player-list                                  # find their account id
-enforcer-audit-inventory 76561198012345678 Bjorn      # what they have, and which items have no crafter
-enforcer-audit-history 76561198012345678 Bjorn 120    # the last two hours of how it got there
-enforcer-audit-damage Bjorn                           # what they are hitting things for
-enforcer-audit-download 76561198012345678 Bjorn 7     # keep a copy before it ages out
-```
-
-`enforcer-audit-history` takes a filter — `all` (the default), `items`, `containers` or `damage` — and a window in minutes.
-
-#### Where it lives
-
-One file per UTC day in `BepInEx/config/ValheimEnforcer/Audit/`, one event per line, written by a background thread so nothing touches the disk on the main thread. The lines are JSON, which is also valid YAML, so `grep container-took audit-2026-08-30.yaml` is a perfectly good way to use this feature and needs no tooling at all:
-
-```
-{"t": "2026-08-30T14:04:00Z", "acct": "76561198012345678", "character": "Bjorn", "kind": "container-took", "prefab": "Wood", "qty": 47, "quality": 1, "container": "piece_chest_wood", "pos": "1234/31/-987"}
-```
-
-`AuditRetentionDays` (7) decides how long they stay. Expired files are deleted one per five-minute pass, so a server that has been offline for a month drains its backlog gradually rather than stalling on one enormous sweep.
-
-`enforcer-audit-download` sends a player's events to the machine you typed the command on, under `BepInEx/config/ValheimEnforcer/AuditDownloads/`. **That copy is yours and the retention window does not reach it** — which is the point when you need to keep something past seven days, and worth knowing when you did not mean to.
-
-#### Settings
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `EnableAuditLog` | `true` | The only switch. Records items gained and lost, container takes and stores, and damage dealt. Turning it back on takes a restart |
-| `AuditRetentionDays` | `7` | How many days to keep |
-| `AuditDamageWindowSeconds` | `60` | Length of the rolling damage window |
-| `AuditHighDamageThreshold` | `200` | Single hit above this gets written down |
-| `AuditHighDamagePerWindow` | `5000` | Window total above this gets written down |
-| `AuditMaxDownloadDays` | `7` | Largest range one download may ask for |
-| `AuditExemptAdmins` | `false` | Whether admins are left out |
-| `AuditFlushIntervalSeconds` | `30` | Advanced. How often the buffer is written |
-| `AuditContainerTrackingLimit` | `5000` | Advanced. How many chests it remembers the contents of |
-
-#### Things worth knowing
-
-- **You are keeping a log of what your players do, and you are doing it by default.** Seven days of item movements and chest access, on disk, with an admin able to take a copy. It is on out of the box because an audit you had to know to switch on beforehand is no use on the day you need it — but that makes it a decision you should make deliberately rather than one you inherit. Tell your players if that is how you run your server, and set `EnableAuditLog` to `false` if it is not.
-- **`AuditExemptAdmins` is off by default, unlike every other admin exemption here.** The others exist because those features *punish*, and an admin using devcommands should not be kicked for it. This one only records, so exempting admins buys nothing and puts the blind spot in exactly the accounts that can do the most damage and are the most worth impersonating.
-- **Item timestamps are when the server heard, not when it happened.** The client batches inventory changes over a couple of seconds before sending them. It is also a *net* diff: picking something up and dropping it again inside one window produces no entry at all. The container half has neither limitation.
-- **The damage figures are what the attacking client claimed**, before the victim applies armour, resistances and difficulty scaling. That is the right number for spotting the impossible and the wrong one for comparing builds. Only a player's own hits count — their tamed wolf's do not.
-- **`AuditHighDamageThreshold` will fire on legitimate late-game hits.** It sits deliberately far below `MaxAllowedHitDamage`, which drops impossible packets; this one only notes hits that are *suspicious*, which is the range a careful cheater actually works in. It is a thing to look at, not a verdict.
-- **There is no history before the server started recording.** Nothing is backfilled, so a day you spent with the audit off stays a blank. The whole value of this feature is that it is already running when you find out you needed it, which is why it does not wait to be asked.
-- **Turning it off mid-session works; turning it back on needs a restart.** Switching it off takes effect on the next packet. Switching it on again starts the item and damage halves immediately, but not the container half — that one has to watch every object a client replicates, so its hook is only installed at startup and is left off entirely when the audit was off at boot. The server log says so if it happens.
-
-### Server-Synced Progression
-
-Off by default. Items and skills have always been held server-side; this extends that to the rest of a character's progress — the part Valheim keeps in the player profile rather than in anything the server ever sees:
-
-- the **map** of this world: explored ground, what a cartography table revealed, and saved pins
-- **known recipes**, build pieces, materials, crafting stations, discovered biomes, runestone texts and permanent unlocks
-- **trophies**
-- **statistics** — the counters behind the in-game Statistics panel and the post-1.0 achievement system
-- the **spawn point**, meaning the bed a character has claimed here
-
-Two problems, one answer. A player can edit any of it offline and arrive with a fully uncovered map or every recipe already known, and there is no way to check that without a copy to check against. And a corrupted local character file loses all of it for good — the one kind of loss the mod could previously do nothing about, because it never held the data.
-
-With `EnableProgressionSync` on and at least one `Sync*` setting beside it, the server keeps its own copy, hands it back on join, and **its copy is the one that counts**: anything above what the server has seen is replaced, and anything lost is restored. This is the same model `PlayerItems` and `SkillLevels` have always used.
-
-Turning a `Sync*` setting on **strips nobody**. A character saved before it was enabled has nothing recorded for that section, and "nothing recorded" is deliberately different from "knows nothing": their next join adopts what they arrive with, and they are tracked from then on.
-
-#### Settings
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `EnableProgressionSync` | `false` | Master switch. Everything below is inert until this is on |
-| `SyncMapExploration` | `false` | Map, cartography reveals and saved pins |
-| `SyncKnownItems` | `false` | Recipes, build pieces, materials, crafting stations, biomes, runestone texts, unlocks |
-| `SyncTrophies` | `false` | The trophy list, kept separate because vanilla files trophies by prefab and everything else by name |
-| `SyncPlayerStats` | `false` | The statistics counters |
-| `SyncSpawnPoint` | `false` | The claimed bed, and the point the game falls back to when it is gone |
-| `NewCharacterClearPlayerStats` | `false` | A character joining for the first time starts with zeroed statistics |
-| `MapSyncIntervalMinutes` | `15` | *(Advanced)* How often a client may upload its map |
-
-#### Commands
-
-- `enforcer-progress-show <accountId> <characterName>` — what the server holds, section by section. Reads only.
-- `enforcer-progress-clear <accountId> <characterName> <map|items|stats|spawn|all> confirm` — deletes part of it. There is no undo and no confiscation record: unlike an item, a forgotten recipe cannot be handed back.
-
-#### What this does and does not prove
-
-**Statistics are progress that survives a lost save, not a cheat-proof record.** The server restores them and refuses a counter reported above the value it holds, the same way `PreventExternalSkillRaises` handles a skill. It has no way to verify that any individual increment was earned honestly, and it never will — the increments happen on the client. Do not read "server-synced achievements" as "achievements are now cheat-proof".
-
-**Steam and Xbox achievement unlocks are not touched.** Valheim does not store them in the save at all; it hands them to the platform, which owns them per account. Only the statistics behind them are stored here.
-
-**Everything in this group is enforced on the client.** All of it hangs off a live `Player` and the local player profile, neither of which exists on a dedicated server, so unlike the item and skill rules there is no second copy running server-side to catch a modified client mid-session. What the server does have is the record, and it re-decides the first save of every session against it — so a client that skips the join-time reconciliation has its upload reconciled anyway.
-
-#### Things worth knowing
-
-- **The map is stored beside the save, not inside it.** A fully explored map is 8.4 MB before compression; compressed it is usually tens of kilobytes and can reach a megabyte. It lives at `Characters/<PlatformID>/<Name>.map` and costs that much disk per character per world.
-- **Uploads are paced.** Building the upload means rebuilding and compressing that 8.4 MB package on the player's own machine, so a client sends its map at most once every `MapSyncIntervalMinutes`, once more at logout, and not at all when nothing has been explored since the last one.
-- **Maps are not stored in `InternalStorageMode`.** That mode puts the character record in a ZDO string inside the world file, which is no place for a megabyte per player. The two together leave the map untracked and say so in the log; everything else in this group still works.
-- **A server that holds no map does not wipe yours.** The first time you switch `SyncMapExploration` on, the server holds nothing for anybody, and treating that as "you have explored nothing" would erase every connected player's map at once. Wiping a new character's map is a separate, narrower decision that `NewCharacterResetMapExploration` already owns.
-- **Known recipes are mostly derived.** Vanilla rediscovers a recipe the moment the player holds its materials and has seen its crafting station, so the materials and stations are what is really being held; the recipe list is rebuilt from them on arrival.
-- **`NewCharacterClearPlayerStats` cannot be undone**, and the counters it zeroes are per character rather than per world — so it discards a record of everything that character has done anywhere, not just here.
-
-### One Character Per Account
-
-Off by default. Set `EnforceCharacterLimit` to `true` and an account may only join with a character this server already has a save for — anyone else is turned away at the connect handshake and told which character to come back as. Nothing about this is retroactive punishment: **every character an account already has stays playable**, so switching it on locks nobody out. It only stops the *next* new character.
-
-There is no separate list to maintain. The characters an account "has" are exactly the saves under `BepInEx/config/ValheimEnforcer/Characters/<PlatformID>/`, which the mod already writes on the first join. So a brand new player joins normally, that character becomes theirs, and a second one is refused. Run `enforcer-player-list` to see who has what.
-
-**Giving someone a fresh start** is deleting their character's `.yaml` from that folder while they are offline. The slot frees itself; the next character they connect with takes it.
-
-#### Settings
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `EnforceCharacterLimit` | `false` | Master switch. Everything below is inert until this is on |
-| `MaxCharactersPerAccount` | `1` | How many characters an account may have. Accounts already over it keep what they have |
-| `CharacterLimitExemptAccounts` | *(empty)* | Comma-separated account ids allowed any number of characters |
-| `CharacterLimitExemptAdmins` | `false` | Whether being on the adminlist is itself an exemption |
-| `NotifyCharacterRejected` | `true` | Post refused joins to [Discord](#discord-notifications), if a webhook is configured |
-
-Exemptions are deliberately independent of admin rights — an exempt account does not need to be an admin, and an admin is not exempt unless you list them or turn `CharacterLimitExemptAdmins` on. Ids go in either form: `Steam_76561198012345678` or the bare `76561198012345678`. Note that this setting syncs to connected clients like every other server setting, so the ids in it are visible to players; if that matters for your server, the alternative is editing it in the config file with the list left empty in-game.
-
-#### Things worth knowing
-
-- **Identity is the character name.** It is the only thing about a character the server learns during the handshake. A player who deletes "Bjorn" locally and makes a new "Bjorn" gets past the check — though since this mod pushes the saved Bjorn's items and skills back on join, it is a poor way to get a clean slate.
-- **The save holds the slot, not the player.** Delete someone's save while they still have that character locally and it counts as new again next time they join.
-- If the server cannot read its character folder at all, joins are **allowed** and a warning is logged. A disk problem should not lock out your playerbase.
-- On a player-hosted (listen) server the host never goes through the connect handshake, so the host's own account is not checked. Dedicated servers check everyone.
-- Enforcement is tied to the game's network version. If Valheim ships a new one, the rule stops applying until the mod is rebuilt against it — the check goes quiet rather than guessing at a changed wire format.
-
-### Starter Loadouts
-
-Off by default. A kit — items, skill levels, a head start on what they know, and where they wake up — handed to a character joining this server for the first time.
-
-Kits live in `BepInEx/config/ValheimEnforcer/Loadouts.yaml`, which is created with a commented example in it. `DefaultStarterLoadout` picks the one new characters get. The file is re-read while the server is running.
-
-```yaml
-loadouts:
-  starter:
-    description: A hood, a cloak and something to eat
-    items:
-      - prefabName: HelmetLeather
-        quality: 1
-        equipped: true
-      - prefabName: CapeDeerHide
-        equipped: true
-      - prefabName: CookedMeat
-        stack: 5
-    skills:
-      Run: 10
-      Swim: 10
-    knownMaterials:
-      - $item_wood
-      - $item_stone
-    haveSpawnPoint: false
-```
-
-#### How it fits with the new-character rules
-
-The kit is granted **after** the new-character rules have stripped whatever the character arrived carrying. That ordering is the whole of the interaction:
-
-- Nothing in a loadout needs listing in `NewCharacterStartingItems` as well. The allowlist decides what a character may *keep*; a loadout is what the server *hands over*, and the strip has already finished by then.
-- A loadout may grant an **upgraded** item even though the allowlist refuses one that turns up on its own — because the server is the one giving it.
-- Skills are only ever **raised**. A loadout that could lower one would be a second, quieter copy of `NewCharacterSetSkillsToZero`.
-
-Both sides run it: the server writes the kit into the stored record, and the client puts the same items in the player's hands. The same split every other join rule uses.
-
-#### Settings
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `EnableStarterLoadouts` | `false` | Master switch |
-| `DefaultStarterLoadout` | *(empty)* | Which loadout new characters get. Empty means none |
-
-#### Commands
-
-- `enforcer-loadout-list [name]` — the kits in the file, and which one is live. With a name, what is in it.
-- `enforcer-loadout-apply <accountId> <characterName> <name> confirm` — add a kit to a character the server already has a save for: a starter kit for somebody who joined before you set one up, or a replacement for a player who lost something.
-
-#### Things worth knowing
-
-- **`knownMaterials`, `knownRecipes` and the spawn point need progression sync.** They are only applied when `SyncKnownItems` / `SyncSpawnPoint` are on, because those are what give the server somewhere to record them. `enforcer-loadout-list <name>` says so against each line when they are off.
-- **A prefab name that does not exist is named in the log and skipped**, not a reason to refuse the join. A typo is the most likely thing to be wrong with a hand-written loadout.
-- **A `Loadouts.yaml` that will not parse keeps the previously loaded kits** rather than emptying them, and says so. Nothing in this file can make the server *less* strict, so there is no reason to fail closed.
-- Items are added at full durability and are not marked as cheated, so they do not put a character out of the running for the game's own achievements.
-
-### Save Archives
-
-Off by default. Set `EnableSaveArchives` to `true` and the server keeps a rolling history of compressed archives, each holding **the world save and the character saves from the same moment**.
-
-The game already rotates backups of its own — two of them, uncompressed, of the world only. What this adds is a longer history, compression, and the character store in the same archive. That last part is the point: every player's items, skills, confiscation record and synced progression live in `BepInEx/config/ValheimEnforcer/Characters/`, and none of it is in a vanilla backup. Restoring one of those puts the world back and leaves every character exactly as they were, which is its own kind of rollback.
-
-**Know the cost before switching it on.** A real world file reaches 200 MB. Vanilla's own rotation already keeps around a gigabyte beside it. Each archive here is another copy on top — compressed, but still measured in hundreds of megabytes. The defaults are deliberately conservative.
-
-#### When an archive is taken
-
-Only ever just after a world save **finishes**. `SaveArchiveIntervalMinutes` is a minimum gap rather than a schedule, so the real cadence is that interval rounded up to the next save.
-
-This matters more than it sounds. Valheim's `SaveWorld` returns as soon as it has *started* the save — the write happens on the game's own background thread afterwards — so anything that archived when a save was requested would be zipping a half-written world. Enforcer waits for that thread to finish before it reads a single file.
-
-The zip itself is built on a background thread, so compressing 200 MB never costs the server a frame.
-
-#### Settings
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `EnableSaveArchives` | `false` | Master switch. Everything below is inert until this is on |
-| `SaveArchiveIntervalMinutes` | `120` | Shortest gap between archives. Below the server's save interval means "every save" |
-| `SaveArchiveKeepCount` | `5` | How many to keep. Lowering it gives the disk back at the next archive, not one file per cycle |
-| `SaveArchiveMaxTotalMB` | `0` | Ceiling on all archives together, oldest deleted first. `0` means no ceiling |
-| `SaveArchiveIncludeCharacters` | `true` | Include the `Characters/` folder |
-| `SaveArchiveIncludeConfig` | `true` | Include this mod's `.cfg` and YAML files |
-| `SaveArchiveCompression` | `Fastest` | `Fastest`, `Optimal` or `NoCompression` |
-| `SaveArchivePath` | *(empty)* | Where to write. Empty means `BepInEx/config/ValheimEnforcer/Archives` |
-
-#### Commands
-
-- `enforcer-archive-list` — what is on disk, newest first, with sizes and the running totals for this session.
-- `enforcer-archive-now [save]` — take one at the next completed save, ignoring the interval. Add `save` to start a world save immediately rather than waiting for the next one.
-- `enforcer-archive-prune confirm` — apply the keep count and the size ceiling now. Without `confirm` it lists what it would delete and stops.
-
-#### What is in one
-
-```
-<world>-<yyyyMMdd-HHmmss>.zip
-├── world/        the world save, whichever layout it uses
-├── characters/   Characters/<PlatformID>/<Name>.yaml and .map
-└── config/       ValheimEnforcer's .cfg and its YAML files
-```
-
-Both world layouts are handled — the legacy flat `<World>.fwl` + `<World>.db` pair and the current chunked directory — because the file list comes from the game's own save record rather than from a guess at the filenames.
-
-#### Things worth knowing
-
-- **An archive is never half-written.** It is built as `.zip.tmp` and renamed on success, so a crash mid-archive leaves a temporary file that rotation ignores and a later run deletes. Nothing that rotation counts as a good archive is ever incomplete.
-- **Rotation reads the timestamp out of the filename, never the file's modification time.** A restore, a copy or a sync tool rewrites mtimes, and deciding what to delete from a rewritten mtime deletes the wrong archive. A file whose name does not parse is not one of ours and is left completely alone — including anything else you keep in that folder.
-- **The newest archive is never deleted** to satisfy `SaveArchiveMaxTotalMB`. Setting a ceiling smaller than a single archive keeps one rather than none.
-- **A file that cannot be read does not fail the archive.** It is skipped, named in the log, and the rest is still written — an incomplete archive that says so beats no archive at all.
-- **Other mods' configuration is not included.** It is not this mod's to copy around.
-- Archives are not pruned at startup, only after one is written. A server that has been off for a month prunes on its first archive rather than on boot.
-
-### Emergency Crash Recovery
-
-Off by default. Every few minutes the server hands each connected player a **sealed snapshot of their own character** — encrypted and signed with a key that never leaves the server, so it is opaque to whoever is holding it and useless anywhere else. If this server then crashes and comes back from an older save, it asks for those snapshots back and adopts the ones that verify and are genuinely newer than what it holds.
-
-The problem it solves is the one case the character store cannot cover on its own: when the *server* loses data, the server has no copy of what it lost. Every connected client does, because the server sent it to them moments before — and handing that back is only safe if the server can prove the thing it is being handed is its own and is newer than what it has.
-
-#### Read this before switching it on
-
-**Restoring a character can duplicate items.** The world and the character store are separate saves and roll back independently. Putting a character back to a state newer than the world can re-introduce items whose source in the world — the chest they came out of, the vein they were mined from — has itself rolled back. That is inherent to restoring a character, not a fault in how it is done here. It is why restoration only ever happens inside a narrow window after an unclean shutdown, and why `CrashRecoveryAutoRestore` is a separate switch you can turn off.
-
-**This does not protect a player's own save.** The client cannot read its own snapshot, so there is nothing in it for the client. A lost or corrupted *local* character file is what [Server-Synced Progression](#server-synced-progression) covers.
-
-#### How it decides
-
-A snapshot is adopted only when **all** of the following hold. Each failure is a distinct line in the server log.
-
-1. The recovery **window** is open — the previous run left no clean-shutdown marker, or an admin opened one by hand.
-2. The signature verifies under this server's current key. A blob sealed under an older key is reported as such; one that has been altered is reported as tampering. They are different answers on purpose.
-3. The account and character it is sealed for match the peer that sent it, as the *server* resolved them.
-4. The world id matches this world.
-5. Its **sequence number is strictly greater** than the one on the save held here. Every save the server accepts bumps that number, and a client never sets it — so a replayed old snapshot is refused rather than rolling somebody backwards.
-
-The window also closes early the moment this server writes a save of its own: once that has happened, the server's copy is current and a snapshot from before the crash is no longer newer than reality, whatever its number says.
-
-#### The key
-
-Generated on first use into `BepInEx/config/ValheimEnforcer/recovery.key`. It is a **file, not a setting** — every ordinary setting here is pushed to clients by the config sync, and a key pushed to the clients it is meant to be opaque to would make the feature decorative.
-
-Keep it with your backups. Without it, snapshots cannot be opened. Losing it is survivable — every outstanding snapshot is simply refused, which is the safe direction — but it is also unrecoverable.
-
-`enforcer-recovery-key-rotate confirm` replaces it and makes every snapshot every client is holding permanently unopenable. It refuses to run while a recovery window is open.
-
-#### Settings
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `EnableCrashRecovery` | `false` | Master switch. Everything below is inert until this is on |
-| `CrashRecoveryAutoRestore` | `true` | Whether a verified, newer snapshot is adopted on its own inside the window |
-| `CrashRecoveryWindowMinutes` | `30` | How long after an unclean shutdown snapshots are accepted |
-| `CrashRecoveryPushIntervalMinutes` | `10` | How often each player is sent a fresh snapshot — this is the bound on how much a crash can cost, and the bandwidth knob |
-| `CrashRecoveryKeepBlobs` | `3` | How many characters' snapshots a client keeps per world |
-
-#### Commands
-
-- `enforcer-recovery-status` — whether the window is open, why, how long it has left, and which key is in use.
-- `enforcer-recovery-open confirm` — open a window by hand, for a rollback the server could not have noticed: a restore from a backup, or a host reverted underneath the game. Connected players are asked straight away; anyone else is asked when they join.
-- `enforcer-recovery-close` — shut it now.
-- `enforcer-recovery-key-rotate confirm` — replace the key.
-
-#### Things worth knowing
-
-- **The first session after you switch this on never opens a window.** The marker that answers "did the last run stop cleanly" is only written while the feature is on, so the first start finds none and reads that as a first run rather than a crash. Every start after that answers properly.
-- **The clean-shutdown marker is written after the character store has flushed**, never before — a marker claiming a clean stop while a save was still queued would close the window over exactly the data it exists to recover.
-- **A hard kill leaves no marker, which is the point.** `kill -9`, a power cut and a host that vanished all look the same to the next start, and all open a window.
-- **An unclean shutdown while hosting a different world does not open a window.** Whatever went wrong belongs to that world, not this one.
-- **Every restore is logged loudly**, with the sequence it replaced, when it was sealed, and a reminder about the duplication risk. A restore that happened quietly would be worse than none.
-- **The snapshot holds the character, not the map.** A server rollback does not touch a client's own map — the client has been holding it all along — so sealing a megabyte of it into every snapshot would be bandwidth spent recovering something that was never lost.
-- Snapshots live on the client at `BepInEx/config/ValheimEnforcer/Recovery/<world id>/<character>.vebak`. They are safe to delete; the next push replaces them.
-
-### Discord Notifications
-
-Paste a webhook URL into `Discord.WebhookUrl` and the server starts posting: who joined, who left and whether their save was up to date, who was turned away and why, and when the server came up or went down. Nothing else needs configuring.
-
-Everything below is for when you want more than that — a channel per kind of message, different wording, a role ping when somebody gets banned.
-
-#### One channel or several
-
-Every category falls back to `WebhookUrl`, so a category URL is only worth setting when you want that traffic somewhere else.
-
-| Setting | Covers |
-| --- | --- |
-| `WebhookUrl` | Everything, unless a category below overrides it |
-| `WebhookUrlPlayerActivity` | Joins and leaves |
-| `WebhookUrlServerStatus` | Startup, shutdown, world saves |
-| `WebhookUrlModeration` | Cheat bans, character-limit rejections, structure detections |
-| `WebhookUrlModMismatch` | Connections refused over mods |
-
-The usual split is join/leave into a busy activity channel, moderation into somewhere only staff can read — those messages name the account behind a ban — and mod mismatches into wherever players ask for help, since the message already lists what they need to fix.
-
-Leaving `WebhookUrl` empty and setting only one category is fine: that category posts and nothing else does.
-
-#### Settings
-
-| Setting | Default | What it does |
-| --- | --- | --- |
-| `WebhookUrl` | *(empty)* | Master switch. Empty means no notifications at all |
-| `WebhookUrl…` *(the four above)* | *(empty)* | Per-category override; empty falls back to `WebhookUrl` |
-| `ServerLabel` | *(empty)* | Name for this server as `{server}` in templates. Only useful when several servers share a channel |
-| `NotifyServerStartup` | `true` | Server came online |
-| `NotifyServerShutdown` | `true` | Server going down |
-| `NotifyWorldSaved` | `false` | Every world save. **Off on purpose** — the autosave fires roughly every 20 minutes, all day |
-| `NotifyPlayerJoined` | `true` | Player joined |
-| `NotifyPlayerLeft` | `true` | Player left, and whether their save was current |
-| `NotifyWrongMods` | `true` | Connection refused over a mod mismatch |
-| `NotifyCheaterBanned` | `true` | Player banned for cheat usage |
-| `NotifyCharacterRejected` | `true` | Connection refused by `EnforceCharacterLimit` |
-| `NotifyStructureFlagged` | `true` | Structure validation caught a player placing something invalid. At most one post per player per minute, however many objects were involved |
-
-These are deliberately **not** synced to clients — a webhook URL is a password in URL form, and syncing it would hand it to everyone who connects. Edit them in the config file or in Configuration Manager on the server.
-
-#### Rewriting the messages
-
-What each message looks like lives in `BepInEx/config/ValheimEnforcer/Notifications.yaml`, written on first start and re-read within `ConfigPollIntervalSeconds` of being edited. No restart. It ships with the wording this mod has always used, so it changes nothing until you edit it.
-
-**Each entry is the message.** Not a description of one — the literal body posted to Discord, placeholders and all. Nothing is added to it and nothing is filled in for you.
-
-```yaml
-playerJoined: |
-  {
-    "embeds": [{
-      "title": "Player Joined",
-      "color": {colorGreen},
-      "timestamp": "{timestamp}",
-      "fields": [
-        {"name": "Player", "value": "{player}", "inline": true}
-      ]
-    }]
-  }
-```
-
-That means anything Discord accepts works — `author`, `footer`, `thumbnail`, `image`, `url`, several embeds in one post. Their [webhook reference](https://discord.com/developers/docs/resources/webhook) is the full list, and none of it needs a change to this mod.
-
-A `content` line is the one place a mention actually pings; Discord never resolves one inside an embed:
-
-```yaml
-cheaterBanned: |
-  {
-    "content": "<@&123456789012345678> a player was just banned",
-    "embeds": [{
-      "title": "Cheater Banned",
-      "color": {colorRed},
-      "fields": [
-        {"name": "Player", "value": "{player}", "inline": true},
-        {"name": "Detected", "value": "{reason}", "inline": true}
-      ]
-    }]
-  }
-```
-
-#### Removing things
-
-Because the body is sent exactly as written, **anything you delete is simply not in the message**. There is no separate switch for turning a piece off.
-
-| Delete | Effect |
-| --- | --- |
-| `"timestamp"` | No date stamp under the embed |
-| `"title"` / `"description"` | That line is gone |
-| One entry in `"fields"` | That row is gone |
-| `"fields"` | No rows at all |
-| `"color"` | No coloured stripe down the left edge |
-| `"content"` | No plain-text line above the embed, and no pings |
-| `"embeds"` | A plain-text message and nothing else — needs `"content"` to survive |
-| The whole event key | The built-in default comes back next start |
-
-So the `playerJoined` above, stripped of its timestamp, colour and title, is a bare one-line post:
-
-```yaml
-playerJoined: |
-  {
-    "embeds": [{
-      "fields": [
-        {"name": "Player", "value": "{player}", "inline": true}
-      ]
-    }]
-  }
-```
-
-**Watch the commas.** JSON does not allow one before a `}` or a `]`, and a dangling comma is what deleting the last item in a list leaves behind. It is checked for — see below — so this costs you a log line rather than a silent outage.
-
-To stop an event posting at all, turn off its `Notify*` setting. Emptying its template is not the way: Discord rejects a message with no content and no embeds, so the mod skips it and logs instead.
-
-#### Placeholders
-
-Written `{likeThis}`. Available to every event:
-
-| Placeholder | Value |
-| --- | --- |
-| `{server}` | `ServerLabel` from the config, empty unless you set it |
-| `{world}` | World name |
-| `{onlinePlayers}` | How many are connected |
-| `{timestamp}` | Current time, in the ISO-8601 form Discord's `"timestamp"` field wants |
-| `{colorGreen}` `{colorAmber}` `{colorRed}` `{colorGrey}` | The numbers Discord wants for `"color"` |
-
-Colours are offered as placeholders only so the shipped palette is convenient. `"color"` takes any number, so `"color": 3447003` is a perfectly good blue.
-
-Then per event:
-
-| Event | Placeholders |
-| --- | --- |
-| `serverStartup` `serverShutdown` `worldSaved` | *(common only)* |
-| `playerJoined` | `{player}` `{playerId}` `{isAdmin}` |
-| `playerLeft` | `{player}` `{playerId}` `{disconnect}` `{savedData}` `{deltaWindow}` `{statusColor}` |
-| `cheaterBanned` | `{player}` `{playerId}` `{reason}` `{detections}` `{action}` |
-| `characterRejected` | `{character}` `{playerId}` `{reason}` `{maxCharacters}` |
-| `modMismatch` | `{player}` `{playerId}` `{summary}` `{missingMods}` `{extraMods}` `{versionMismatches}` `{adminOnlyMods}` `{hashMismatches}` `{unverifiedMods}` |
-| `structureFlagged` | `{player}` `{playerId}` `{prefab}` `{position}` `{reason}` `{creator}` `{health}` `{count}` `{action}` |
-
-`{summary}` on a mod mismatch is the whole rejection written out as prose, which is what the default shows. The lists beside it are the same information split up, for when you want to say something specific — ping the mod team only when `{hashMismatches}` is involved, or post nothing but `{missingMods}` in a support channel. `{versionMismatches}` names both versions per mod — `com.example.Mod (needs 1.4.2, has 1.3.0)` — and a wrong version lands there even when the file check is what caught it, so `{hashMismatches}` only ever holds a file that fails at the version the server expects.
-
-`{statusColor}` is green after a clean logout and amber after a crash or timeout. The default `playerLeft` uses it as its colour, which is how one template covers both.
-
-On `structureFlagged`, one message covers the whole batch — a cheat tool drops a village in a second, and a post per piece would walk the webhook into Discord's rate limiter. `{count}` is how many objects were involved and `{prefab}`, `{position}`, `{health}` and `{creator}` describe the first of them; the server log has the rest.
-
-Run `enforcer-notify-test playerJoined` to post any event with stand-in data and see the result. It works from the server console or from a connected **admin's** client — in that case the server does the posting and reports back into your console, since the webhook URL is never sent to clients. It ignores the `Notify*` switches but still needs a webhook. `enforcer-notify-test list` names the events.
-
-Non-admins are refused server side, so the command is not a way for a player to make your server post to Discord. There is a short cooldown between tests, which keeps a stuck key from walking the webhook into Discord's rate limiter and silencing the real notifications along with it.
-
-#### Things worth knowing
-
-- **A broken template does not stop notifications.** Every template is checked when the file loads. One that is not valid JSON is reported in the log with a line and column, and that event falls back to its built-in default until you fix it — everything else keeps posting. Bad YAML around the templates keeps whatever was already loaded.
-- **A broken template is never overwritten.** The fallback is in memory only; your text stays in the file exactly as you typed it, so restarting mid-edit does not cost you the version you were fixing.
-- **The check is for syntax, not for Discord's rules.** It catches dangling commas, unclosed braces, unterminated strings and single quotes. It does not know that an embed title caps at 256 characters or that `"colour"` is not a field. Those come back as an HTTP status in the log.
-- **Values are escaped and truncated for you.** A player called `Bj"orn` cannot break the document, and a long `{summary}` or `{extraMods}` is trimmed rather than being allowed to push the post past Discord's limits.
-- **A mistyped placeholder is left visible** in the message rather than silently blanked, so `{playr}` arrives as `{playr}` and tells you what to fix.
-- **`@everyone` and `@here` work in `content`.** There is no guard against it, and the event you put it on may fire far more often than you expect. Test with a role ping first.
-- **Player names go to Discord** whenever notifications are on. That is the point of the feature, but worth knowing before pointing it at a public channel.
-- **Comments you add are kept.** A `#` note on its own line stays with the entry below it when the mod rewrites the file. One sharing a line with a value is not, because that line gets rewritten.
-- **The world-save message means the save started.** Valheim writes the world on a background thread, so nothing can honestly report the moment it finished. Skipped saves are not announced at all.
-- **Turning an event off costs nothing.** The message is never built, so a server that only wants ban alerts does no work for the rest.
-
-### Migrating from ServerCharacters
-
-Coming from [ServerCharacters](https://thunderstore.io/c/valheim/p/Smoothbrain/ServerCharacters/)? Valheim Enforcer can read the character files it leaves behind, so your players keep their inventories and skills instead of having everything confiscated on their first join.
-
-**The two mods cannot run at the same time.** They both take over character saving and would fight over every profile, so Enforcer declares ServerCharacters incompatible. Be aware of how BepInEx enforces that: it refuses to load **Enforcer**, not ServerCharacters. A server with both installed runs with no Enforcer at all — no mod enforcement, no character sync, no anti-cheat — and the only sign is a line in the BepInEx log. So the order matters:
-
-1. Stop the server.
-2. Uninstall ServerCharacters. **Leave its character files alone** — they are what gets imported.
-3. Set `ImportServerCharacters = true` in `ValheimEnforcer.cfg`.
-4. Start the server and read the log. It reports how many characters were imported, skipped or unreadable.
-5. Optionally set it back to `false`. Leaving it on is harmless — characters that already have a save are skipped, so the pass does nothing on later starts.
-
-Want to look before you leap? With the server running, an admin can use `enforcer-characters-import dryrun`, which reports exactly what it would do and writes nothing. `enforcer-characters-import import` runs it on demand, and adding `force` overwrites saves that already exist (normally they are left alone).
-
-The importer only ever **reads** ServerCharacters' files. Nothing is moved, renamed or deleted, so your old setup stays intact if you want to go back.
-
-#### What comes across
-
-Inventory (including item quality, variants, crafter names and the custom data mods like EpicLoot attach to items), skill levels, and per-player custom data.
-
-Food, guardian power, known recipes/stations/materials, trophies, map data and spawn points do **not** come across — Enforcer's character store does not model them. In practice players do not notice: ServerCharacters also writes each player's own local character file, so all of that is still on their machine. What the server needs is only enough to recognise their stuff and stop confiscating it.
-
-The exception is a player who has lost their local character file. Under ServerCharacters the server copy was fully authoritative and could restore everything; here they would come back with their items and skills but not their recipes or map. That is a difference between how the two mods store characters, not something the import can fix.
-
-#### Things worth knowing
-
-- Files are found automatically in the game's own character folder, which is where ServerCharacters puts them and which follows Valheim's `-savedir`. Only set `ServerCharactersImportPath` if you moved them somewhere else.
-- Backups are ignored on purpose — the `backups` folder, `.fch.old`, and `*_backup_*` files. A hardcore character that died is left dead.
-- The character name is taken from inside the profile, not the file name. ServerCharacters lowercases the file name, and its own code misreads names containing an underscore.
-- A corrupt or truncated file is skipped and reported rather than half-imported, and a file written by a newer version of Valheim than this build understands is skipped rather than guessed at.
-- If the import cannot read something, the affected player simply joins as if they were new. It never blocks a connection.
-
-### Server Management
-
-Add the mod to your server and to your clients — both sides must run it. Setting up the mod lists is optional; every mod the server loads is required automatically. See [Mod List](#mod-list) for the file itself, the other three lists, and what is kept up to date for you.
-
-#### Console Commands
-
-Type `enforcer-help` for the list, or `enforcer-help items` for one area of it. Every command names what it did when it finishes — how many characters it found, how many items it moved, how many objects it deleted — so you never have to go and read a log to find out whether it worked.
+Run them from the server console, or from a connected admin's client — a dedicated server is administered entirely from in-game. Type `enforcer-help` for the list, or `enforcer-help items` for one area. Tab completion works past the first argument, through the account ids the server actually has and then that account's characters.
 
 | Command | What it does |
 | --- | --- |
 | `enforcer-help` | Lists the commands, grouped by area |
-| `enforcer-whoami` | Says whether the server treats you as an admin, and what to fix if it does not |
+| `enforcer-whoami` | Whether the server treats you as an admin, and what to fix if it does not |
 | `enforcer-player-list` | Every account with a save, and the characters under it |
-| `enforcer-items-list` | What has been confiscated from one character |
-| `enforcer-items-return` | Gives confiscated items back |
-| `enforcer-items-clear` | Deletes confiscated items for good |
-| `enforcer-skills-list` | Every skill this mod has lowered for one character, and what it was lowered from |
-| `enforcer-skills-restore` | Puts lowered skills back to where they were |
-| `enforcer-skills-clear` | Forgets recorded skill reductions without restoring them |
-| `enforcer-characters-import` | Imports saves from ServerCharacters ([details](#migrating-from-servercharacters)) |
-| `enforcer-notify-test` | Previews a Discord message ([details](#discord-notifications)) |
-| `enforcer-structures-scan` | Finds cheat-placed structures ([details](#structure-validation)) |
-| `enforcer-audit-inventory` | What a character is carrying, and who crafted it ([details](#player-activity-audit)) |
+| `enforcer-items-list` / `-return` / `-clear` | See, hand back, or discard confiscated items |
+| `enforcer-skills-list` / `-restore` / `-clear` | See, undo, or forget the skill reductions this mod made |
+| `enforcer-progress-show` / `-clear` | What synced progression the server holds for a character |
+| `enforcer-loadout-list` / `-apply` | Starter kits, and giving one to an existing character |
+| `enforcer-audit-inventory` | What a character is carrying, and who crafted it |
 | `enforcer-audit-history` | Timeline of what a player gained, lost, took and stored |
 | `enforcer-audit-damage` | Live damage summary for everyone currently fighting |
-| `enforcer-audit-available` | What audit history the server still holds for a player |
-| `enforcer-audit-download` | Saves a player's history to your own machine |
-| `enforcer-memory` | Memory use: what the mod is holding, and the world's object counts ([details](#memory)) |
+| `enforcer-audit-available` / `-download` | What history the server holds, and keeping a copy of it |
+| `enforcer-structures-scan` | Finds cheat-placed structures already in the world |
+| `enforcer-item-origins` | The equipment this world has no uncrafted route to |
+| `enforcer-trust` | Which players have tripped which network guards |
+| `enforcer-archive-list` / `-now` / `-prune` | Save archives on disk, taking one, applying rotation |
+| `enforcer-recovery-status` / `-open` / `-close` / `-key-rotate` | Crash recovery window and key |
+| `enforcer-characters-import` | Imports saves from ServerCharacters |
+| `enforcer-notify-test` | Previews a Discord message |
+| `enforcer-memory` | What the mod is holding, and the world's object counts |
 
-Everything except `enforcer-help` and `enforcer-whoami` needs admin rights on the server. Those two run for anybody, because the person who needs them most is the one being refused everything else; see [When the server does not think you are an admin](#when-the-server-does-not-think-you-are-an-admin). If you would rather ordinary players could not even see the command list, set `AllowPublicDiagnosticCommands` (Advanced) to false and both go back to being admin-only.
+Everything except `enforcer-help` and `enforcer-whoami` needs admin rights on the server, which the server checks itself — a client that claims to be an admin is refused and told so.
 
-They run from the server console and from a connected admin's client alike. From a client, the server does the work and its output comes back into the console you typed in — so a dedicated server, which has no console of its own, is administered entirely from in-game. The server checks admin status itself on arrival, so a client that lies about being one is refused and told so.
+---
 
-Tab completion works past the first argument: tab through the account ids the server actually has, then through that account's characters. `EnableTerminalColors` (on) colours the output by severity and is a local setting, so it is yours rather than the server's.
-
-Older command names — `Enforcer-List-Players`, `Enforcer-Return-Confiscated` and the rest — still work and are listed beside their replacement in `enforcer-help`.
-
-#### Memory
-
-The character sync keeps a parsed copy of each character's save in memory while that character is being played, so incremental updates apply without re-reading the file. The file is always the authority: every update reaches it within about a second, and a copy that has gone idle is dropped and read back on the next update. Memory therefore follows who is playing now, not everyone who has joined since the last restart.
-
-| Setting | Section | Default | Effect |
-| --- | --- | --- | --- |
-| `CharacterCacheIdleMinutes` | Advanced | `30` | How long a character stays in memory after it was last touched. Keep it above `FullSyncPullIntervalMinutes`, or players who are online but idle are re-read after every periodic pull. `0` keeps every character until restart |
-| `MemoryReportIntervalMinutes` | Advanced | `0` | Writes the `enforcer-memory` summary to the server log this often. `0` is off |
-
-`enforcer-memory` shows the process working set and managed heap, what the mod is holding (characters, audit buffers, per-player tables) and the world's object counts. The last two lines are the game's own: how many live and destroyed objects it remembers, and the per-connection tables it keeps of which objects each player has been sent. Both grow with uptime and neither is something this mod changes; they are shown so a server whose memory climbs can tell the two apart.
-
-#### adminlist.txt changed format — old files grant nobody admin
+## Troubleshooting: your admins stopped being admins
 
 A Valheim update changed the spelling `adminlist.txt` requires, and it is now the **only** spelling accepted for an account whose id is a number:
 
@@ -1080,55 +105,31 @@ A Valheim update changed the spelling `adminlist.txt` requires, and it is now th
 | PlayStation | `S_<in-game id>` |
 | GameCenter | `A_<in-game id>` |
 
-A bare `76561198…`, or the older `Steam_76561198…`, is no longer honoured. The game says nothing when this happens — the file still looks exactly as correct as it always did, and every admin on the server simply stops being one. If admin commands stopped working after an update and you changed nothing, this is why.
+A bare `76561198…`, or the older `Steam_76561198…`, is no longer honoured. **The game says nothing when this happens** — the file still looks exactly as correct as it always did, and every admin on the server simply stops being one. If admin commands stopped working after an update and you changed nothing, this is why.
 
-On consoles the number is not your platform account id either: the game derives the in-game id from it, so you cannot work the line out by hand. Run `enforcer-whoami` and it prints the exact line for you.
+Run **`enforcer-whoami`** and it prints the exact line to write for your account. It works whether or not you are an admin, from the console or from chat as `/enforcer-whoami`, and only the server answers — so it reports the id that actually decides things rather than what your client believes. It also catches the other two cases: an id not in the file at all, and a line with stray whitespace or a byte order mark, which Valheim does not trim and which costs you admin over one trailing space.
 
-#### When the server does not think you are an admin
+`adminlist.txt` is re-read within about ten seconds of being saved, so there is no need to restart the server to test a fix.
 
-Every command above except `enforcer-help` and `enforcer-whoami` is refused with "Only server admins can run …" when the server does not recognise you. Run `enforcer-whoami` — it works whether or not you are an admin, from the console or from chat as `/enforcer-whoami`:
+[More on administration →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/administration.md)
 
-```
-enforcer-whoami
-```
+---
 
-Only the server answers. It reports the id it actually sees for your connection — which is the one thing that decides anything, and is not always the same string your client knows itself by — whether it treats that id as an admin, how many entries in the list use the pre-update spelling, and where the file lives. Your own client is deliberately not asked: it holds a copy of the admin list from the moment you connected and a synced admin flag from just after login, and either can be out of date, so quoting them beside the real answer would only give you two things to believe.
+## What this mod can and cannot do
 
-When the answer is no, it tells you which case you are in:
+Valheim is client authoritative, and the checks here fall into two kinds that fail very differently. Checks that **ask the client about itself** — what mods it runs, what is in its inventory, what is running on that machine — can be lied to by a client that can already cheat; what they change is the cost, from "edit one file and rebuild" to "reverse engineer and patch the enforcer". Checks the **server makes for itself** — the sender of every message verified against the connection it arrived on, the join rules re-run server-side, and the network guards reading packets the server already holds — have nothing for a client to lie about.
 
-- **Your id is in the file in the pre-update spelling.** The most likely one right now, and the one that looks like a mystery: the file plainly contains your SteamID and the server still says no. It names that line and prints the `V_…` text to replace it with.
-- **Your id is not in the file at all.** It prints the exact line to add.
-- **The line has stray whitespace or a byte order mark.** Valheim compares the text exactly as written and does not trim, so one trailing space costs you admin. The command counts the lines this applies to.
+The full statement of both is in the [documentation](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/cheat-detection.md#what-this-can-and-cannot-do).
 
-`adminlist.txt` is re-read within about ten seconds of being saved, so there is no need to restart the server to test a fix. Neither command reveals anything about other players: `enforcer-whoami` reports how many entries the admin list holds and how many are broken, but never names an admin other than you.
+---
 
-Because a client can be wrong about its own standing — Valheim sends the admin list once when you connect, and Jotunn syncs its admin flag once after login — this mod no longer lets your own client refuse a command outright. If it thinks you are not an admin it says so and asks the server anyway, and the refusal, if there is one, comes from the side that actually decides.
+## Roadmap
 
-#### Restoring user Items
-Someone brought on their priceless Epicloot Askavin cloak? Some Prestine +InfinitePower Jewels? You can restore confiscated items!
+Not yet implemented, but planned:
 
-There are two ways to do so. 
-1. In-Game commands
-	- Run `enforcer-player-list` to get the player's account ID and character name	
-	- Run `enforcer-items-list AcountID999999 CharacterName` to see what they lost
-	- Run `enforcer-items-return AcountID999999 CharacterName prefabName` (just want it all back? use 'all' as the prefab). If they are online the items go straight into their hands; if they are not, they go into their save and are handed over on their next join. Either way the command tells you which of those happened.
-1. Manual config file edits.
-	- Ensure the player is offline (server can be running) 
-	- If you are unsure about the player's account ID, run `enforcer-player-list` in-game to get the player's account ID and character name
-	- Move any item listed under `confiscatedItems` to the `playerItems` list in the player's save file. Player save files are located in `BepInEx\config\ValheimEnforcer\Characters\<PlatformID>\playername.yaml` on the server.
+- Automatic mod suggestions and download links for clients that are missing mods or have the wrong versions
+- Platform-ID based "moderator" mod list, so server owners can give mod permissions to specific players without making them admins
 
-#### Restoring skills
+---
 
-Two of the Player Sync rules lower a skill: `PreventExternalSkillRaises` clamps a returning character back to the level the server has for them, and `NewCharacterSetSkillsToZero` zeroes a first-time character. Both are right in the case they exist for, and both are occasionally wrong — a save that went stale over a crash, or a player treated as new because the mod was installed after they were. So every skill this mod lowers is written into the character's save with the level it was lowered from, the level it was lowered to, when, and why (`RecordSkillReductions`, on by default), and there are commands to act on that record.
-
-- Run `enforcer-player-list` to get the player's account ID and character name
-- Run `enforcer-skills-list AcountID999999 CharacterName` to see what was lowered, and from what
-- Run `enforcer-skills-restore AcountID999999 CharacterName Swords,Bows` (or `all`) to put them back. Each skill goes back to the highest level it was recorded being lowered from, and a skill the player has since levelled past is left alone — a restore never lowers anything. If they are online it is applied straight away; if not, on their next join. Either way the command tells you which.
-- Run `enforcer-skills-clear AcountID999999 CharacterName all` to forget records without restoring anything, for a reduction that was deserved.
-
-Things worth knowing:
-
-- A character whose skills arrive *below* the stored levels has them raised on join (`RestoreSkillsFromPlayerServerSave`, on by default), the same way missing items are handed back — so deleting and recreating a character locally does not lose the progress the server holds. Like the item restore it is skipped on a dirty reconnect unless `ItemReturnForDirtyReconnection` is on.
-- Only reductions this mod makes are recorded. The skill loss on death is the game's own, and a reported level the game could never produce (above 100, negative) is corrected without a record, because there is nothing valid to put it back to.
-- A restore waits on the server, as `pendingSkillRestores` in the save, until the player's client is seen holding the level. So one sent to a player who disconnects that instant, or who is on an older build of the mod, is applied on a later join rather than lost. `enforcer-skills-list` shows what is still waiting.
-- The record sits in the save file under `skillReductions`, so the manual route works here too: while the player is offline, add the skill and the level you want under `pendingSkillRestores` and delete the record.
+Got a bug to report or just want to chat about the mod? Drop by the [Discord](https://discord.gg/Dmr9PQTy9m) or [GitHub](https://github.com/MidnightsFX/valheim_enforcer).
