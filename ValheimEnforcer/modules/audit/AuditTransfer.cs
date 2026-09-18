@@ -3,7 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using System.IO.Compression;
 using System.Text;
 using ValheimEnforcer.common;
 using ValheimEnforcer.modules.character;
@@ -159,7 +158,7 @@ namespace ValheimEnforcer.modules.audit {
                     } else {
                         StringBuilder text = new StringBuilder();
                         foreach (string line in AuditLog.ToLines(events)) { text.AppendLine(line); }
-                        compressed = Compress(text.ToString());
+                        compressed = Gzip.CompressText(text.ToString());
                         if (capped) {
                             Logger.LogWarning($"An audit download for {character} hit the {MaxDownloadEvents} event ceiling; the oldest events in the range are not included.");
                         }
@@ -289,7 +288,7 @@ namespace ValheimEnforcer.modules.audit {
                         $"The server answered about '{character}', not the '{LastRequestCharacter}' this machine asked for. Saving it under the name the server gave.");
                 }
 
-                string text = Decompress(compressed);
+                string text = Gzip.DecompressText(compressed, ValConfig.MaxAuditDownloadBytes);
                 if (text == null) {
                     TerminalManager.PrintResponse(OutputLevel.Error,
                         "The server's reply expanded past the size limit and was discarded. Ask for fewer days.");
@@ -372,40 +371,6 @@ namespace ValheimEnforcer.modules.audit {
             if (bytes < 1024) { return $"{bytes} B"; }
             if (bytes < 1024 * 1024) { return $"{bytes / 1024.0:F1} KB"; }
             return $"{bytes / (1024.0 * 1024.0):F1} MB";
-        }
-
-        private static byte[] Compress(string text) {
-            byte[] raw = Encoding.UTF8.GetBytes(text);
-            using (MemoryStream output = new MemoryStream()) {
-                using (GZipStream gz = new GZipStream(output, CompressionMode.Compress)) {
-                    gz.Write(raw, 0, raw.Length);
-                }
-                return output.ToArray();
-            }
-        }
-
-        /// <summary>
-        /// Bounded decompression: returns null rather than expanding past the ceiling. Without this a
-        /// compromised or hostile server could answer a listing request with a small package that balloons
-        /// into hundreds of megabytes on an admin's machine - and an admin is the most valuable account on
-        /// the server to go after.
-        /// </summary>
-        private static string Decompress(byte[] data) {
-            if (data == null || data.Length == 0) { return null; }
-            int ceiling = ValConfig.MaxAuditDownloadBytes;
-            using (MemoryStream input = new MemoryStream(data))
-            using (GZipStream gz = new GZipStream(input, CompressionMode.Decompress))
-            using (MemoryStream output = new MemoryStream()) {
-                byte[] buffer = new byte[8192];
-                int total = 0;
-                int read;
-                while ((read = gz.Read(buffer, 0, buffer.Length)) > 0) {
-                    total += read;
-                    if (total > ceiling) { return null; }
-                    output.Write(buffer, 0, read);
-                }
-                return Encoding.UTF8.GetString(output.ToArray());
-            }
         }
     }
 }

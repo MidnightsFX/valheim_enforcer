@@ -40,9 +40,11 @@ namespace ValheimEnforcer.modules.character {
             if (host == null) { return; }
             UnityEngine.Object.Destroy(host); // also stops the running pull coroutine
             host = null;
+            modules.archive.SaveArchiver.Shutdown();
             // Nothing is left to drain the queues, and every peer they referenced is going away with the server.
             CharacterStore.ClearDriftResyncs();
             CharacterStore.ClearSanitizedPushes();
+            CharacterStore.ClearSealedPushes();
         }
 
         // Spawn the scheduler only on the server, once ZNet is up.
@@ -90,7 +92,12 @@ namespace ValheimEnforcer.modules.character {
             // repair is not delayed by a wave that happens to be in flight.
             DrainDriftResyncs();
             DrainSanitizedPushes();
+            modules.recovery.RecoveryManager.DrainSealed();
+            modules.recovery.RecoveryManager.Tick();
             Housekeeping();
+            // Watches for the game's own save thread to finish so an archive is never taken of a world that
+            // is still being written. Returns immediately unless a save has just started - see SaveArchiver.
+            modules.archive.SaveArchiver.Tick();
 
             if (cycleRunning) { return; }
             if (Time.unscaledTime < nextCycle) { return; }

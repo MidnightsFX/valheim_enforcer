@@ -1,8 +1,5 @@
 using HarmonyLib;
 using System;
-using System.IO;
-using System.IO.Compression;
-using System.Text;
 using ValheimEnforcer.common;
 
 namespace ValheimEnforcer.modules.character {
@@ -71,7 +68,7 @@ namespace ValheimEnforcer.modules.character {
 
             string yaml;
             try {
-                yaml = Decompress(compressed);
+                yaml = Gzip.DecompressText(compressed, MaxDecompressedBytes);
             } catch (Exception e) {
                 Logger.LogWarning($"Failed to decompress final character save from {sender}: {e.Message}");
                 return;
@@ -89,7 +86,7 @@ namespace ValheimEnforcer.modules.character {
         internal static void SendFinalSaveSync(ZNetPeer serverPeer, DataObjects.Character character) {
             if (serverPeer == null || character == null) { return; }
             ZPackage package = new ZPackage();
-            package.Write(Compress(DataObjects.yamlserializer.Serialize(character)));
+            package.Write(Gzip.CompressText(DataObjects.yamlserializer.Serialize(character)));
             if (serverPeer.m_socket is ZPlayFabSocket) {
                 InvokeOnPlayFab(serverPeer, package);
                 Logger.LogDebug($"Sent synchronous final character save for {character.Name} ({package.Size()} bytes) over PlayFab.");
@@ -121,34 +118,6 @@ namespace ValheimEnforcer.modules.character {
                 serverPeer.m_rpc.Invoke(RPC_NAME, package);
             } finally {
                 znet.m_haveStoped = wasStopped;
-            }
-        }
-
-        private static byte[] Compress(string text) {
-            byte[] raw = Encoding.UTF8.GetBytes(text);
-            using (MemoryStream output = new MemoryStream()) {
-                using (GZipStream gz = new GZipStream(output, CompressionMode.Compress)) {
-                    gz.Write(raw, 0, raw.Length);
-                }
-                return output.ToArray();
-            }
-        }
-
-        // Bounded decompression: returns null rather than expanding past MaxDecompressedBytes, so a small
-        // compressed payload cannot balloon into hundreds of megabytes on the main thread.
-        private static string Decompress(byte[] data) {
-            using (MemoryStream input = new MemoryStream(data))
-            using (GZipStream gz = new GZipStream(input, CompressionMode.Decompress))
-            using (MemoryStream output = new MemoryStream()) {
-                byte[] buffer = new byte[8192];
-                int total = 0;
-                int read;
-                while ((read = gz.Read(buffer, 0, buffer.Length)) > 0) {
-                    total += read;
-                    if (total > MaxDecompressedBytes) { return null; }
-                    output.Write(buffer, 0, read);
-                }
-                return Encoding.UTF8.GetString(output.ToArray());
             }
         }
     }

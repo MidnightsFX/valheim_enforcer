@@ -37,9 +37,16 @@ namespace ValheimEnforcer.modules.character {
             internal bool ResetFoods;           // PreventExternalFoodChanges
             internal bool LenientDirtyRemoval;  // ItemRemovalForDirtyReconnection
             internal bool RecordReductions;     // RecordSkillReductions
+            internal bool ResetKnownItems;      // SyncKnownItems
+            internal bool ResetTrophies;        // SyncTrophies
+            internal bool ReconcileStats;       // SyncPlayerStats
+            internal bool ResetSpawn;           // SyncSpawnPoint
 
             internal bool AnyEnabled {
-                get { return RemoveUntracked || ClampSkills || ResetCustomData || ResetGuardianPower || ResetFoods; }
+                get {
+                    return RemoveUntracked || ClampSkills || ResetCustomData || ResetGuardianPower || ResetFoods
+                           || ResetKnownItems || ResetTrophies || ReconcileStats || ResetSpawn;
+                }
             }
         }
 
@@ -53,6 +60,10 @@ namespace ValheimEnforcer.modules.character {
                 ResetFoods = ValConfig.PreventExternalFoodChanges.Value,
                 LenientDirtyRemoval = ValConfig.ItemRemovalForDirtyReconnection.Value,
                 RecordReductions = ValConfig.RecordSkillReductions.Value,
+                ResetKnownItems = ProgressionSync.KnownItemsEnabled,
+                ResetTrophies = ProgressionSync.TrophiesEnabled,
+                ReconcileStats = ProgressionSync.StatsEnabled,
+                ResetSpawn = ProgressionSync.SpawnEnabled,
             };
         }
 
@@ -62,9 +73,16 @@ namespace ValheimEnforcer.modules.character {
             internal bool CustomDataReset;
             internal bool GuardianPowerReset;
             internal bool FoodsReset;
+            internal bool KnownItemsReset;
+            internal bool TrophiesReset;
+            internal int StatsReconciled;
+            internal bool SpawnReset;
 
             internal bool Changed {
-                get { return ItemsConfiscated > 0 || SkillsClamped > 0 || CustomDataReset || GuardianPowerReset || FoodsReset; }
+                get {
+                    return ItemsConfiscated > 0 || SkillsClamped > 0 || CustomDataReset || GuardianPowerReset
+                           || FoodsReset || KnownItemsReset || TrophiesReset || StatsReconciled > 0 || SpawnReset;
+                }
             }
 
             internal string Describe() {
@@ -74,6 +92,10 @@ namespace ValheimEnforcer.modules.character {
                 if (CustomDataReset) { parts.Add("custom data reset"); }
                 if (GuardianPowerReset) { parts.Add("forsaken power reset"); }
                 if (FoodsReset) { parts.Add("foods reset"); }
+                if (KnownItemsReset) { parts.Add("known recipes and materials reset"); }
+                if (TrophiesReset) { parts.Add("trophies reset"); }
+                if (StatsReconciled > 0) { parts.Add($"{StatsReconciled} statistic(s) reconciled"); }
+                if (SpawnReset) { parts.Add("spawn point reset"); }
                 return parts.Count == 0 ? "nothing to do" : string.Join(", ", parts.ToArray());
             }
         }
@@ -180,7 +202,195 @@ namespace ValheimEnforcer.modules.character {
                 result.FoodsReset = true;
             }
 
+            ApplyProgression(incoming, stored, policy, result);
+
             return result;
+        }
+
+        /// <summary>
+        /// The progression counterpart, and the server's own copy of what ProgressionSync does on the client.
+        ///
+        /// Only the first full save of a session reaches this, which is what makes replacement the right
+        /// answer rather than a merge: at that moment an honest client is holding exactly what the server
+        /// pushed it moments earlier on join, so replacing changes nothing for it. Everything discovered
+        /// later in the session arrives through an ordinary save that this never sees, and is kept.
+        ///
+        /// A null section on the stored side is untracked, not empty, and is left alone - the same rule as
+        /// the Forsaken Power and foods above, and for the same reason: a setting switched on today must not
+        /// wipe every character that was saved before it.
+        /// </summary>
+        private static void ApplyProgression(DataObjects.Character incoming, DataObjects.Character stored,
+                                             Policy policy, Result result) {
+            Progression storedProgress = stored.Progress;
+            if (storedProgress == null) { return; }
+            if (!policy.ResetKnownItems && !policy.ResetTrophies && !policy.ReconcileStats && !policy.ResetSpawn) { return; }
+            if (incoming.Progress == null) { incoming.Progress = new Progression(); }
+            Progression incomingProgress = incoming.Progress;
+
+            if (policy.ResetKnownItems) {
+                bool changed = false;
+                if (NeedsReplace(incomingProgress.KnownRecipes, storedProgress.KnownRecipes)) {
+                    incomingProgress.KnownRecipes = new List<string>(storedProgress.KnownRecipes);
+                    changed = true;
+                }
+                if (NeedsReplace(incomingProgress.KnownMaterials, storedProgress.KnownMaterials)) {
+                    incomingProgress.KnownMaterials = new List<string>(storedProgress.KnownMaterials);
+                    changed = true;
+                }
+                if (NeedsReplace(incomingProgress.KnownBiomes, storedProgress.KnownBiomes)) {
+                    incomingProgress.KnownBiomes = new List<string>(storedProgress.KnownBiomes);
+                    changed = true;
+                }
+                if (NeedsReplace(incomingProgress.Uniques, storedProgress.Uniques)) {
+                    incomingProgress.Uniques = new List<string>(storedProgress.Uniques);
+                    changed = true;
+                }
+                if (NeedsReplace(incomingProgress.ShownTutorials, storedProgress.ShownTutorials)) {
+                    incomingProgress.ShownTutorials = new List<string>(storedProgress.ShownTutorials);
+                    changed = true;
+                }
+                if (NeedsReplaceStations(incomingProgress.KnownStations, storedProgress.KnownStations)) {
+                    incomingProgress.KnownStations = new Dictionary<string, int>(storedProgress.KnownStations);
+                    changed = true;
+                }
+                if (NeedsReplaceTexts(incomingProgress.KnownTexts, storedProgress.KnownTexts)) {
+                    incomingProgress.KnownTexts = new Dictionary<string, string>(storedProgress.KnownTexts);
+                    changed = true;
+                }
+                result.KnownItemsReset = changed;
+            }
+
+            if (policy.ResetTrophies && NeedsReplace(incomingProgress.Trophies, storedProgress.Trophies)) {
+                incomingProgress.Trophies = new List<string>(storedProgress.Trophies);
+                result.TrophiesReset = true;
+            }
+
+            if (policy.ReconcileStats && storedProgress.Stats != null) {
+                result.StatsReconciled = ReconcileStats(incomingProgress, storedProgress);
+            }
+
+            if (policy.ResetSpawn && storedProgress.Spawn != null && !SpawnEquals(incomingProgress.Spawn, storedProgress.Spawn)) {
+                incomingProgress.Spawn = CopySpawn(storedProgress.Spawn);
+                result.SpawnReset = true;
+            }
+        }
+
+        // Counters go both ways, unlike every other rule here, and each direction has its own reason. Above
+        // the stored value is a gain from somewhere this server did not see, exactly like a skill. Below it
+        // is a client under-reporting - vanilla's counters never decrease, so there is no honest way to
+        // report less - and accepting that would quietly erase the history the server is holding on the
+        // player's behalf. Either way the stored value is the answer.
+        private static int ReconcileStats(Progression incoming, Progression stored) {
+            int changed = 0;
+            if (incoming.Stats == null) { incoming.Stats = new Dictionary<string, StatBucket>(); }
+            foreach (KeyValuePair<string, StatBucket> bucket in stored.Stats) {
+                if (bucket.Value == null) { continue; }
+                if (!incoming.Stats.TryGetValue(bucket.Key, out StatBucket reported) || reported == null) {
+                    incoming.Stats[bucket.Key] = bucket.Value;
+                    changed++;
+                    continue;
+                }
+                if (!BucketEquals(reported, bucket.Value)) {
+                    incoming.Stats[bucket.Key] = bucket.Value;
+                    changed++;
+                }
+            }
+            // A bucket the server has never held is a difficulty this character has not played here.
+            List<string> extra = new List<string>();
+            foreach (string key in incoming.Stats.Keys) {
+                if (!stored.Stats.ContainsKey(key)) { extra.Add(key); }
+            }
+            foreach (string key in extra) {
+                incoming.Stats.Remove(key);
+                changed++;
+            }
+            return changed;
+        }
+
+        // Whether the incoming list has to be replaced with the stored one. A null stored side is untracked
+        // and never replaces anything. Order is ignored: both sides come out of a HashSet on the client,
+        // which does not promise one.
+        private static bool NeedsReplace(List<string> incoming, List<string> stored) {
+            return stored != null && !SetEquals(incoming, stored);
+        }
+
+        private static bool NeedsReplaceStations(Dictionary<string, int> incoming, Dictionary<string, int> stored) {
+            if (stored == null) { return false; }
+            if (incoming == null || incoming.Count != stored.Count) { return true; }
+            foreach (KeyValuePair<string, int> entry in stored) {
+                if (!incoming.TryGetValue(entry.Key, out int level) || level != entry.Value) { return true; }
+            }
+            return false;
+        }
+
+        private static bool NeedsReplaceTexts(Dictionary<string, string> incoming, Dictionary<string, string> stored) {
+            if (stored == null) { return false; }
+            if (incoming == null || incoming.Count != stored.Count) { return true; }
+            foreach (KeyValuePair<string, string> entry in stored) {
+                if (!incoming.TryGetValue(entry.Key, out string text) || text != entry.Value) { return true; }
+            }
+            return false;
+        }
+
+        private static bool SetEquals(List<string> a, List<string> b) {
+            int acount = a == null ? 0 : a.Count;
+            if (acount != (b == null ? 0 : b.Count)) { return false; }
+            if (acount == 0) { return true; }
+            HashSet<string> set = new HashSet<string>(b);
+            foreach (string value in a) {
+                if (!set.Contains(value)) { return false; }
+            }
+            return true;
+        }
+
+        private static bool BucketEquals(StatBucket a, StatBucket b) {
+            return FloatsEqual(a.Stats, b.Stats)
+                   && FloatsEqual(a.KnownWorlds, b.KnownWorlds)
+                   && FloatsEqual(a.KnownWorldKeys, b.KnownWorldKeys)
+                   && FloatsEqual(a.KnownCommands, b.KnownCommands)
+                   && FloatsEqual(a.ItemPickup, b.ItemPickup)
+                   && FloatsEqual(a.ItemCraft, b.ItemCraft)
+                   && FloatsEqual(a.Pickable, b.Pickable)
+                   && FloatsEqual(a.FoodEaten, b.FoodEaten)
+                   && FloatsEqual(a.PiecesPlaced, b.PiecesPlaced)
+                   && EnemiesEqual(a.EnemyStats, b.EnemyStats);
+        }
+
+        private static bool EnemiesEqual(Dictionary<string, Dictionary<string, float>> a,
+                                         Dictionary<string, Dictionary<string, float>> b) {
+            int acount = a == null ? 0 : a.Count;
+            if (acount != (b == null ? 0 : b.Count)) { return false; }
+            if (acount == 0) { return true; }
+            foreach (KeyValuePair<string, Dictionary<string, float>> entry in a) {
+                if (!b.TryGetValue(entry.Key, out Dictionary<string, float> other)) { return false; }
+                if (!FloatsEqual(entry.Value, other)) { return false; }
+            }
+            return true;
+        }
+
+        private static bool FloatsEqual(Dictionary<string, float> a, Dictionary<string, float> b) {
+            int acount = a == null ? 0 : a.Count;
+            if (acount != (b == null ? 0 : b.Count)) { return false; }
+            if (acount == 0) { return true; }
+            foreach (KeyValuePair<string, float> entry in a) {
+                if (!b.TryGetValue(entry.Key, out float other) || other != entry.Value) { return false; }
+            }
+            return true;
+        }
+
+        private static bool SpawnEquals(SpawnPoints a, SpawnPoints b) {
+            if (a == null || b == null) { return a == b; }
+            return a.HaveCustomSpawn == b.HaveCustomSpawn
+                   && a.SpawnX == b.SpawnX && a.SpawnY == b.SpawnY && a.SpawnZ == b.SpawnZ
+                   && a.HomeX == b.HomeX && a.HomeY == b.HomeY && a.HomeZ == b.HomeZ;
+        }
+
+        private static SpawnPoints CopySpawn(SpawnPoints source) {
+            return new SpawnPoints {
+                HaveCustomSpawn = source.HaveCustomSpawn,
+                SpawnX = source.SpawnX, SpawnY = source.SpawnY, SpawnZ = source.SpawnZ,
+                HomeX = source.HomeX, HomeY = source.HomeY, HomeZ = source.HomeZ,
+            };
         }
 
         private static bool CustomDataEquals(Dictionary<string, string> a, Dictionary<string, string> b) {

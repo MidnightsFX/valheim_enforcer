@@ -30,6 +30,7 @@ namespace ValheimEnforcer.common {
             Add(lines, "Character store", CharacterStoreLine);
             Add(lines, "Per-player tables", TablesLine);
             Add(lines, "Audit", AuditLine);
+            Add(lines, "Save archives", ArchiveLine);
             Add(lines, "Connections", ConnectionsLine);
             Add(lines, "World objects", WorldLine);
             Add(lines, "Per-peer object tables", PeerTablesLine);
@@ -48,6 +49,18 @@ namespace ValheimEnforcer.common {
                 value = $"unavailable ({e.GetType().Name}: {e.Message})";
             }
             if (value != null) { lines.Add($"{label}: {value}"); }
+        }
+
+        // Null when the feature is off, so the report does not carry a row about something nobody enabled.
+        // Counts are since this process started; the size is the last archive written, not the total on disk,
+        // because walking the archive folder is a directory scan and nothing else in this report does one.
+        private static string ArchiveLine() {
+            if (ValConfig.EnableSaveArchives == null || !ValConfig.EnableSaveArchives.Value) { return null; }
+            modules.archive.SaveArchiver.Stats stats = modules.archive.SaveArchiver.Snapshot();
+            string last = stats.LastUtc == DateTime.MinValue
+                ? "none yet this session"
+                : $"last {modules.archive.SaveArchiver.Describe(stats.LastBytes)} at {stats.LastUtc:HH:mm:ss}Z";
+            return $"{stats.Written} written, {stats.Failed} failed, {stats.Pruned} pruned, {stats.QueueDepth} queued; {last}";
         }
 
         private static string ProcessLine() {

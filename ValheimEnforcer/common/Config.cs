@@ -63,6 +63,36 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> NewCharacterClearKnownRecipes;
         public static ConfigEntry<bool> RecordSkillReductions;
 
+        // Progression sync: the half of a character's progress that lives in the player profile rather than in
+        // the character record. Every one of these is off by default - see the master switch's description.
+        public static ConfigEntry<bool> EnableProgressionSync;
+        public static ConfigEntry<bool> SyncMapExploration;
+        public static ConfigEntry<bool> SyncKnownItems;
+        public static ConfigEntry<bool> SyncTrophies;
+        public static ConfigEntry<bool> SyncPlayerStats;
+        public static ConfigEntry<bool> SyncSpawnPoint;
+        public static ConfigEntry<int> MapSyncIntervalMinutes;
+        public static ConfigEntry<bool> NewCharacterClearPlayerStats;
+        public static ConfigEntry<bool> EnableStarterLoadouts;
+        public static ConfigEntry<string> DefaultStarterLoadout;
+
+        // Rolling save archives. Off by default, and expensive when on - see the master switch's description.
+        public static ConfigEntry<bool> EnableSaveArchives;
+        public static ConfigEntry<int> SaveArchiveIntervalMinutes;
+        public static ConfigEntry<int> SaveArchiveKeepCount;
+        public static ConfigEntry<int> SaveArchiveMaxTotalMB;
+        public static ConfigEntry<bool> SaveArchiveIncludeCharacters;
+        public static ConfigEntry<bool> SaveArchiveIncludeConfig;
+        public static ConfigEntry<string> SaveArchiveCompression;
+        public static ConfigEntry<string> SaveArchivePath;
+
+        // Emergency crash recovery. Off by default; see the master switch's description for what it cannot do.
+        public static ConfigEntry<bool> EnableCrashRecovery;
+        public static ConfigEntry<bool> CrashRecoveryAutoRestore;
+        public static ConfigEntry<int> CrashRecoveryWindowMinutes;
+        public static ConfigEntry<int> CrashRecoveryPushIntervalMinutes;
+        public static ConfigEntry<int> CrashRecoveryKeepBlobs;
+
         public static ConfigEntry<bool> EnforceCharacterLimit;
         public static ConfigEntry<int> MaxCharactersPerAccount;
         // Comma-separated rather than List<string>: BepInEx's config system only supports primitives,
@@ -194,6 +224,19 @@ namespace ValheimEnforcer {
         internal static CustomRPC ClientCommandRequestRPC;
         internal static CustomRPC CommandOutputRPC;
 
+        // The map channel. A pair, and a channel of its own rather than more fields on the character payload:
+        // a fully explored map is 8.4 MB before compression, the character payload ceiling is 8 MB, and the
+        // character record also has to fit in a ZDO string under InternalStorageMode. Request goes up or down,
+        // the blob answers it.
+        internal static CustomRPC MapSyncRPC;
+        internal static CustomRPC MapRequestRPC;
+
+        // The crash-recovery channel. The server pushes sealed snapshots down and asks for them back on the
+        // same RPC (the payload says which); the offer coming up is a channel of its own so the server side
+        // of it has one handler and one set of checks.
+        internal static CustomRPC RecoveryRPC;
+        internal static CustomRPC RecoveryOfferRPC;
+
         // The audit history channel. A pair rather than two, on the same reasoning as the command pair above:
         // listing and downloading share one server handler and therefore one admin gate. It cannot reuse the
         // command pair - that one carries console lines with a 256 line ceiling, and a week of one player's
@@ -219,6 +262,13 @@ namespace ValheimEnforcer {
             FullSyncRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_FULLSYNC_REQ", OnServerReceiveFullSyncRequest, OnClientReceiveFullSyncRequest);
             ClientCommandRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_CMD_REQ", OnServerReceiveCommandRequest, NoClientHandler);
             CommandOutputRPC = NetworkManager.Instance.AddRPC("VENFORCE_CMD_OUT", NoServerHandler, OnClientReceiveCommandOutput);
+            MapSyncRPC = NetworkManager.Instance.AddRPC("VENFORCE_MAP", OnServerReceiveMap, OnClientReceiveMap);
+            // One direction only: a client asks, the server answers on VENFORCE_MAP. The server never has to
+            // ask - a full-sync pull already has the client offer its map - so there is no client handler
+            // rather than one nothing would ever call.
+            MapRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_MAP_REQ", OnServerReceiveMapRequest, NoClientHandler);
+            RecoveryRPC = NetworkManager.Instance.AddRPC("VENFORCE_RECOVERY", NoServerHandler, OnClientReceiveRecovery);
+            RecoveryOfferRPC = NetworkManager.Instance.AddRPC("VENFORCE_RECOVERY_OFFER", OnServerReceiveRecoveryOffer, NoClientHandler);
             AuditRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_AUDIT_REQ", OnServerReceiveAuditRequest, NoClientHandler);
             AuditDataRPC = NetworkManager.Instance.AddRPC("VENFORCE_AUDIT_OUT", NoServerHandler, OnClientReceiveAuditData);
 
@@ -231,8 +281,10 @@ namespace ValheimEnforcer {
             LoadYamlConfigs(new Dictionary<string, Action<string>>() {
                 { ModsConfigFilePath, CreateModsFile },
                 { KnownCheatersFilePath, CreateKnownCheatersFile },
-                { NotificationsFilePath, CreateNotificationsFile }
+                { NotificationsFilePath, CreateNotificationsFile },
+                { modules.character.StarterLoadouts.FilePath, CreateLoadoutsFile }
             });
+            modules.character.StarterLoadouts.Initialize();
             KnownCheaterTracker.Initialize();
             modules.worldintegrity.KnownPlayerIds.Initialize();
             NotificationTemplates.Initialize();
@@ -257,7 +309,7 @@ namespace ValheimEnforcer {
 
             UpdateLoadedModsOnStartup = BindServerConfig("Mods", "UpdateLoadedModsOnStartup", true, "Whether or not the mod configuration file will update its loaded mods once they are detected.");
             AutoAddModsToRequired = BindServerConfig("Mods", "AutoAddModsToRequired", true, "If true, automatically adds mods not found in the optional, admin, or server-only mod lists.");
-            RemoveUnloadedModsFromRequired = BindServerConfig("Mods", "RemoveUnloadedModsFromRequired", true, "If enabled, any mod in requiredMods that this server does not have loaded is removed from the list at startup, so a mod taken off the server stops being demanded of every client without anyone editing Mods.yaml. Only requiredMods is touched: optionalMods, adminOnlyMods and serverOnlyMods routinely hold mods the server never runs, and are left alone. This also removes a mod you required by hand that the server does not run itself, including one pinned with a thunderstorePackage - leave this off if you require any of those. Needs UpdateLoadedModsOnStartup for the removal to reach disk. Off by default.");
+            RemoveUnloadedModsFromRequired = BindServerConfig("Mods", "RemoveUnloadedModsFromRequired", true, "If enabled, any mod in requiredMods that this server does not have loaded is removed from the list at startup, so a mod taken off the server stops being demanded of every client without anyone editing Mods.yaml. Only requiredMods is touched: optionalMods, adminOnlyMods and serverOnlyMods routinely hold mods the server never runs, and are left alone. This also removes a mod you required by hand that the server does not run itself, including one pinned with a thunderstorePackage - put 'keepWhenUnloaded: true' on those entries and they are left alone without having to turn this off for every other mod. Needs UpdateLoadedModsOnStartup for the removal to reach disk. On by default.");
             ModValidationExemptAdmins = BindServerConfig("Mods", "ModValidationExemptAdmins", false, "If enabled, anyone on the server's adminlist may connect with any mods at all - missing required mods, mods this server does not allow, mismatched versions, modified mod files, unlisted BepInEx patchers, and a missing or wrong attestation. It also covers an admin running no ValheimEnforcer at all, who is otherwise refused for never sending a mod list. The check still runs and its result is still written to the server log, so you can see what your admin was carrying; only the rejection is skipped, and the Discord mod-mismatch notification is not sent for them. This exists so you can test a mod against the live server without editing Mods.yaml first. OFF by default, and be deliberate about turning it on: it makes a place on adminlist.txt the only thing between an account and the entire mod gate, so every admin id in that file needs to be somebody you would trust with an arbitrary client. Admin status is read from the server's own admin list against the connection the request arrived on, so no client can claim it.");
             HashEnforcement = BindServerConfig("Mods", "HashEnforcement", "WhenKnown", "Controls SHA256 file verification of client plugin DLLs during the connect handshake, which catches a mod somebody recompiled with different numbers in it even though its version string is unchanged. 'Off' never checks. 'WhenKnown' (the default) enforces only the mods this server has a recorded hash for, so verification is opt-in per mod and enabling it breaks nothing. 'Strict' additionally rejects any client carrying a Required or AdminOnly mod the server has NO recorded hash for - a deliberately loud signal that the mod list is not fully pinned. Individual mods override this with a 'hashEnforcement' field in Mods.yaml. Note this raises the bar from 'edit one file and rebuild' to 'reverse engineer and patch the enforcer'; it is not a wall.", new AcceptableValueList<string>("Off", "WhenKnown", "Strict"));
             AttestationPolicy = BindServerConfig("Mods", "AttestationPolicy", "Off", "Make each client prove its mod report was generated for THIS connection. The server hands every connection a random value during the handshake and the client returns a digest over that value and the exact mod and patcher list it is sending; the server recomputes it and compares. Without this, a client reports the same list and the same file hashes every session forever, so a client patched to skip the work can replay one captured answer indefinitely. Be clear on what a pass means: it proves the report was produced now, by code that actually ran - it does NOT prove the report is true, because a client that keeps the original DLLs and hashes those still passes. What it costs an attacker is the difference between returning a constant and keeping a working hashing path alive. Off does nothing at all. Report logs a failure and lets the player in. Require rejects them - and note that a player on an older ValheimEnforcer sends no attestation at all and is therefore rejected too, so only set Require once your pack has rolled out.", new AcceptableValueList<string>("Off", "Report", "Require"));
@@ -293,6 +345,29 @@ namespace ValheimEnforcer {
             NewCharacterClearForsakenPower = BindServerConfig("Player Sync", "NewCharacterClearForsakenPower", false, "If enabled, a character joining this server for the first time has their Forsaken Power cleared, so one selected in a solo world or on another server does not come with them. They can select one at a boss stone here as normal. Pair with PreventExternalForsakenPowerChanges, which stops a returning character bringing a different one in later. Off by default.");
             NewCharacterResetMapExploration = BindServerConfig("Player Sync", "NewCharacterResetMapExploration", false, "If enabled, a character joining this server for the first time has their map of this world wiped: explored areas, anything a cartography table revealed, and their saved pins. Valheim keeps a separate map for every world, so arriving with this one already uncovered means having played a copy of this world somewhere else - or being a character whose save an admin deleted to reset them, who now gets a fresh map along with everything else. The wipe only happens once the server has confirmed it holds no save for the character; if that answer has not arrived by the time the join is validated the map is left alone, because unlike an item a wiped map cannot be given back. The map lives only in the player's own character file and never reaches the server, so this is carried out by the client and cannot be checked server side. Off by default.");
             PreventExternalFoodChanges = BindServerConfig("Player Sync", "PreventExternalFoodChanges", false, "If enabled, each character's save records the foods they have eaten and how long each has left, and those exact foods are put back when they join. Vanilla keeps eaten food in the player's own character file, so without this a player can log off, eat food this server has not reached yet in a solo world, and come straight back with it - or just top their food back up for free. A returning character gets back what they left with, whatever they ate or let run out in between; a character joining for the first time has all their food cleared, and can eat as normal once here. A character whose save was written before this was enabled has no foods recorded yet: they keep what they arrive with on their next join and are tracked from then on, so switching this on strips nobody. The record is only as fresh as the character's last save, so after a crash or dropped connection a player can get back the burn time used since then - at most FullSyncPullIntervalMinutes' worth. Also checked server side when ServerSideJoinEnforcement is on. Off by default.");
+            EnableProgressionSync = BindServerConfig("Player Sync", "EnableProgressionSync", false, "Master switch for storing a character's map, known recipes, trophies, statistics and spawn point on the server the way their items and skills already are. Everything in this group lives in the player's own character file, which means a player can edit it offline and a corrupted local save loses it for good; with this on the server keeps its own copy, hands it back on join, and its copy is the one that counts. Nothing is stored until at least one of the Sync* settings below is also on, and no extra data crosses the wire or reaches the disk while this is off. Note what this cannot do: the server can restore a statistic and refuse a value higher than the one it holds, but it has no way to prove any individual increment was earned honestly, so treat the statistics as progress that survives a lost save rather than as a cheat-proof record. Steam and Xbox achievement unlocks are held by the platform, not in the save, and are not touched at all. Off by default; every part of the feature is inert until this is on.");
+            SyncMapExploration = BindServerConfig("Player Sync", "SyncMapExploration", false, "If enabled, the server stores each character's map of this world - explored ground, what a cartography table revealed, and their saved pins - and pushes its copy back when they join. A map uncovered in a copy of this world elsewhere is replaced by what this server has seen, and a player whose local character file is lost gets their exploration back. The map is stored beside the character save as an opaque .map file rather than inside it, because a fully explored map is 8.4 megabytes before compression; a real one costs tens of kilobytes to a megabyte of disk per character per world. The client only rebuilds and uploads it when something has actually been explored since the last upload, at most once every MapSyncIntervalMinutes and once more at logout, because building it is not free on the player's machine. Requires EnableProgressionSync. Not stored in InternalStorageMode - a megabyte of opaque bytes per character does not belong in the world file - so the two together leave the map untracked and say so in the log. Off by default.");
+            SyncKnownItems = BindServerConfig("Player Sync", "SyncKnownItems", false, "If enabled, the server stores what each character knows - recipes, build pieces, materials, crafting stations, discovered biomes, runestone texts and permanent unlocks - and restores its copy on join. This is the opposite end of NewCharacterClearKnownRecipes: instead of wiping what a character arrived knowing because there is nothing to check it against, the server now has something to check it against, and anything learned somewhere it did not see is replaced. Vanilla rediscovers a recipe the moment the player holds its materials and has seen its crafting station, so the materials and stations are what is really being held and the recipe list is rebuilt from them on arrival. Requires EnableProgressionSync. Off by default.");
+            SyncTrophies = BindServerConfig("Player Sync", "SyncTrophies", false, "If enabled, the server stores the trophy list vanilla keeps in each character file - every trophy that character has ever picked up, which is what the compendium reads - and restores it on join. Kept separate from SyncKnownItems because vanilla files trophies by prefab name while everything else is a localization token, and because an admin may reasonably want one without the other. Requires EnableProgressionSync. Off by default.");
+            SyncPlayerStats = BindServerConfig("Player Sync", "SyncPlayerStats", false, "If enabled, the server stores each character's statistics - the counters behind the in-game Statistics panel and the post-1.0 achievement system: kills, deaths, distance travelled, items crafted, pieces placed and the rest - and restores them on join. A counter the client reports above the value the server holds was raised somewhere this server did not see, and is put back, the same way PreventExternalSkillRaises handles skills. Be clear about the limit: the server can hold a ceiling and restore a lost save, but it cannot verify that any single increment was honest. Achievement unlocks themselves are held by Steam or Xbox rather than in the save and are not affected. Requires EnableProgressionSync. Off by default.");
+            SyncSpawnPoint = BindServerConfig("Player Sync", "SyncSpawnPoint", false, "If enabled, the server stores where each character respawns on this world - the bed they have claimed, and the point the game falls back to when that bed is gone - and restores it on join, so a lost or corrupted local character file no longer means waking up at the start stone with a base on the other side of the map. Only the spawn point is stored; where a character logged out and where they died are deliberately not, because putting a player back at a stale logout point would relocate somebody who has since walked away. Requires EnableProgressionSync. Off by default.");
+            MapSyncIntervalMinutes = BindServerConfig("Advanced", "MapSyncIntervalMinutes", 15, "How often, in minutes, a client may upload its map. Building the upload means rebuilding and compressing an 8.4 megabyte package on the player's own machine, so this is deliberately coarse; the client also skips the upload entirely when nothing has been explored since the last one, and sends once more at logout regardless. Only used when SyncMapExploration is on.", advanced: true, valmin: 1, valmax: 240);
+            NewCharacterClearPlayerStats = BindServerConfig("Player Sync", "NewCharacterClearPlayerStats", false, "If enabled, a character joining this server for the first time starts with their statistics at zero rather than carrying in the totals from wherever they were played before. The same reasoning as NewCharacterSetSkillsToZero, and worth knowing before turning it on: these counters are per character and not per world, so this discards a record of everything that character has ever done anywhere, and it cannot be undone. Only used when SyncPlayerStats is on. Off by default.");
+            EnableSaveArchives = BindServerConfig("Backups", "EnableSaveArchives", false, "Master switch for keeping rolling, compressed archives of this server's world save together with its character saves. The game already rotates backups of its own - two of them, uncompressed, of the world only - so what this adds is a longer history, compression, and the character store in the same archive. That last part is the reason it exists: restoring one of the game's backups puts the world back and leaves every character exactly as they were, which is its own kind of rollback. Be aware of the cost before switching it on. A real world file reaches 200 megabytes, the game's own rotation already keeps around a gigabyte beside it, and each archive here is another copy of that on top - compressed, but still measured in hundreds of megabytes. Archives are written after a world save finishes, never during one, so an archive is always of a complete save. Off by default; every part of the feature is inert until this is on.");
+            SaveArchiveIntervalMinutes = BindServerConfig("Backups", "SaveArchiveIntervalMinutes", 120, "The shortest gap, in minutes, between two archives. An archive is only ever taken just after a world save completes, so the real cadence is this rounded up to the next save; a value below the server's own save interval simply means every save. enforcer-archive-now ignores this for one archive.", valmin: 5, valmax: 1440);
+            SaveArchiveKeepCount = BindServerConfig("Backups", "SaveArchiveKeepCount", 5, "How many archives to keep. The oldest beyond this are deleted right after a new one is written, and lowering it takes effect at the next archive rather than one file at a time - this is a setting about disk space, so it has to give the disk back when you ask.", valmin: 1, valmax: 100);
+            SaveArchiveMaxTotalMB = BindServerConfig("Backups", "SaveArchiveMaxTotalMB", 0, "A ceiling, in megabytes, on what all archives together may occupy. Oldest first are deleted until the total fits. 0 means no ceiling, and SaveArchiveKeepCount alone decides. The newest archive is never deleted to satisfy this, so setting it below the size of a single archive keeps one rather than none.", valmin: 0, valmax: 1000000);
+            SaveArchiveIncludeCharacters = BindServerConfig("Backups", "SaveArchiveIncludeCharacters", true, "Whether to include the Characters folder - every player's items, skills, confiscation record and, if it is on, their synced progression. On by default, because a world restored without it is a world where everybody's character is from a different moment in time.");
+            SaveArchiveIncludeConfig = BindServerConfig("Backups", "SaveArchiveIncludeConfig", true, "Whether to include this mod's own configuration: the .cfg and the YAML files beside it (Mods.yaml, Notifications.yaml, KnownCheaters.yaml, PlayerIds.yaml). Small, and it is what makes an archive enough to rebuild a server from. Other mods' configuration is deliberately not included - it is not this mod's to copy around.");
+            SaveArchiveCompression = BindServerConfig("Backups", "SaveArchiveCompression", "Fastest", "How hard to compress. 'Fastest' is the default and the right answer for a world file, which is already dense; 'Optimal' buys a little more at a large cost in CPU time on a file this size; 'NoCompression' just packs the files together. The work happens on a background thread either way, so this trades disk against a background core rather than against frame time.", new AcceptableValueList<string>(new string[] { "Fastest", "Optimal", "NoCompression" }));
+            SaveArchivePath = BindServerConfig("Backups", "SaveArchivePath", "", "Where archives are written. Empty means BepInEx/config/ValheimEnforcer/Archives. Point it at another drive if you would rather not keep a second copy of the world on the same one that holds the first.");
+            EnableCrashRecovery = BindServerConfig("Crash Recovery", "EnableCrashRecovery", false, "Master switch for emergency crash recovery. Every few minutes the server hands each connected player a sealed snapshot of their own character - encrypted and signed with a key that never leaves the server, so it is opaque to whoever is holding it and useless anywhere else. If this server then crashes and comes back from an older save, it asks for those snapshots back and adopts the ones that verify and are genuinely newer than what it holds. Understand the trade before switching it on. The world and the character store are separate saves and roll back independently, so restoring a character to a state newer than the world can re-introduce items whose source in the world - the chest they came out of, the vein they were mined from - has itself rolled back. That is item duplication, and it is inherent to putting a character back rather than a fault in how it is done. It is also why restoration only ever happens inside a narrow window after an unclean shutdown. Note what this is not: the client cannot read its own snapshot, so this is no help against a lost or corrupted LOCAL character file - EnableProgressionSync is what covers that direction. Off by default; every part of the feature is inert until this is on.");
+            CrashRecoveryAutoRestore = BindServerConfig("Crash Recovery", "CrashRecoveryAutoRestore", true, "Whether a verified, newer snapshot is adopted on its own while the recovery window is open, or whether the window only reports what could be restored. On by default, because the window is already narrow and only opens after an unclean shutdown - but it is a separate switch from EnableCrashRecovery so an admin can have the snapshots kept and distributed without the server ever acting on one unasked. With this off, nothing a client hands back is ever applied.");
+            CrashRecoveryWindowMinutes = BindServerConfig("Crash Recovery", "CrashRecoveryWindowMinutes", 30, "How long after an unclean shutdown the server keeps accepting snapshots. The window opens only when the previous run left no clean-shutdown marker, and closes on its own after this many minutes; an admin can open one by hand with enforcer-recovery-open for a rollback the server could not have noticed, such as a restore from a backup.", valmin: 1, valmax: 720);
+            CrashRecoveryPushIntervalMinutes = BindServerConfig("Crash Recovery", "CrashRecoveryPushIntervalMinutes", 10, "How often each connected player is sent a fresh snapshot. This is the bound on how much can be lost: a crash costs at most whatever happened since a player's last snapshot. It is also the bandwidth knob - a snapshot is a compressed character save, tens to hundreds of kilobytes, sent per player per interval - so a busy server should think about this number rather than only about the smallest one.", valmin: 1, valmax: 120);
+            CrashRecoveryKeepBlobs = BindServerConfig("Crash Recovery", "CrashRecoveryKeepBlobs", 3, "How many characters' snapshots a client keeps per world. One file per character, each replaced by a newer one rather than accumulating, so this bounds how many different characters are remembered rather than how many copies of one.", valmin: 1, valmax: 20);
+            EnableStarterLoadouts = BindServerConfig("Player Sync", "EnableStarterLoadouts", false, "Master switch for starter loadouts: a kit of items, skill levels, known materials and a spawn point handed to a character joining this server for the first time. The kits themselves are written in Loadouts.yaml beside this file, and DefaultStarterLoadout says which one new characters get. A loadout is granted AFTER the new-character rules have stripped whatever the character arrived with, so its items do not also need listing in NewCharacterStartingItems, and it may hand over an upgraded item even though the allowlist refuses one that turns up on its own. Skills are only ever raised, never lowered. Off by default.");
+            DefaultStarterLoadout = BindServerConfig("Player Sync", "DefaultStarterLoadout", "", "The name of the loadout in Loadouts.yaml that a character joining for the first time gets. Empty means none, which leaves the feature doing nothing even with EnableStarterLoadouts on. A name that is not in the file is reported in the log and treated as none, rather than as a reason to refuse the join.");
             RecordSkillReductions = BindServerConfig("Player Sync", "RecordSkillReductions", true, "If enabled (the default), every time this mod lowers a character's skill - a returning character clamped back to the level the server holds for them under PreventExternalSkillRaises, or a first-time character's skills set to zero under NewCharacterSetSkillsToZero - the skill, the level it was lowered from and to, when, and why are written into that character's save, and enforcer-skills-list shows them. That record is what lets an admin undo one: enforcer-skills-restore puts each skill back to the highest level it was recorded being lowered from, straight away if the player is online and on their next join if not, and enforcer-skills-clear forgets a record without restoring anything. Only reductions this mod makes are recorded - the skill loss on death is the game's own, and a reported value the game could never produce (above 100, negative) is corrected without a record because there is nothing valid to put it back to. Turn this off to stop recording; records already made are kept until they are restored or cleared.");
             NewCharacterClearKnownRecipes = BindServerConfig("Player Sync", "NewCharacterClearKnownRecipes", true, "If enabled, a character joining this server for the first time forgets every recipe and build piece they discovered somewhere else. Valheim discovers a recipe as soon as the player knows its materials and crafting station, so the materials, crafting stations and trophies they know are cleared too - the same reset as the game's resetknownitems command - and discovery starts again from what they are carrying once the other new-character rules have run. Like NewCharacterResetMapExploration this only happens once the server has confirmed it holds no save for the character, because forgotten recipes cannot be given back, and it is carried out by the client because recipes never reach the server. Never applies in singleplayer or to a listen host's own character. Note that on a server which already has players, anyone joining for the first time since Valheim Enforcer was installed has no save yet and counts as new. On by default.");
 
@@ -482,31 +557,30 @@ namespace ValheimEnforcer {
             return patchesFolderPath;
         }
 
+        /// <summary>
+        /// Creates any of these config files that is not already there, and watches all of them for edits.
+        ///
+        /// "Is it already there?" is File.Exists and nothing else. It used to be a case-sensitive ordinal
+        /// comparison of full path strings against a Directory.GetFiles listing, which asks a case-insensitive
+        /// file system a case-sensitive question: a file whose name on disk differed from the expected spelling
+        /// by so much as a letter's case was reported absent, and the create callback - which opens a truncating
+        /// writer - then emptied the very file the check had just failed to recognise. For Mods.yaml that meant
+        /// an admin's mod lists were deleted at startup, silently, by the code meant to create the file for them.
+        ///
+        /// The same mismatch also registered a file twice with the watcher, once under each spelling, so every
+        /// edit was parsed and applied twice.
+        /// </summary>
         internal void LoadYamlConfigs(Dictionary<string, Action<string>> configFilesToFind) {
-            string externalConfigFolder = ValConfig.GetSecondaryConfigDirectoryPath();
-            string[] presentFiles = Directory.GetFiles(externalConfigFolder);
-            List<string> foundConfigs = new List<string>();
-            List<string> targetFiles = configFilesToFind.Keys.ToList();
-            foreach (string configFile in presentFiles) {
-                if (targetFiles.Contains(configFile)) {
-                    foundConfigs.Add(configFile);
-                    Logger.LogDebug($"Found config: {configFile}");
-                }
-            }
+            ValConfig.GetSecondaryConfigDirectoryPath(); // called for its side effect: it creates the directory
 
-            // Create files that have not been found
-            foreach(var cfg in configFilesToFind) {
-                if (!foundConfigs.Contains(cfg.Key)) {
-                    configFilesToFind[cfg.Key](cfg.Key);
-                    foundConfigs.Add(cfg.Key);
+            foreach (KeyValuePair<string, Action<string>> cfg in configFilesToFind) {
+                if (File.Exists(cfg.Key)) {
+                    Logger.LogDebug($"Found config: {cfg.Key}");
+                } else {
+                    cfg.Value(cfg.Key);
                 }
-            }
-
-            // Sets up file watcher for all of the required files
-            foreach (string configFile in foundConfigs) {
-                string file = Path.GetFileName(configFile);
-                Logger.LogDebug($"Setting filewatcher for {file}");
-                SetupFileWatcher(configFile);
+                Logger.LogDebug($"Setting filewatcher for {Path.GetFileName(cfg.Key)}");
+                SetupFileWatcher(cfg.Key);
             }
         }
 
@@ -546,7 +620,21 @@ namespace ValheimEnforcer {
             }
         }
 
+        /// <summary>
+        /// Writes a starter Mods.yaml the first time.
+        ///
+        /// The File.Exists guard is the one that matters most of the four. This method runs from the ValConfig
+        /// constructor, long before ModManager has read anything, so GetDefaultConfig() here serializes a null
+        /// ModSettings - an empty list under every heading. Reaching this with the file already present replaced
+        /// an admin's whole mod policy with blanks, and the only survivor was requiredMods, because that one is
+        /// rebuilt from the loaded plugins a moment later. That is exactly the "my optional and admin-only lists
+        /// were cleared by a restart" report.
+        /// </summary>
         private static void CreateModsFile(string filepath) {
+            if (File.Exists(filepath)) {
+                Logger.LogWarning($"Not recreating {Path.GetFileName(filepath)}: it is already there. Leaving it untouched.");
+                return;
+            }
             Logger.LogDebug("Mods config missing, recreating.");
             using (StreamWriter writetext = new StreamWriter(filepath)) {
                 // Shared with the header restore in ModManager.PersistModSettings, so a file that is recreated
@@ -558,6 +646,7 @@ namespace ValheimEnforcer {
         }
 
         private static void CreateNotificationsFile(string filepath) {
+            if (File.Exists(filepath)) { return; } // never overwrite an admin's edited templates
             Logger.LogDebug("Notification templates file missing, recreating.");
             // The embedded copy verbatim - banner and templates together, exactly as it sits in the repo. Not
             // reserialized from the parsed object: the file is hand-authored JSON inside YAML, and a round trip
@@ -565,7 +654,72 @@ namespace ValheimEnforcer {
             File.WriteAllText(filepath, NotificationTemplates.GetDefaultConfig());
         }
 
+        /// <summary>
+        /// Writes an example Loadouts.yaml the first time.
+        ///
+        /// Guarded with File.Exists even though the caller is only supposed to call this when the file is
+        /// missing. LoadYamlConfigs answers that question correctly now, but every one of these create methods
+        /// opens a truncating writer, so the cost of a caller ever being wrong is an admin's file emptied. The
+        /// guard is one line; being the second place that has to be right is not worth the saving.
+        /// </summary>
+        private static void CreateLoadoutsFile(string filepath) {
+            if (File.Exists(filepath)) { return; }
+            Logger.LogDebug("Loadouts file missing, creating an example.");
+            using (StreamWriter writer = new StreamWriter(filepath)) {
+                writer.Write(@"#################################################
+# Starter loadouts
+#
+# A kit handed to a character joining this server for the FIRST time. Set
+# EnableStarterLoadouts to true and point DefaultStarterLoadout at one of the
+# names below.
+#
+# The kit is granted AFTER the new-character rules have stripped whatever the
+# character arrived carrying, so nothing here needs listing in
+# NewCharacterStartingItems as well.
+#
+# items       prefabName is the name in the game's object database, the same
+#             spelling NewCharacterStartingItems takes. quality is the upgrade
+#             level (1 = unupgraded). equipped is ignored for anything that
+#             cannot be worn or held.
+# skills      only ever RAISES a level, never lowers one.
+# known*      only used when SyncKnownItems is on, which is what gives the
+#             server somewhere to record them. Materials are usually what you
+#             want: the game works most recipes out from the materials and
+#             crafting stations a character knows.
+# spawn       only used when SyncSpawnPoint is on. Leave haveSpawnPoint false
+#             to use the world's own start location.
+#
+# This file is re-read while the server is running.
+#################################################
+loadouts: {}
+
+# Remove the {} above and uncomment this to start from an example:
+#
+#loadouts:
+#  starter:
+#    description: A hood, a cloak and something to eat
+#    items:
+#      - prefabName: HelmetLeather
+#        quality: 1
+#        equipped: true
+#      - prefabName: CapeDeerHide
+#        quality: 1
+#        equipped: true
+#      - prefabName: CookedMeat
+#        stack: 5
+#    skills:
+#      Run: 10
+#      Swim: 10
+#    knownMaterials:
+#      - $item_wood
+#      - $item_stone
+#    haveSpawnPoint: false
+");
+            }
+        }
+
         private static void CreateKnownCheatersFile(string filepath) {
+            if (File.Exists(filepath)) { return; } // never overwrite a ban list that is already there
             Logger.LogDebug("KnownCheaters file missing, recreating.");
             // Seeded with the embedded internal list by KnownCheaterTracker.Initialize(), which
             // runs immediately after this and rewrites the file with the merged entries.
@@ -671,6 +825,12 @@ namespace ValheimEnforcer {
         internal static readonly TimeSpan LoginFlushBound = TimeSpan.FromMilliseconds(750);
 
         internal const int MaxCharacterPayloadBytes = 8 * 1024 * 1024;
+        // A minimap blob is 8.4 MB of mostly-identical bytes before compression and vanilla always stores it
+        // compressed, so a real one is tens of kilobytes to a megabyte. 4 MB is far above anything an honest
+        // client sends and far below what would hurt to receive.
+        internal const int MaxMapPayloadBytes = 4 * 1024 * 1024;
+        // A map request is an empty package; nothing legitimate in one is large.
+        internal const int MaxMapRequestBytes = 1024;
         internal const int MaxDeltaPayloadBytes = 1 * 1024 * 1024;
         internal const int MaxCheatReportBytes = 64 * 1024;
         internal const int MaxModListBytes = 2 * 1024 * 1024;
@@ -688,6 +848,217 @@ namespace ValheimEnforcer {
                 return false;
             }
             return true;
+        }
+
+        // What a VENFORCE_MAP payload means, on the same reasoning - and with the same tag-goes-last layout -
+        // as the character payload above: "the server holds no map for you" has to be expressible, or a client
+        // cannot tell it apart from an answer that has not arrived and will keep asking.
+        internal const string MapPayloadMap = "MAP";
+        internal const string MapPayloadNone = "NONE";
+
+        internal static ZPackage MapPayload(byte[] blob, string hash, string kind) {
+            ZPackage package = new ZPackage();
+            package.Write(blob ?? new byte[0]);
+            package.Write(hash ?? "");
+            package.Write(kind);
+            return package;
+        }
+
+        // What a VENFORCE_RECOVERY payload is asking for. Tag last, same as every other payload here.
+        internal const string RecoveryPayloadBlob = "BLOB";   // server -> client: hold this
+        internal const string RecoveryPayloadWant = "WANT";   // server -> client: hand back what you hold
+
+        internal static ZPackage RecoveryPayload(byte[] blob, string kind) {
+            ZPackage package = new ZPackage();
+            package.Write(blob ?? new byte[0]);
+            package.Write(kind);
+            return package;
+        }
+
+        internal static ZPackage RecoveryOfferPayload(byte[] blob) {
+            ZPackage package = new ZPackage();
+            package.Write(blob ?? new byte[0]);
+            return package;
+        }
+
+        /// <summary>
+        /// The server either handing this client a sealed snapshot to keep, or asking for the one it holds.
+        ///
+        /// Neither branch is a decision this client is making. It cannot read what it stores, and handing one
+        /// back is not the same as it being used - the server verifies it and compares it against what it
+        /// holds before anything happens.
+        /// </summary>
+        public static IEnumerator OnClientReceiveRecovery(long sender, ZPackage package) {
+            if (!FromServer(sender)) {
+                Logger.LogWarning($"Ignoring a recovery message from {sender}, which is not the server.");
+                yield break;
+            }
+            if (!WithinLimit(package, modules.recovery.RecoveryManager.MaxRecoveryPayloadBytes, sender, "recovery snapshot")) { yield break; }
+
+            byte[] blob;
+            string kind;
+            try {
+                blob = package.ReadByteArray();
+                kind = package.GetPos() < package.Size() ? package.ReadString() : RecoveryPayloadBlob;
+            } catch (Exception e) {
+                Logger.LogWarning($"Could not read a recovery message from the server: {e.Message}");
+                yield break;
+            }
+
+            if (kind == RecoveryPayloadWant) {
+                modules.recovery.RecoveryManager.Offer();
+                yield break;
+            }
+            modules.recovery.RecoveryManager.Store(blob);
+            yield break;
+        }
+
+        /// <summary>A client handing a snapshot back. Size, then identity, then content - the last two in
+        /// RecoveryManager.OnOffer, which is also where the decision not to act on an unverified header is
+        /// made explicit.</summary>
+        public static IEnumerator OnServerReceiveRecoveryOffer(long sender, ZPackage package) {
+            if (ZNet.instance == null || ZNet.instance.IsServer() == false) { yield break; }
+            if (!WithinLimit(package, modules.recovery.RecoveryManager.MaxRecoveryPayloadBytes, sender, "recovery snapshot")) { yield break; }
+            byte[] blob;
+            try {
+                blob = package.ReadByteArray();
+            } catch (Exception e) {
+                Logger.LogWarning($"Could not read a recovery snapshot offered by {sender}: {e.Message}");
+                yield break;
+            }
+            modules.recovery.RecoveryManager.OnOffer(sender, blob);
+            yield break;
+        }
+
+        /// <summary>
+        /// A client uploading its map. Size, then identity, then content - and the identity is the server's
+        /// own, never the payload's: the blob is written to a path built from the account id and character
+        /// name, so a client that could name those could write a file wherever it liked.
+        /// </summary>
+        public static IEnumerator OnServerReceiveMap(long sender, ZPackage package) {
+            if (ZNet.instance == null || ZNet.instance.IsServer() == false) { yield break; }
+            if (!WithinLimit(package, MaxMapPayloadBytes, sender, "map")) { yield break; }
+
+            byte[] blob;
+            string hash;
+            try {
+                blob = package.ReadByteArray();
+                hash = package.GetPos() < package.Size() ? package.ReadString() : null;
+            } catch (Exception e) {
+                Logger.LogWarning($"Could not read a map upload from {sender}: {e.Message}");
+                yield break;
+            }
+            if (blob == null || blob.Length == 0) { yield break; }
+
+            // Off means off: a client running an older or modified build may still send these, and a server
+            // whose admin has not turned the feature on must not start writing files because of it.
+            if (modules.character.MapSync.Enabled == false) {
+                Logger.LogDebug($"Ignoring a map upload from {sender}: map exploration is not being synced.");
+                yield break;
+            }
+            if (InternalStorageMode.Value) {
+                Logger.LogDebug($"Ignoring a map upload from {sender}: maps are not stored in InternalStorageMode.");
+                yield break;
+            }
+
+            ZNetPeer peer = ZNet.instance.GetPeer(sender);
+            string accountId = modules.character.PeerIdentity.AccountFor(peer);
+            string characterName = peer?.m_playerName;
+            if (string.IsNullOrEmpty(accountId) || string.IsNullOrEmpty(characterName)) {
+                Logger.LogWarning($"Refusing a map upload from {sender}: the server could not resolve who they are.");
+                yield break;
+            }
+            if (!modules.character.PeerIdentity.IsSafeToken(accountId) || !modules.character.PeerIdentity.IsSafeToken(characterName)) {
+                Logger.LogWarning($"Refusing a map upload from {characterName} ({accountId}): the account id or character name is not a safe file name.");
+                yield break;
+            }
+
+            // The .map has to land in the same folder as the .yaml, under the same spelling, or the store
+            // finds no character to record its hash against and drops it. The two do not always agree on
+            // their own: the save is filed under the account id the CLIENT put in its payload, which has been
+            // written as both "Steam_7656..." and the bare "7656..." over this mod's life, while the id
+            // resolved from the socket here is whichever form the platform hands us. On a case-sensitive
+            // filesystem - which is what most servers run on - that is two different directories.
+            //
+            // A character with no save yet resolves to nothing, and the peer's own spelling is used instead;
+            // the store then drops the upload for having no save to record it against, and the client sends
+            // it again on its next cadence once the save exists.
+            if (modules.character.CharacterSaves.TryResolveSave(accountId, characterName,
+                                                                out string resolvedAccount, out string resolvedName, out _)) {
+                accountId = resolvedAccount;
+                characterName = resolvedName;
+            }
+
+            modules.character.CharacterStore.SubmitMap(accountId, characterName, blob, hash, sender);
+            yield break;
+        }
+
+        /// <summary>The client adopting the server's copy.</summary>
+        public static IEnumerator OnClientReceiveMap(long sender, ZPackage package) {
+            if (!FromServer(sender)) {
+                Logger.LogWarning($"Ignoring a map payload from {sender}, which is not the server.");
+                yield break;
+            }
+            if (!WithinLimit(package, MaxMapPayloadBytes, sender, "map")) { yield break; }
+
+            byte[] blob;
+            string kind;
+            try {
+                blob = package.ReadByteArray();
+                _ = package.GetPos() < package.Size() ? package.ReadString() : null; // hash, server-side bookkeeping
+                kind = package.GetPos() < package.Size() ? package.ReadString() : MapPayloadMap;
+            } catch (Exception e) {
+                Logger.LogWarning($"Could not read the map the server sent: {e.Message}");
+                yield break;
+            }
+
+            // Answered either way, before the branch: a client that stayed in "waiting for the server" would
+            // never upload its own map to a server that holds none, which is exactly how the server acquires
+            // one in the first place.
+            modules.character.MapSync.NoteServerAnswered();
+            if (kind == MapPayloadNone || blob == null || blob.Length == 0) {
+                Logger.LogDebug("The server holds no map for this character; keeping the local one.");
+                yield break;
+            }
+            modules.character.MapSync.ApplyFromServer(blob);
+            yield break;
+        }
+
+        /// <summary>A client asking for its stored map, which is how a join gets one.</summary>
+        public static IEnumerator OnServerReceiveMapRequest(long sender, ZPackage package) {
+            if (ZNet.instance == null || ZNet.instance.IsServer() == false) { yield break; }
+            // A request carries nothing but its own existence - it names no character, because the only
+            // character a peer may ask about is its own and the server already knows which that is.
+            if (!WithinLimit(package, MaxMapRequestBytes, sender, "map request")) { yield break; }
+            if (modules.character.MapSync.Enabled == false || InternalStorageMode.Value) { yield break; }
+
+            ZNetPeer peer = ZNet.instance.GetPeer(sender);
+            string accountId = modules.character.PeerIdentity.AccountFor(peer);
+            string characterName = peer?.m_playerName;
+            if (string.IsNullOrEmpty(accountId) || string.IsNullOrEmpty(characterName)) { yield break; }
+            if (!modules.character.PeerIdentity.IsSafeToken(accountId) || !modules.character.PeerIdentity.IsSafeToken(characterName)) { yield break; }
+
+            // The store may still be holding an unwritten map for this character from their previous session.
+            // One short wait here beats sending a stale map that the client then adopts over a newer one.
+            if (modules.character.CharacterStore.HasUnwrittenChanges(accountId, characterName)) {
+                modules.character.CharacterStore.Flush(LoginFlushBound);
+            }
+
+            // Resolve the spelling actually on disk before composing a path: on a case-sensitive filesystem
+            // the id a peer connects under does not always match the folder their save was written to.
+            if (!modules.character.CharacterSaves.TryResolveSave(accountId, characterName, out string resolvedAccount, out string resolvedName, out _)) {
+                MapSyncRPC.SendPackage(sender, MapPayload(null, null, MapPayloadNone));
+                yield break;
+            }
+
+            byte[] blob = modules.character.MapSync.Load(resolvedAccount, resolvedName);
+            if (blob == null || blob.Length == 0) {
+                MapSyncRPC.SendPackage(sender, MapPayload(null, null, MapPayloadNone));
+                yield break;
+            }
+            Logger.LogDebug($"Sending {characterName} the map this server holds for them ({blob.Length} bytes).");
+            MapSyncRPC.SendPackage(sender, MapPayload(blob, null, MapPayloadMap));
+            yield break;
         }
 
         public static IEnumerator OnServerRecieveCharacter(long sender, ZPackage package) {
@@ -755,6 +1126,10 @@ namespace ValheimEnforcer {
                         Logger.LogInfo($"Recorded {reductions} skill reduction(s) reported by {chara.Name}.");
                     }
                     chara.PendingSkillRestores = existing?.PendingSkillRestores;
+                    // Server-owned, exactly as in CharacterStore.Apply: the client is told these and must not
+                    // be able to hand back a value of its own choosing for either.
+                    chara.SaveSequence = (existing?.SaveSequence ?? 0L) + 1L;
+                    if (chara.Progress != null) { chara.Progress.MapHash = existing?.Progress?.MapHash; }
 
                     // Both stores have to be empty before this counts as a first save. WritePlayerCharacterToSave
                     // deliberately double-writes (registry AND disk) so that switching storage modes does not

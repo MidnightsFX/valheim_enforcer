@@ -42,8 +42,16 @@ namespace ValheimEnforcer.modules {
             ModSettings = new DataObjects.Mods();
             Logger.LogDebug($"Detected {ActiveMods.Keys.Count} mods.");
 
-            // Read the config file
-            LoadConfig(File.ReadAllText(ValConfig.ModsConfigFilePath));
+            // Read the config file. Guarded rather than assumed: this runs from a Jotunn prefab event, so a
+            // missing file threw out of an event handler. Missing is deliberately not the same answer as
+            // unreadable - there is nothing here to lose, so empty settings are correct and the startup rewrite
+            // recreates the file from the loaded plugins.
+            if (File.Exists(ValConfig.ModsConfigFilePath)) {
+                LoadConfig(File.ReadAllText(ValConfig.ModsConfigFilePath));
+            } else {
+                Logger.LogWarning($"{ValConfig.ModsFileName} is not there; starting from an empty mod list and writing a fresh one.");
+                ModSettings = new DataObjects.Mods();
+            }
             NoteModsOnAdminOnlyAndRequired();
 
             PluginHasher.WaitForPass(ValConfig.HashComputeTimeoutSeconds.Value * 1000);
@@ -98,11 +106,71 @@ namespace ValheimEnforcer.modules {
         }
 
         /// <summary>
+        /// Every field an entry may carry, what it does and what it defaults to.
+        ///
+        /// Written once and spliced into both banners rather than maintained twice. The two files disagreeing
+        /// about the schema is a question of when, not whether, and the copy in ServerActiveMods.yaml is the one
+        /// an admin is looking at in the moment they are about to paste an entry into Mods.yaml.
+        ///
+        /// It is deliberately the whole schema and not a pointer at the README. This is the file people hand
+        /// edit, frequently over SSH on a box with no browser on it, and "the README covers all of it" is not an
+        /// answer to "what do I type here". An admin who does not want it can delete it: a banner is only ever
+        /// regenerated for a file that has no leading comment at all, so one line of their own keeps it gone.
+        /// </summary>
+        private static readonly string[] EntryFieldReferenceLines = {
+            "# Fields on a mod entry. Only the ones you want are needed - the rest are written for you, or left",
+            "# out entirely when unused.",
+            "#",
+            "#   pluginID            The BepInEx plugin GUID. The same value as the entry's key. Written for you.",
+            "#   version             The version this list expects. Kept current automatically for mods this",
+            "#                       machine actually loads, so updating a mod needs no edit here.",
+            "#   name                Human readable. Used in logs and in the text a rejected player is shown.",
+            "#   enforceVersion      Require an exact version match. Default false, so a client a patch version",
+            "#                       behind is not locked out of a server that never asked for exact versions.",
+            "#   keepWhenUnloaded    Never drop this entry just because this machine does not load the mod.",
+            "#                       Default false. Only requiredMods is ever pruned, and only when",
+            "#                       RemoveUnloadedModsFromRequired is on - this is the per-mod opt out, for a",
+            "#                       mod you require of clients but do not run on the server yourself.",
+            "#",
+            "# File verification. Catches a mod somebody recompiled with different numbers in it while leaving",
+            "# the version string alone. All optional; an entry using none of these is checked by name and",
+            "# version only.",
+            "#",
+            "#   acceptedHashes      List of SHA256 hashes this mod's DLL may have. Matching any one passes, so",
+            "#                       several builds can be allowed at once. Case insensitive.",
+            "#   hashSource          Where acceptedHashes came from: " + HashPolicy.SourceLocal + ", " + HashPolicy.SourceManual + " or " + HashPolicy.SourceThunderstore + ".",
+            "#                       Only " + HashPolicy.SourceLocal + " entries are refreshed at startup, which is what lets a hash you",
+            "#                       pinned by hand survive a restart instead of being overwritten by whatever",
+            "#                       this machine happens to have on disk. Set it to " + HashPolicy.SourceManual + " to protect yours.",
+            "#   hashedFrom          Bookkeeping for the above: 'local:<version>', or 'Owner-Name-Version' for a",
+            "#                       resolved package. Re-resolution happens only when this stops matching.",
+            "#   thunderstorePackage 'Owner-ModName' or 'Owner-ModName-Version' - the same dependency string a",
+            "#                       Thunderstore manifest uses. The server downloads that package and records",
+            "#                       its hashes. Needs ResolveThunderstoreHashes, which is off by default. This",
+            "#                       is the only way this mod reaches the network; download URLs are not",
+            "#                       supported on purpose.",
+            "#   hashEnforcement     Per-mod override of the server's HashEnforcement setting: " + HashPolicy.Off + ", " + HashPolicy.WhenKnown + "",
+            "#                       or " + HashPolicy.Strict + ".",
+            "#",
+            "# Two more fields turn up in these files but are NOT policy and setting them achieves nothing:",
+            "# 'hash' and 'hashStatus' are what a client reports about its own copy of a mod.",
+            "#",
+            "# A patcher entry carries only 'name' and 'acceptedHashes'. A patcher has no GUID and no version, so",
+            "# its file is the only thing that identifies it.",
+            "#",
+            "# An empty list is written as a bare key ('optionalMods:' with nothing under it). Add entries by",
+            "# indenting them beneath it, two spaces in.",
+        };
+
+        /// <summary>
         /// The banner a new Mods.yaml is created with. It lives here rather than beside the file creation code
         /// because <see cref="PersistModSettings"/> also has to put it back on installs that lost it: before
         /// comments were preserved, the first rewrite after launch deleted it.
+        ///
+        /// Declared after <see cref="EntryFieldReferenceLines"/> on purpose: static field initializers run in
+        /// declaration order, so a reference that has not been initialized yet is simply null.
         /// </summary>
-        internal static readonly string[] ModsFileHeaderLines = {
+        internal static readonly string[] ModsFileHeaderLines = new[] {
             "#################################################",
             "# Valheim Enforcer - Mod List",
             "#",
@@ -127,11 +195,11 @@ namespace ValheimEnforcer.modules {
             "#   allowedPatchers Patchers a client may carry. An allowlist: a client with none always passes.",
             "#                   The server's own are added here automatically. Needs Mods.ValidatePatchers to enforce.",
             "#",
-            "# Per entry: enforceVersion: true requires an exact version match (defaults to false).",
-            "# File verification uses acceptedHashes / hashSource / thunderstorePackage / hashEnforcement.",
-            "# The README covers all of it, including how to pin a mod the server does not run itself.",
-            "#################################################",
-        };
+        }
+        .Concat(EntryFieldReferenceLines)
+        .Concat(new[] { "#################################################" })
+        .ToArray();
+
 
         /// <summary>The banner line pointing at ServerActiveMods.yaml, which took the place of <see cref="LegacyActiveModsHeaderLine"/>.</summary>
         private const string ActiveModsHeaderLine = "# ServerActiveMods.yaml, beside this file, lists every plugin this machine loaded. Copy entries from it into:";
@@ -144,7 +212,7 @@ namespace ValheimEnforcer.modules {
         /// </summary>
         private const string LegacyActiveModsHeaderLine = "#   activeMods      What this machine actually loaded. Rebuilt every start - editing it does nothing.";
 
-        private static readonly string[] ActiveModsFileHeaderLines = {
+        private static readonly string[] ActiveModsFileHeaderLines = new[] {
             "#################################################",
             "# Valheim Enforcer - Active Mods",
             "#",
@@ -152,8 +220,14 @@ namespace ValheimEnforcer.modules {
             "# indented to sit under requiredMods, optionalMods, adminOnlyMods or serverOnlyMods.",
             "#",
             "# Reference only: deleted and rewritten every start, and never read. Editing it does nothing.",
-            "#################################################",
-        };
+            "#",
+            "# The entries below carry only what is installed. Everything that expresses policy is yours to add",
+            "# once the entry is in Mods.yaml:",
+            "#",
+        }
+        .Concat(EntryFieldReferenceLines)
+        .Concat(new[] { "#################################################" })
+        .ToArray();
 
         /// <summary>
         /// Serializes the current mod settings to Mods.yaml. Shared by the startup rewrite and the Thunderstore
@@ -164,7 +238,13 @@ namespace ValheimEnforcer.modules {
             if (ModSettings == null) { return; }
             try {
                 string yaml = SerializeModsFile(ModSettings);
-                File.WriteAllText(ValConfig.ModsConfigFilePath, WithPreservedComments(yaml));
+                // Taken before the write, so the copy is by definition the file as the admin last left it, and
+                // a session that never rewrites leaves no litter behind.
+                ConfigFileBackup.TryBackupOnce(ValConfig.ModsConfigFilePath);
+                // Atomic rather than File.WriteAllText: that truncates the destination before it writes, and
+                // this document serializes requiredMods first and the three admin-authored lists last, so a
+                // process killed mid-write left behind a file that had lost exactly the lists nothing rebuilds.
+                AtomicFile.WriteText(ValConfig.ModsConfigFilePath, WithPreservedComments(yaml));
                 // Qualified: Jotunn.Utils has a ConfigFileWatcher of its own and this file imports that namespace.
                 common.ConfigFileWatcher.NoteSelfWrite(ValConfig.ModsConfigFilePath);
             } catch (System.Exception e) {
@@ -190,6 +270,7 @@ namespace ValheimEnforcer.modules {
                 YamlComments.Captured captured = YamlComments.Capture(existing);
                 int legacyLine = captured.Leading.IndexOf(LegacyActiveModsHeaderLine);
                 if (legacyLine >= 0) { captured.Leading[legacyLine] = ActiveModsHeaderLine; }
+                RefreshUntouchedBanner(captured);
                 string preserved = YamlComments.Reapply(yaml, captured);
                 if (captured.HasLeadingBlock) { return preserved; }
 
@@ -204,6 +285,79 @@ namespace ValheimEnforcer.modules {
         }
 
         /// <summary>
+        /// Replaces the banner at the top of the file with the current one, but only when the one on disk is
+        /// still entirely ours.
+        ///
+        /// Without this the guide would only ever reach brand new files. A captured banner is preserved
+        /// verbatim, by design - it is the same machinery that keeps an admin's own notes - so every install
+        /// that already has a Mods.yaml would keep whatever guide it was created with, forever, while the
+        /// fields it describes moved on underneath it.
+        ///
+        /// "Still entirely ours" is decided line by line against every banner this mod has ever shipped. If an
+        /// admin has written so much as one line of their own up there, or deleted one of ours, the block is
+        /// theirs and is left exactly as it is. That keeps the two properties the existing code is careful
+        /// about: nobody's text is ever deleted, and one comment line of their own is enough to keep the banner
+        /// gone for good.
+        ///
+        /// It generalises the single line swap above it (LegacyActiveModsHeaderLine), which is kept because it
+        /// still fixes that one line on a banner an admin HAS edited - a case this method deliberately skips.
+        /// </summary>
+        private static void RefreshUntouchedBanner(YamlComments.Captured captured) {
+            if (!captured.HasLeadingBlock) { return; } // nothing there; the caller writes a fresh banner
+
+            foreach (string line in captured.Leading) {
+                if (line.Trim().Length == 0) { continue; } // blank spacing lines are ours either way
+                if (!KnownBannerLines.Contains(line)) { return; }
+            }
+
+            // Capture keeps the blank line that separates the banner from the first key, so the block is the
+            // banner plus some trailing whitespace. Both halves have to be handled separately: comparing against
+            // the whole block would never match and this would rewrite - and log - on every single restart, and
+            // replacing the whole block would eat the separator and butt the banner against requiredMods.
+            int end = captured.Leading.Count;
+            while (end > 0 && captured.Leading[end - 1].Trim().Length == 0) { end--; }
+
+            List<string> banner = captured.Leading.GetRange(0, end);
+            if (banner.Count == ModsFileHeaderLines.Length) {
+                bool identical = true;
+                for (int i = 0; i < ModsFileHeaderLines.Length && identical; i++) {
+                    identical = banner[i] == ModsFileHeaderLines[i];
+                }
+                if (identical) { return; } // already current, so say nothing
+            }
+
+            List<string> spacing = captured.Leading.GetRange(end, captured.Leading.Count - end);
+            if (spacing.Count == 0) { spacing.Add(""); } // a banner written without one still gets its separator
+
+            captured.Leading.Clear();
+            captured.Leading.AddRange(ModsFileHeaderLines);
+            captured.Leading.AddRange(spacing);
+            Logger.LogInfo($"Updated the guide at the top of {ValConfig.ModsFileName}. Any notes of your own elsewhere in the file are untouched.");
+        }
+
+        /// <summary>
+        /// Every line that has appeared in a banner this mod generated, current and historical.
+        ///
+        /// A set rather than a list of whole banners: it has to recognise a file created by any past version,
+        /// including one whose banner has since had the legacy line swapped in place, and matching per line
+        /// costs nothing and handles the reordering between versions for free. Lines that fall out of the
+        /// banner over time must stay in here - that is the entire point, since a file still carrying them is
+        /// exactly the file that needs upgrading.
+        /// </summary>
+        private static readonly HashSet<string> KnownBannerLines = new HashSet<string>(
+            ModsFileHeaderLines.Concat(new[] {
+                LegacyActiveModsHeaderLine,
+                // The 0.26.0 banner, before the per-entry field reference was added to it.
+                "# Per entry: enforceVersion: true requires an exact version match (defaults to false).",
+                "# File verification uses acceptedHashes / hashSource / thunderstorePackage / hashEnforcement.",
+                "# The README covers all of it, including how to pin a mod the server does not run itself.",
+                // The adminOnlyMods line as it was worded before it gained its second line. Wrong, as it
+                // happens - admins may connect WITHOUT these too - which is its own reason to get the banner on
+                // an existing install replaced rather than preserved forever.
+                "#   adminOnlyMods   Only admins may connect with these; everyone else is rejected.",
+            }));
+
+        /// <summary>
         /// Records the hash computed for a locally loaded plugin onto its authoritative entry, so the mods this
         /// machine runs pin themselves with no manual work.
         ///
@@ -214,8 +368,8 @@ namespace ValheimEnforcer.modules {
         /// </summary>
         private static void RecordLocalHashIfAllowed(Dictionary<string, DataObjects.Mod> modList, string key, string hash, string version) {
             if (!ValConfig.RecordHashesForLoadedMods.Value || string.IsNullOrEmpty(hash)) { return; }
+            if (!modList.TryGetValue(key, out DataObjects.Mod entry) || entry == null) { return; }
 
-            DataObjects.Mod entry = modList[key];
             if (!string.IsNullOrEmpty(entry.HashSource)
                 && !string.Equals(entry.HashSource, HashPolicy.SourceLocal, System.StringComparison.OrdinalIgnoreCase)) {
                 return;
@@ -241,11 +395,16 @@ namespace ValheimEnforcer.modules {
             Logger.LogInfo($"On both adminOnlyMods and requiredMods, treated as admin-only (optional for admins, refused to everyone else): {string.Join(", ", both)}. The requiredMods entries do nothing and can be deleted.");
         }
 
+        // Fetched once rather than indexed three times, and tolerant of an entry that is not there. Mods.Normalized
+        // already guarantees no null values reach here, but this method and RecordLocalHashIfAllowed are the two
+        // that WRITE to an entry, and neither should depend on an invariant established in another file to avoid
+        // dereferencing null.
         private static void UpdateModVersionIfChanged(Dictionary<string, DataObjects.Mod> modList, string key, string currentVersion) {
-            if (modList[key].Version != currentVersion) {
-                Logger.LogInfo($"Updating version for {key}: {modList[key].Version} -> {currentVersion}");
-                modList[key].Version = currentVersion;
-            }
+            if (!modList.TryGetValue(key, out DataObjects.Mod entry) || entry == null) { return; }
+            if (entry.Version == currentVersion) { return; }
+
+            Logger.LogInfo($"Updating version for {key}: {entry.Version} -> {currentVersion}");
+            entry.Version = currentVersion;
         }
 
         /// <summary>
@@ -258,9 +417,18 @@ namespace ValheimEnforcer.modules {
             // mod was uninstalled - and emptying requiredMods on the strength of it would wipe the admin's list.
             if (ActiveMods.Count == 0) { return; }
 
+            int kept = 0;
             foreach (string key in ModSettings.RequiredMods.Keys.Where(guid => !ActiveMods.ContainsKey(guid)).ToList()) {
+                // The opt-out for the case this setting's own description warns about: a mod required of clients
+                // that the server does not run itself, typically pinned with a thunderstorePackage. Without it
+                // the only way to keep such an entry was to turn the cleanup off for every mod.
+                if (ModSettings.RequiredMods[key].KeepWhenUnloaded) { kept++; continue; }
+
                 Logger.LogInfo($"Removing {key} from requiredMods: it is not loaded on this server (RemoveUnloadedModsFromRequired).");
                 ModSettings.RequiredMods.Remove(key);
+            }
+            if (kept > 0) {
+                Logger.LogInfo($"Kept {kept} unloaded requiredMods entry/entries that are marked keepWhenUnloaded.");
             }
         }
 
@@ -363,7 +531,10 @@ namespace ValheimEnforcer.modules {
             if (ZNet.instance != null && !ZNet.instance.IsServer()) { return; }
 
             foreach (KeyValuePair<string, DataObjects.PatcherEntry> patcher in ModSettings.ActivePatchers) {
-                if (!ModSettings.AllowedPatchers.TryGetValue(patcher.Key, out DataObjects.PatcherEntry allowed)) {
+                // A null hit counts as absent: an allowedPatchers entry written with nothing under it comes back
+                // as a present key with a null value, which TryGetValue reports as found and the hash recording
+                // below would then dereference.
+                if (!ModSettings.AllowedPatchers.TryGetValue(patcher.Key, out DataObjects.PatcherEntry allowed) || allowed == null) {
                     allowed = new DataObjects.PatcherEntry { Name = patcher.Value.Name };
                     ModSettings.AllowedPatchers[patcher.Key] = allowed;
                     Logger.LogDebug($"Automatically allowing the patcher {patcher.Key}.");
@@ -427,17 +598,24 @@ namespace ValheimEnforcer.modules {
         /// </summary>
         internal static void UpdateModSettingConfigs(string yamlstring) {
             try {
-                DataObjects.Mods fromFile = DataObjects.yamldeserializer.Deserialize<DataObjects.Mods>(yamlstring);
+                // Strict here too, and for the same reason as the startup read: this is an admin's hand edit
+                // arriving, and a duplicate key they have just introduced is worth naming while they still have
+                // the file open. A failure keeps the settings we already had, so the cost of being strict is one
+                // poll's delay rather than anything lost.
+                DataObjects.Mods fromFile = DataObjects.yamlconfigdeserializer.Deserialize<DataObjects.Mods>(yamlstring);
                 if (fromFile == null) {
-                    Logger.LogWarning("Mod configuration file was empty, keeping the current settings.");
+                    // An empty read is not an empty mod list. Adopting it would hand the next rewrite a blank
+                    // object to publish over a file that is most likely mid-save rather than genuinely empty.
+                    Logger.LogWarning($"{ValConfig.ModsFileName} read back empty, keeping the current settings.");
                     return;
                 }
-                ModSettings = fromFile;
+                ModSettings = DataObjects.Mods.Normalized(fromFile, ValConfig.ModsFileName);
                 NoteModsOnAdminOnlyAndRequired();
                 RebuildActiveMods();
                 RebuildActivePatchers();
+                Logger.LogInfo($"Re-read {ValConfig.ModsFileName}: now enforcing {DescribeListCounts(ModSettings)}.");
             } catch (System.Exception e) {
-                Logger.LogWarning($"Failed to deserialize mod configurations: {e.Message}");
+                Logger.LogWarning($"Could not read the edited {ValConfig.ModsFileName} ({ConfigFileBackup.DescribeParseFailure(e)}). Keeping the settings already loaded; the file is re-read on every change, so fixing it is enough.");
             }
         }
 
@@ -463,6 +641,24 @@ namespace ValheimEnforcer.modules {
             }
         }
 
+        /// <summary>
+        /// True when <paramref name="key"/> is listed in <paramref name="list"/>, with <paramref name="entry"/>
+        /// set to the record to check against - never null when it returns true.
+        ///
+        /// An entry written with no settings under it ("com.example.Mod:" and nothing indented below) is a
+        /// listing with no options set, not an absent listing, so it must not fall through to the next list or
+        /// be re-reported as an unlisted mod. Keeping the membership test and the null handling in one place is
+        /// what lets the caller's if/else-if chain read as a plain priority order while remaining safe: the
+        /// chain's ordering is load-bearing, because letting an admin-only entry fall through to requiredMods
+        /// would quietly demote the mod from "refused to non-admins" to "required of everyone".
+        /// </summary>
+        private static bool TryAuthoritative(Dictionary<string, DataObjects.Mod> list, string key, out DataObjects.Mod entry) {
+            entry = null;
+            if (list == null || !list.TryGetValue(key, out entry)) { return false; }
+            if (entry == null) { entry = new DataObjects.Mod(); }
+            return true;
+        }
+
         internal static bool ValidateModlist(Mods CheckingMods, Mods AuthoratativeMods, bool isAdmin, bool adminStatusKnown, out string summay, out string details, out ModMismatchDetail detail) {
             summay = "";
             details = "";
@@ -477,7 +673,15 @@ namespace ValheimEnforcer.modules {
             List<string> extraPatchers = new List<string>();       // a BepInEx patcher the server does not allow
             List<string> patcherHashMismatch = new List<string>(); // allowed by name, but not this build of it
             List<string> patcherUnverifiable = new List<string>(); // the server pinned it, the client reported no hash
-            Dictionary<string, DataObjects.Mod> adminOnlyMods = AuthoratativeMods.AdminOnlyMods ?? new Dictionary<string, DataObjects.Mod>();
+            // Both sides normalized before anything reads them. Their producers already do this, so it is belt
+            // and braces - but this method is reached from the handshake on every connection, in both
+            // directions, and a null list here is a throw inside an RPC handler that ZRpc swallows, which would
+            // skip mod validation altogether rather than fail it. Also lets every list below be read plainly:
+            // AdminOnlyMods used to carry a lone "?? new Dictionary<>" that made the other three look guaranteed
+            // when they were not.
+            CheckingMods = DataObjects.Mods.Normalized(CheckingMods);
+            AuthoratativeMods = DataObjects.Mods.Normalized(AuthoratativeMods);
+            Dictionary<string, DataObjects.Mod> adminOnlyMods = AuthoratativeMods.AdminOnlyMods;
             // Admin-only mods are optional for admins: permitted, never demanded - of admins or anyone else. A mod
             // on both lists is the normal way to get here rather than a typo: the server loads a mod, it lands in
             // requiredMods by itself, and the admin then adds it to adminOnlyMods without deleting the original.
@@ -510,8 +714,7 @@ namespace ValheimEnforcer.modules {
 
                 // Compare admin mods - prevent non-admin clients from joining with admin only mods.
                 // Non-admins carrying one are rejected; admins are version-enforced when EnforceVersion is set.
-                if (adminOnlyMods.ContainsKey(mod.Key)) {
-                    authoritative = adminOnlyMods[mod.Key];
+                if (TryAuthoritative(adminOnlyMods, mod.Key, out authoritative)) {
                     requiredOrAdmin = true;
                     if (!adminStatusKnown) {
                         // Client side: Jotunn only syncs admin status after login (post-RPC_PeerInfo),
@@ -525,21 +728,23 @@ namespace ValheimEnforcer.modules {
                     }
                 }
                 // Compare required mods
-                else if (AuthoratativeMods.RequiredMods.ContainsKey(mod.Key)) {
-                    authoritative = AuthoratativeMods.RequiredMods[mod.Key];
+                else if (TryAuthoritative(AuthoratativeMods.RequiredMods, mod.Key, out authoritative)) {
                     requiredOrAdmin = true;
                     versionEnforced = authoritative.EnforceVersion;
                 }
                 // Compare optional mods
-                else if (AuthoratativeMods.OptionalMods.ContainsKey(mod.Key)) {
-                    authoritative = AuthoratativeMods.OptionalMods[mod.Key];
+                else if (TryAuthoritative(AuthoratativeMods.OptionalMods, mod.Key, out authoritative)) {
                     versionEnforced = authoritative.EnforceVersion;
                 }
                 // ServerOnlyMods stays the skip button: a client carrying one is still an extra mod, exactly as
                 // before, so it is deliberately not matched here.
 
                 if (authoritative == null) {
-                    // Mod didn't match one of the existing mods, its an extra
+                    // No list claimed it, so it is an extra. This is purely the "unlisted" verdict now - it used
+                    // to double as a null check, and sat AFTER three reads of authoritative.EnforceVersion, so an
+                    // entry written with no body under it both threw here on every single connecting client and,
+                    // in the admin-only case, got the mod named twice in the rejection text: once as admin-only
+                    // and again as unlisted. TryAuthoritative settles both.
                     extraMods.Add(mod.Key);
                     continue;
                 }
@@ -785,12 +990,54 @@ namespace ValheimEnforcer.modules {
         /// startup rewrite then repopulates from the loaded plugins.
         /// </summary>
         internal static void LoadConfig(string yaml) {
+            // Two readers, two different questions. The strict one decides whether we understood the file well
+            // enough to be allowed to rewrite it; the lenient one decides what to enforce for this session.
+            // Strict-only would be a regression: a file with a duplicate key loads today under last-wins rules,
+            // and refusing it outright would drop a working server to no mod policy at all over a formatting
+            // fault. Lenient-only is what let a broken file be quietly replaced by an empty one.
             try {
-                ModSettings = DataObjects.yamldeserializer.Deserialize<DataObjects.Mods>(yaml) ?? new DataObjects.Mods();
-            } catch (System.Exception e) {
-                Logger.LogError($"Could not parse {ValConfig.ModsConfigFilePath}: {e.Message}. Continuing with empty mod settings; fix the file and restart, or delete it to have it regenerated.");
+                ModSettings = DataObjects.Mods.Normalized(
+                    DataObjects.yamlconfigdeserializer.Deserialize<DataObjects.Mods>(yaml), ValConfig.ModsFileName);
+                return;
+            } catch (System.Exception strict) {
+                RecoverUnreadableModsFile(yaml, strict);
+            }
+        }
+
+        /// <summary>
+        /// Salvages what can be salvaged from a Mods.yaml the strict reader rejected: the previous file is copied
+        /// aside, a second pass tries to read it under the old permissive rules, and the admin is told in one
+        /// message what broke, where their data went and how to get it back.
+        ///
+        /// The file IS still rewritten afterwards - the server heals itself rather than running on a file nobody
+        /// can parse - which is only defensible because the copy is taken first. Before it was, the rewrite
+        /// published the empty fallback over the admin's lists and the old log line told them to "fix the file
+        /// and restart" after the code had already made that impossible.
+        /// </summary>
+        private static void RecoverUnreadableModsFile(string yaml, System.Exception strict) {
+            string backup = ConfigFileBackup.BackupUnreadable(ValConfig.ModsConfigFilePath);
+
+            try {
+                ModSettings = DataObjects.Mods.Normalized(
+                    DataObjects.yamldeserializer.Deserialize<DataObjects.Mods>(yaml), ValConfig.ModsFileName);
+            } catch (System.Exception lenient) {
+                // Both readers refused it, so this is a real syntax error rather than a duplicate key.
+                Logger.LogDebug($"The permissive re-read of {ValConfig.ModsFileName} failed too: {ConfigFileBackup.DescribeParseFailure(lenient)}");
                 ModSettings = new DataObjects.Mods();
             }
+
+            Logger.LogError(
+                $"{ValConfig.ModsFileName} could not be read ({ConfigFileBackup.DescribeParseFailure(strict)})."
+                + (backup == null ? "" : $" The file as you left it has been saved as {backup}; copy your optionalMods / adminOnlyMods / serverOnlyMods entries back out of it.")
+                + $" Mod enforcement this session is running on {DescribeListCounts(ModSettings)}."
+                + " A common cause is entries added underneath a list written as 'optionalMods: {}' - the '{}' has to be deleted first."
+                + $" Fix the file and save it: it is re-read within ConfigPollIntervalSeconds, with no restart needed.");
+        }
+
+        /// <summary>The per-list counts, for telling an admin what survived a bad file without making them guess.</summary>
+        private static string DescribeListCounts(DataObjects.Mods mods) {
+            return $"{mods.RequiredMods.Count} required, {mods.OptionalMods.Count} optional, "
+                 + $"{mods.AdminOnlyMods.Count} admin-only, {mods.ServerOnlyMods.Count} server-only";
         }
 
         internal static string GetDefaultConfig() {
@@ -812,8 +1059,46 @@ namespace ValheimEnforcer.modules {
                 ActivePatchers = mods.ActivePatchers,
                 AllowedPatchers = mods.AllowedPatchers,
             };
-            return DataObjects.yamlserializer.Serialize(written);
+            return OpenEmptyLists(DataObjects.yamlserializer.Serialize(written));
         }
+
+        /// <summary>
+        /// Rewrites "optionalMods: {}" and its siblings to a bare "optionalMods:".
+        ///
+        /// This is the single edit that stops admins destroying this file. YAML has no block form for an empty
+        /// mapping, so the emitter's only options are "{}" or leaving the key out - and "{}" is a trap, because
+        /// the three lists nobody fills in sit at the very bottom of a six hundred line file, which is exactly
+        /// where somebody scrolls to when they want to add one. Indenting an entry underneath "optionalMods: {}"
+        /// is not valid YAML, the whole file then failed to parse, and the recovery path published an empty one
+        /// over the top of it. A bare key takes an indented entry underneath perfectly happily, and it is what
+        /// an admin writes by hand anyway, so the generated file and a hand-written one stop disagreeing.
+        ///
+        /// Textual, on output we generated ourselves one statement earlier, matching whole lines against a fixed
+        /// set of key names - and this file already accepts a far larger textual pass over the same document in
+        /// WithPreservedComments, for the same reason: it is machine generated, block style and uniformly
+        /// indented. The round trip is stable: bare key reads back as null, Mods.Normalized turns that into an
+        /// empty dictionary, and it serializes as a bare key again.
+        ///
+        /// Depends on Mods.Normalized. Without it a bare key deserializes to null and NREs through startup,
+        /// which would turn a trap that costs the admin their lists into one that costs them the server.
+        /// </summary>
+        private static string OpenEmptyLists(string yaml) {
+            if (string.IsNullOrEmpty(yaml)) { return yaml; }
+            return EmptyListLine.Replace(yaml, "${key}:");
+        }
+
+        /// <summary>
+        /// Anchored to whole lines and to the top-level keys by name, so it can never touch a value inside an
+        /// entry - a mod whose name really is "{}" stays untouched, as does any future key not named here.
+        ///
+        /// The trailing lookahead is not consumed on purpose. In multiline mode "$" matches immediately before
+        /// the "\n", which on the CRLF output the serializer produces on Windows leaves the "\r" sitting to its
+        /// left: consuming it would strip the carriage return from the one line this touches and mix line
+        /// endings within the file.
+        /// </summary>
+        private static readonly System.Text.RegularExpressions.Regex EmptyListLine = new System.Text.RegularExpressions.Regex(
+            @"^(?<key>requiredMods|optionalMods|adminOnlyMods|serverOnlyMods|activePatchers|allowedPatchers): \{\}(?=[ \t]*\r?$)",
+            System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.Compiled);
 
 
         internal static class ValidateMods {

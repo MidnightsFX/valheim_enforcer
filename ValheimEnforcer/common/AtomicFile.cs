@@ -7,8 +7,8 @@ using YamlDotNet.Serialization;
 namespace ValheimEnforcer.common {
 
     /// <summary>
-    /// Writes a YAML document to disk without ever building it as one string, and without ever leaving a
-    /// half-written file where the old one was.
+    /// Writes a file to disk without ever leaving a half-written one where the old one was - and, for YAML,
+    /// without ever building the document as one string.
     ///
     /// Two things this replaces, both from the character store's old write path. Serializing to a string and
     /// then File.WriteAllText allocated the whole document twice - once as UTF-16, once as UTF-8 - and a
@@ -23,8 +23,8 @@ namespace ValheimEnforcer.common {
     internal static class AtomicFile {
 
         /// <summary>
-        /// Appended to the destination name while writing. Chosen so it never matches the "*.yaml" globs the
-        /// character folder is enumerated with: a save mid-write must not show up as a character.
+        /// Appended to the destination name while writing. Chosen so it never matches the "*.yaml" or "*.map"
+        /// globs the character folder is enumerated with: a save mid-write must not show up as a character.
         /// </summary>
         internal const string TempSuffix = ".tmp";
 
@@ -48,12 +48,75 @@ namespace ValheimEnforcer.common {
             if (graph == null) { throw new ArgumentNullException(nameof(graph)); }
             if (serializer == null) { throw new ArgumentNullException(nameof(serializer)); }
 
+            return WriteThrough(path, stream => {
+                // The writer is disposed here rather than by WriteThrough, because flushing it has to happen
+                // before the stream is closed and only this branch has one.
+                using (StreamWriter writer = new StreamWriter(stream, Utf8NoBom, WriterBufferBytes)) {
+                    serializer.Serialize(writer, graph);
+                }
+            });
+        }
+
+        /// <summary>
+        /// Writes opaque bytes to <paramref name="path"/> with the same crash safety, and returns the
+        /// last-write time of the published file.
+        ///
+        /// For payloads that are already a byte array and already compressed - the minimap blob, a sealed
+        /// recovery snapshot - where there is nothing to stream through a serializer and nothing to gain by
+        /// pretending there is. The LOH reasoning in the class doc does not apply to the caller's own array,
+        /// which exists either way; what this avoids is the truncate-then-write window of File.WriteAllBytes.
+        /// </summary>
+        /// <exception cref="IOException">When even the copy fallback fails; the caller decides what a failed write means.</exception>
+        internal static DateTime WriteBytes(string path, byte[] data) {
+            if (string.IsNullOrEmpty(path)) { throw new ArgumentException("A path is required.", nameof(path)); }
+            if (data == null) { throw new ArgumentNullException(nameof(data)); }
+
+            return WriteThrough(path, stream => stream.Write(data, 0, data.Length));
+        }
+
+        /// <summary>
+        /// Writes already-built text to <paramref name="path"/> with the same crash safety, and returns the
+        /// last-write time of the published file.
+        ///
+        /// For documents that are assembled as a string before they can be written - Mods.yaml, whose serialized
+        /// form has the admin's comments spliced back into it by ModManager.WithPreservedComments, so there is no
+        /// object graph left to stream. The LOH reasoning in the class doc therefore does not apply here; what
+        /// this buys is the other half of the class: File.WriteAllText truncates the destination before it writes,
+        /// so a process death mid-write left the file cut off partway through. Mods.yaml serializes requiredMods
+        /// first and the admin-authored lists last, which made a truncated write look exactly like the data-loss
+        /// bug this replaced.
+        ///
+        /// Encoding matches File.WriteAllText: both are UTF-8 with no BOM, so switching a caller over does not
+        /// change a single byte of a file that writes successfully.
+        /// </summary>
+        /// <exception cref="IOException">When even the copy fallback fails; the caller decides what a failed write means.</exception>
+        internal static DateTime WriteText(string path, string contents) {
+            if (string.IsNullOrEmpty(path)) { throw new ArgumentException("A path is required.", nameof(path)); }
+            if (contents == null) { throw new ArgumentNullException(nameof(contents)); }
+
+            return WriteThrough(path, stream => {
+                // Disposed here rather than by WriteThrough for the same reason WriteYaml disposes its own:
+                // the writer has to flush before the stream closes, and only the text branches have one.
+                using (StreamWriter writer = new StreamWriter(stream, Utf8NoBom, WriterBufferBytes)) {
+                    writer.Write(contents);
+                }
+            });
+        }
+
+        /// <summary>
+        /// The shared body: clear any stale temporary file, open one beside the destination, let the caller
+        /// fill it, then rename it over the destination.
+        ///
+        /// One closure allocation per call, which is the cost of not having this written out twice. It is a
+        /// single delegate on a path that already does file I/O, so it is nowhere near the allocation problem
+        /// the class exists to solve.
+        /// </summary>
+        private static DateTime WriteThrough(string path, Action<FileStream> emit) {
             string tmp = path + TempSuffix;
             if (File.Exists(tmp)) { File.Delete(tmp); } // a previous attempt that never got to publish
 
-            using (FileStream stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, StreamBufferBytes))
-            using (StreamWriter writer = new StreamWriter(stream, Utf8NoBom, WriterBufferBytes)) {
-                serializer.Serialize(writer, graph);
+            using (FileStream stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, StreamBufferBytes)) {
+                emit(stream);
             }
 
             Publish(tmp, path);

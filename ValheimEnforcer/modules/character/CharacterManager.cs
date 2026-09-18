@@ -61,6 +61,8 @@ namespace ValheimEnforcer.modules.character {
             ServerCharacter = ServerCharacterState.Unknown;
             JoinValidationPending = false;
             MapExploration.CancelPending();
+            MapSync.CancelPending();
+            MapSync.ResetSession();
             // Invalidates any JoinGate coroutine still running from the session being torn down. Coroutines
             // live on a DontDestroyOnLoad object, so nothing else stops one - and a leftover coroutine would
             // otherwise clear the NEXT session's pending flag, or run a duplicate validation against a
@@ -305,6 +307,7 @@ namespace ValheimEnforcer.modules.character {
                     ConfiscatedItems = null,
                     LastDisconnect = lastDisconnect
                 };
+                savableChar.Progress = ProgressionSync.Capture(__instance, null);
                 // Add all of the players current items
                 foreach (ItemDrop.ItemData item in __instance.GetInventory().GetAllItems().ToList()) {
                     savableChar.AddItemToPlayerItems(item);
@@ -331,6 +334,7 @@ namespace ValheimEnforcer.modules.character {
                 savableChar.SkillLevels = __instance.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
                 savableChar.GuardianPower = ForsakenPower.Capture(__instance);
                 savableChar.Foods = FoodSync.Capture(__instance);
+                savableChar.Progress = ProgressionSync.Capture(__instance, savableChar.Progress);
                 Logger.LogDebug($"Updated player skills for {PlayerName} with ID {playerID}.");
                 if (ValConfig.PreventExternalCustomDataChanges.Value) {
                     savableChar.PlayerCustomData = CompatCustomData.SnapshotForTracking(__instance.m_customData);
@@ -363,6 +367,11 @@ namespace ValheimEnforcer.modules.character {
             }
 
             ValConfig.WritePlayerCharacterToSave(playerID, savableChar);
+
+            // The map rides its own channel, so it is offered here rather than being part of the payload
+            // below. A logout forces past the cadence but still not past the unchanged check, so quitting
+            // twice in a row does not send the same eight-megabyte package twice.
+            MapSync.SendToServer(force: LogoutInProgress);
 
             ZNetPeer serverPeer = ZNet.instance?.GetServerPeer();
             if (serverPeer != null) {
@@ -420,6 +429,9 @@ namespace ValheimEnforcer.modules.character {
                 MapExploration.ResetForNewCharacter(PlayerName);
                 // Same reasoning, and after BuildNewCharacter on purpose: rediscovery starts from the items it kept.
                 KnownRecipes.ResetForNewCharacter(player, PlayerName);
+                // And the statistics, which are neither in the character record nor cleared by either of the
+                // two above. Same "only on a definite answer" rule - zeroed counters cannot be given back.
+                ProgressionSync.ResetForNewCharacter(PlayerName);
             }
 
             // Base enforcement runs on every join. On a *dirty* reconnect the server save can be up to one
@@ -492,7 +504,19 @@ namespace ValheimEnforcer.modules.character {
             if (!isNewCharacter) {
                 ForsakenPower.RestoreOnJoin(player, savableChar);
                 FoodSync.RestoreOnJoin(player, savableChar);
+                // Known items, trophies, statistics and spawn point. Apply first and clamp second, and the
+                // two together are the overwrite: Apply puts back everything the server holds, the clamp
+                // removes anything the live profile has above it. A new character has nothing stored to
+                // restore from, and BuildNewCharacter has already decided what it keeps.
+                ProgressionSync.Apply(savableChar.Progress, player, PlayerName);
+                ProgressionSync.ClampStats(savableChar.Progress, PlayerName);
             }
+
+            // The map is asked for rather than restored from the record: it is far too large to ride the
+            // character payload, so it travels on a channel of its own and arrives when it arrives. Asked for
+            // on a new character too - the answer is then an explicit "none held", which is what tells a
+            // client running a stale local map for this world to stop trusting it.
+            MapSync.RequestFromServer();
 
             // Custom data is decided twice, and this is the second time. The first is the Player.Load postfix
             // (CharacterPatches.LoadPlayerCustomData), which runs inside Game.SpawnPlayer - before this - and so
@@ -566,6 +590,7 @@ namespace ValheimEnforcer.modules.character {
 
             ForsakenPower.ApplyRecord(player, sanitized, "Server first-save enforcement");
             FoodSync.ApplyRecord(player, sanitized, "Server first-save enforcement");
+            ProgressionSync.Apply(sanitized.Progress, player, sanitized.Name);
 
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
                 player.m_customData = CompatCustomData.ApplyToPlayer(sanitized.PlayerCustomData, player.m_customData);
@@ -622,9 +647,19 @@ namespace ValheimEnforcer.modules.character {
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
                 character.PlayerCustomData = CompatCustomData.SnapshotForTracking(player.m_customData);
             }
+            // Captured before the rules run, for the same reason everything else here is: the record is built
+            // from the live player and then sanitised, so the same NewCharacterRules code decides what a new
+            // character keeps on both sides.
+            character.Progress = ProgressionSync.Capture(player, null);
 
             NewCharacterRules.Policy policy = NewCharacterRules.Current();
             NewCharacterRules.Result result = NewCharacterRules.Apply(character, policy, record: true);
+            // The record now holds the loadout; put the same thing in the hands of the player standing here.
+            // Both sides run the same decision, as with every other join rule - the difference is only that
+            // one has an inventory to put items into and the other has a file.
+            if (policy.Loadout != null) {
+                StarterLoadouts.ApplyToPlayer(player, policy.Loadout, playerName);
+            }
             if (result.Changed) {
                 Logger.LogInfo($"New character rules applied to {playerName}: {result.Describe()}");
             }

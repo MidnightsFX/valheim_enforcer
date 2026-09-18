@@ -20,6 +20,14 @@ namespace ValheimEnforcer.common {
         // swallows that exception, which would silently skip mod validation entirely. Ignoring unknown keys
         // degrades to "validate what I understand" instead.
         public static IDeserializer yamldeserializer = new DeserializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).IgnoreUnmatchedProperties().Build();
+        // The same reader, plus duplicate key checking, for files this machine's admin wrote by hand.
+        //
+        // A repeated key is silently last-wins by default. Mods.yaml writes its empty lists at the very bottom
+        // of the file, so an admin who adds an "optionalMods:" block higher up has it overridden by the
+        // generated one below with no diagnostic of any kind - and then written back out empty, which is the
+        // data loss this is here to surface. Deliberately NOT used on the handshake path: a hostile peer must
+        // not gain a new way to make Deserialize throw, where ZRpc would swallow it and skip mod validation.
+        public static IDeserializer yamlconfigdeserializer = new DeserializerBuilder().WithNamingConvention(CamelCaseNamingConvention.Instance).IgnoreUnmatchedProperties().WithDuplicateKeyChecking().Build();
         // DisableAliases is required, not cosmetic. YamlDotNet's anchor assigner keys objects by Equals/GetHashCode
         // rather than by reference, so once PackedItem gained value equality two *distinct* items that compare
         // equal would be emitted as one anchor plus an alias - and because durability, grid position, equipped
@@ -58,8 +66,28 @@ namespace ValheimEnforcer.common {
             public string Name { get; set; }
             [DefaultValue(false)]
             public bool EnforceVersion { get; set; }
-            [DefaultValue("Minor")]
-            public string VersionStrictness { get; set; } = "Minor";
+
+            /// <summary>
+            /// Admin authored: keeps this entry out of the reach of RemoveUnloadedModsFromRequired, so a mod
+            /// required of clients but not run by the server itself survives a restart.
+            ///
+            /// The escape hatch for the case that setting's own description warns about - a client-side mod you
+            /// require by hand, typically one pinned with a thunderstorePackage - without having to turn the
+            /// whole cleanup off for every other mod. Defaults false, so it does nothing until an admin sets it.
+            ///
+            /// Only requiredMods is ever pruned, so this field is meaningless on the other three lists. It is on
+            /// Mod rather than on a wrapper because the lists all hold the same type, and a field that reads as
+            /// "do not delete my line" is worth having available wherever someone thinks to type it.
+            /// </summary>
+            [DefaultValue(false)]
+            public bool KeepWhenUnloaded { get; set; }
+
+            // NOTE: a VersionStrictness field lived here and was read by nothing at all - not one call site in
+            // the codebase. An admin who set it got it serialized straight back and silently ignored, which is
+            // worse than not offering it. Removed rather than documented; IgnoreUnmatchedProperties means a
+            // "versionStrictness:" line left in an existing file is ignored rather than throwing, and it
+            // disappears on the next rewrite. If per-part version comparison is wanted, it wants implementing
+            // against EnforceVersion, not resurrecting as another inert property.
 
             // ---- File verification ------------------------------------------------------------------------
             // Every field below defaults to null, so with OmitDefaults a mod that uses none of them serializes
@@ -262,15 +290,73 @@ namespace ValheimEnforcer.common {
                 return package;
             }
 
+            /// <summary>
+            /// The single place a Mods object arriving from outside this process is made safe to use.
+            ///
+            /// Every list here can come back null, and not only from a malformed file. An absent key
+            /// deserializes to null rather than throwing (IgnoreUnmatchedProperties, and a payload from a build
+            /// that predates a list simply does not carry it), and - the one that actually bit - a key written
+            /// with no value at all does too. YamlDotNet's NullNodeDeserializer runs before the object one, so
+            /// "optionalMods:" on a line by itself does not leave the property at its field initializer, it
+            /// OVERWRITES it with null. An admin who deleted the "{}" intending to type entries underneath got
+            /// a NullReferenceException out of the middle of startup and silently lost mod enforcement for the
+            /// session.
+            ///
+            /// Null entry VALUES are filled in rather than dropped. A bare "com.example.Mod:" under a list is an
+            /// admin listing a mod they have not given any options to yet; an empty Mod reads as "this mod, any
+            /// version, no file check", which is what they meant. Dropping the key instead would delete their
+            /// line from the file on the next rewrite, which is the whole bug class this work exists to end.
+            /// </summary>
+            /// <param name="origin">
+            /// Names the source in the log, e.g. "Mods.yaml". Null on the wire path, which reports at Debug
+            /// instead: a peer must not be able to write lines into the server log by sending a payload full of
+            /// empty entries.
+            /// </param>
+            internal static Mods Normalized(Mods mods, string origin = null) {
+                // Not merely defensive: an empty or whitespace-only handshake string deserializes to null
+                // WITHOUT throwing, and FromZPackage used to dereference the result immediately.
+                if (mods == null) { return new Mods(); }
+
+                int filled = 0;
+                mods.ActiveMods = NormalizeList(mods.ActiveMods, ref filled, () => new Mod());
+                mods.RequiredMods = NormalizeList(mods.RequiredMods, ref filled, () => new Mod());
+                mods.OptionalMods = NormalizeList(mods.OptionalMods, ref filled, () => new Mod());
+                mods.AdminOnlyMods = NormalizeList(mods.AdminOnlyMods, ref filled, () => new Mod());
+                mods.ServerOnlyMods = NormalizeList(mods.ServerOnlyMods, ref filled, () => new Mod());
+                mods.ActivePatchers = NormalizeList(mods.ActivePatchers, ref filled, () => new PatcherEntry());
+                mods.AllowedPatchers = NormalizeList(mods.AllowedPatchers, ref filled, () => new PatcherEntry());
+
+                if (filled > 0) {
+                    string message = $"Filled in {filled} entry/entries written with no settings under them. They are treated as listing the mod with no options set.";
+                    if (string.IsNullOrEmpty(origin)) { Logger.LogDebug(message); } else { Logger.LogInfo($"{origin}: {message}"); }
+                }
+                return mods;
+            }
+
+            /// <summary>One list: an empty dictionary in place of null, and an empty entry in place of a null value.</summary>
+            private static Dictionary<string, T> NormalizeList<T>(Dictionary<string, T> list, ref int filled, Func<T> empty) where T : class {
+                if (list == null) { return new Dictionary<string, T>(); }
+
+                // Collected before mutating: assigning into a dictionary while enumerating it throws.
+                List<string> blank = null;
+                foreach (KeyValuePair<string, T> entry in list) {
+                    if (entry.Value != null) { continue; }
+                    if (blank == null) { blank = new List<string>(); }
+                    blank.Add(entry.Key);
+                }
+                if (blank == null) { return list; }
+
+                foreach (string key in blank) {
+                    list[key] = empty();
+                    filled++;
+                }
+                return list;
+            }
+
             public Mods FromZPackage(ZPackage incoming) {
-                Mods mods = DataObjects.yamldeserializer.Deserialize<Mods>(incoming.ReadString());
                 // Normalised on `mods` and not on `this`, because `mods` is what every caller uses - they all
-                // go through `new Mods().FromZPackage(pkg)` and keep the return value. A payload from a build
-                // that predates patcher reporting carries neither key, and IgnoreUnmatchedProperties means an
-                // absent key deserializes to null rather than throwing. Empty reads correctly here: a client
-                // that says nothing about patchers is a client reporting that it has none.
-                mods.ActivePatchers = mods.ActivePatchers ?? new Dictionary<string, PatcherEntry>();
-                mods.AllowedPatchers = mods.AllowedPatchers ?? new Dictionary<string, PatcherEntry>();
+                // go through `new Mods().FromZPackage(pkg)` and keep the return value.
+                Mods mods = Normalized(DataObjects.yamldeserializer.Deserialize<Mods>(incoming.ReadString()));
 
                 ActiveMods = mods.ActiveMods;
                 RequiredMods = mods.RequiredMods;
@@ -829,6 +915,184 @@ namespace ValheimEnforcer.common {
             public string Id { get; set; }
         }
 
+        /// <summary>
+        /// One difficulty bucket of vanilla's player statistics - the numbers the post-1.0 achievement system
+        /// is built on (PlayerProfile.PlayerStats).
+        ///
+        /// Everything is keyed by NAME and stored sparsely, never by index and never densely. Vanilla writes
+        /// these into the .fch as a positional float[205] in PlayerStatType order, so an index here would be
+        /// silently wrong the first time Iron Gate inserts an enum member - and the stat that moved would be
+        /// restored onto the wrong counter rather than failing loudly. A name that no longer exists is simply
+        /// skipped on the way back in. Sparse because 205 counters are mostly zero for any real character, and
+        /// this rides every full character save.
+        /// </summary>
+        /// <summary>One item a starter loadout grants.</summary>
+        public class LoadoutItem {
+            /// <summary>The prefab name, as it appears in the game's object database - the same spelling
+            /// NewCharacterStartingItems takes.</summary>
+            public string prefabName { get; set; }
+            [DefaultValue(1)]
+            public int stack { get; set; } = 1;
+            /// <summary>Upgrade level. 1 is an unupgraded item; a loadout may grant more, unlike the
+            /// starting-item allowlist, because this is the server handing the item over rather than a
+            /// character turning up with it.</summary>
+            [DefaultValue(1)]
+            public int quality { get; set; } = 1;
+            [DefaultValue(0)]
+            public int variant { get; set; }
+            /// <summary>Whether the item arrives equipped. Ignored for anything that cannot be.</summary>
+            [DefaultValue(false)]
+            public bool equipped { get; set; }
+        }
+
+        /// <summary>
+        /// A starting kit for a character this server has never seen.
+        ///
+        /// Granted AFTER the new-character rules have stripped what the character arrived with, which is what
+        /// makes the two coexist without a special case: the strip decides what a character may keep, and this
+        /// decides what the server hands them, so an item in a loadout never has to be in
+        /// NewCharacterStartingItems as well.
+        /// </summary>
+        public class Loadout {
+            /// <summary>Free text, for the admin reading the file and for enforcer-loadout-list.</summary>
+            [DefaultValue(null)]
+            public string description { get; set; }
+            [DefaultValue(null)]
+            public List<LoadoutItem> items { get; set; }
+            /// <summary>Skill levels to start at. Only ever raises: a level already above what the loadout
+            /// names is left alone, so a kit cannot be used to take something away.</summary>
+            [DefaultValue(null)]
+            public Dictionary<Skills.SkillType, float> skills { get; set; }
+            /// <summary>Item shared-names ("$item_...") to count as already discovered. Materials rather than
+            /// recipes is usually what is wanted - vanilla derives most recipes from the materials and
+            /// stations a character knows. Only used when SyncKnownItems is on, because that is what gives
+            /// the server somewhere to record them.</summary>
+            [DefaultValue(null)]
+            public List<string> knownMaterials { get; set; }
+            [DefaultValue(null)]
+            public List<string> knownRecipes { get; set; }
+            /// <summary>Where the character first wakes up. Only used when SyncSpawnPoint is on. Set
+            /// haveSpawnPoint to false - the default - to leave the world's own start location alone.</summary>
+            [DefaultValue(false)]
+            public bool haveSpawnPoint { get; set; }
+            [DefaultValue(0f)]
+            public float spawnX { get; set; }
+            [DefaultValue(0f)]
+            public float spawnY { get; set; }
+            [DefaultValue(0f)]
+            public float spawnZ { get; set; }
+        }
+
+        /// <summary>The whole of Loadouts.yaml.</summary>
+        public class Loadouts {
+            public Dictionary<string, Loadout> loadouts { get; set; } = new Dictionary<string, Loadout>();
+        }
+
+        public class StatBucket {
+            /// <summary>PlayerStatType name -> value. Zeros omitted.</summary>
+            [DefaultValue(null)]
+            public Dictionary<string, float> Stats { get; set; }
+            /// <summary>World name -> seconds played there.</summary>
+            [DefaultValue(null)]
+            public Dictionary<string, float> KnownWorlds { get; set; }
+            /// <summary>"globalkey value" -> seconds since it was set.</summary>
+            [DefaultValue(null)]
+            public Dictionary<string, float> KnownWorldKeys { get; set; }
+            [DefaultValue(null)]
+            public Dictionary<string, float> KnownCommands { get; set; }
+            /// <summary>KillModifiers name -> (creature name -> count). Vanilla holds five of these in an array
+            /// indexed by the enum; keyed by name here for the same reason the stats are.</summary>
+            [DefaultValue(null)]
+            public Dictionary<string, Dictionary<string, float>> EnemyStats { get; set; }
+            [DefaultValue(null)]
+            public Dictionary<string, float> ItemPickup { get; set; }
+            [DefaultValue(null)]
+            public Dictionary<string, float> ItemCraft { get; set; }
+            [DefaultValue(null)]
+            public Dictionary<string, float> Pickable { get; set; }
+            [DefaultValue(null)]
+            public Dictionary<string, float> FoodEaten { get; set; }
+            [DefaultValue(null)]
+            public Dictionary<string, float> PiecesPlaced { get; set; }
+        }
+
+        /// <summary>
+        /// Where a character respawns on this world. Vanilla keeps these per world UID inside the player
+        /// profile, which is why they are lost with a corrupted local save.
+        ///
+        /// Stored as flat floats rather than a Vector3: the shared serializer has no converter for Unity types,
+        /// and a Vector3 round-trips through it as an object carrying every derived property Unity puts on the
+        /// struct (normalized, magnitude, sqrMagnitude...), which is both enormous and lossy.
+        ///
+        /// The logout point and death point are deliberately NOT here. Restoring a stale logout point on join
+        /// would silently relocate a player who has since moved, which is the opposite of what a progression
+        /// restore is for; they belong to crash recovery, where putting somebody back is the whole point.
+        /// </summary>
+        public class SpawnPoints {
+            /// <summary>False means "no bed claimed here", which is a real answer and not the same as untracked -
+            /// untracked is the whole <see cref="Progression.Spawn"/> being null.</summary>
+            public bool HaveCustomSpawn { get; set; }
+            public float SpawnX { get; set; }
+            public float SpawnY { get; set; }
+            public float SpawnZ { get; set; }
+            public float HomeX { get; set; }
+            public float HomeY { get; set; }
+            public float HomeZ { get; set; }
+        }
+
+        /// <summary>
+        /// The half of a character's progress that lives in the player profile rather than in the character
+        /// itself, and that the server had no copy of until now: what they have explored, what they know how to
+        /// make, what they have killed, and where they wake up.
+        ///
+        /// Every field is null when untracked, on the same reasoning as <see cref="Character.GuardianPower"/>
+        /// and <see cref="Character.Foods"/>: a save written while a sync setting was off must not read back as
+        /// "this character knows nothing", or turning the setting on would wipe everyone once. Empty and null
+        /// are different answers throughout.
+        ///
+        /// The map is not here. It is 8.4 MB uncompressed per world and tens of kilobytes to a megabyte
+        /// compressed, so it lives beside the save as an opaque .map file and only its hash is recorded here -
+        /// see modules.character.MapSync.
+        /// </summary>
+        public class Progression {
+            /// <summary>Item shared-names and Piece.m_name values. Largely derived by vanilla from materials and
+            /// stations on every inventory change, so it is restored alongside them rather than instead.</summary>
+            [DefaultValue(null)]
+            public List<string> KnownRecipes { get; set; }
+            /// <summary>Item shared-names ("$item_..."), a different key space from <see cref="Trophies"/>.</summary>
+            [DefaultValue(null)]
+            public List<string> KnownMaterials { get; set; }
+            /// <summary>Crafting station name -> highest level seen.</summary>
+            [DefaultValue(null)]
+            public Dictionary<string, int> KnownStations { get; set; }
+            /// <summary>PREFAB names. Vanilla stores trophies by prefab while recipes and materials are
+            /// localization tokens; do not merge the two.</summary>
+            [DefaultValue(null)]
+            public List<string> Trophies { get; set; }
+            /// <summary>BiomeSector.GetBiomeName() strings.</summary>
+            [DefaultValue(null)]
+            public List<string> KnownBiomes { get; set; }
+            /// <summary>Runestone label -> text. The largest of the string sets on a well-travelled character.</summary>
+            [DefaultValue(null)]
+            public Dictionary<string, string> KnownTexts { get; set; }
+            /// <summary>"key value" pairs, e.g. "invrows 4" - vanilla uses these for permanent unlocks.</summary>
+            [DefaultValue(null)]
+            public List<string> Uniques { get; set; }
+            /// <summary>Tutorials seen, which is also where vanilla files discovered location names.</summary>
+            [DefaultValue(null)]
+            public List<string> ShownTutorials { get; set; }
+            /// <summary>DifficultyRequirement name -> that bucket's counters.</summary>
+            [DefaultValue(null)]
+            public Dictionary<string, StatBucket> Stats { get; set; }
+            [DefaultValue(null)]
+            public SpawnPoints Spawn { get; set; }
+            /// <summary>Lowercase hex SHA256 of the map blob in the .map file beside this save, or null when
+            /// none is stored. The client keeps the last hash it sent and skips rebuilding an 8.4 MB package
+            /// when nothing has been explored since.</summary>
+            [DefaultValue(null)]
+            public string MapHash { get; set; }
+        }
+
         public class Character {
             public string Name { get; set; }
             public string HostID { get; set; }
@@ -876,6 +1140,22 @@ namespace ValheimEnforcer.common {
             /// </summary>
             [DefaultValue(null)]
             public Dictionary<Skills.SkillType, float> PendingSkillRestores { get; set; }
+            /// <summary>
+            /// Map, known items, statistics and spawn point - the progress that lives in the player profile.
+            /// Null when nothing about it is being synced, which is the default. See <see cref="Progression"/>.
+            /// </summary>
+            [DefaultValue(null)]
+            public Progression Progress { get; set; }
+            /// <summary>
+            /// Bumped by the server on every save it accepts for this character, and never by a client.
+            ///
+            /// It is the only thing that can order two copies of one character, which is what crash recovery
+            /// needs: a snapshot a client hands back is adopted only when its sequence is strictly greater than
+            /// the one the server holds, so a replayed old snapshot is refused rather than rolling somebody
+            /// backwards. Populated from the moment progression sync ships so that recovery, when it arrives,
+            /// finds a number already counting rather than every character sitting at zero.
+            /// </summary>
+            public long SaveSequence { get; set; }
 
             public bool RemoveFromPlayerItems(PackedItem packedItem) {
                 bool removed = false;

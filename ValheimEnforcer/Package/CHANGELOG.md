@@ -1,3 +1,70 @@
+**0.28.0**
+---
+```
+- Fixes Mods.yaml losing optionalMods, adminOnlyMods and serverOnlyMods on a restart.
+    - A file that fails to parse is now copied to Mods.yaml.unreadable-<date>-<time>.bak before anything is
+      written, and the error names the line and column and what did load. Previously it logged "fix the file and
+      restart" and then published an empty file over the top of it, which made that impossible.
+    - A duplicate top-level key is now reported with its line number instead of being silently resolved
+      last-wins, which quietly discarded whichever copy came first and then wrote the loss to disk.
+- Fixes a NullReferenceException on every connecting client when any mod entry was written with no settings under
+  it, and the same entry then being named twice in the rejection text. An entry with nothing under it now reads as
+  listing the mod with no options set, which is what it looks like it means.
+- Adds keepWhenUnloaded on a mod entry (default false): keeps a requiredMods entry out of the reach of
+  RemoveUnloadedModsFromRequired, for a mod required of clients that the server does not run itself. Corrects that
+  setting's description and the README, both of which said it was off by default when it has been on.
+- Removes the versionStrictness field, which was read by nothing. A versionStrictness line in an existing file is
+  ignored and disappears on the next rewrite.
+- Adds Starter Loadouts (Player Sync, EnableStarterLoadouts, default off): a kit of items, skill levels, known
+  materials and a spawn point handed to a character joining this server for the first time. The kits are written
+  in Loadouts.yaml beside the other config files, created with a commented example in it and re-read while the
+  server is running; DefaultStarterLoadout picks the one new characters get.
+    - Granted AFTER the new-character rules have stripped what the character arrived with, which is what keeps the
+      two from fighting: nothing in a loadout needs listing in NewCharacterStartingItems as well, and a loadout may
+      hand over an upgraded item even though the allowlist refuses one that turns up on its own.
+    - Skills are only ever raised, never lowered. Items arrive at full durability and are not marked cheated, so
+      they do not put a character out of the running for the game's own achievements.
+    - knownMaterials, knownRecipes and the spawn point need SyncKnownItems / SyncSpawnPoint, which are what give
+      the server somewhere to record them; enforcer-loadout-list says so against each line when they are off.
+    - A prefab name that does not exist is named in the log and skipped rather than failing the join, and a
+      Loadouts.yaml that will not parse keeps the kits already loaded rather than emptying them.
+    - Adds enforcer-loadout-list [name] and enforcer-loadout-apply <accountId> <characterName> <name> confirm, the
+      second for giving a kit to a character the server already has a save for.
+- Adds Emergency Crash Recovery (Crash Recovery, EnableCrashRecovery, default off): every few minutes each
+  connected player is handed a sealed snapshot of their own character. Server still verifies and wins if the
+  clients character is tampered with.
+    - CrashRecoveryAutoRestore (default on) is a separate switch from the master one, so snapshots can be kept and
+      distributed without the server ever acting on one unasked. CrashRecoveryPushIntervalMinutes (default 10)
+      bounds how much a crash can cost and is also the bandwidth knob. CrashRecoveryKeepBlobs (default 3) bounds
+      what a client keeps per world.
+    - Adds enforcer-recovery-status, enforcer-recovery-open, enforcer-recovery-close and
+      enforcer-recovery-key-rotate.
+    - It cannot help with a lost or corrupted LOCAL character file - the client cannot read its own snapshot 
+      which is what progression sync is for. This is exlusively to handle server-crash recovery.
+- Adds Save Archives (Backups, EnableSaveArchives, default off): rolling, compressed archives holding the world save
+  and the character saves from the same moment.
+    - An archive is only ever taken just after a world save FINISHES.
+    - SaveArchiveIntervalMinutes (default 120) is a minimum gap, not a schedule
+    - SaveArchiveKeepCount (default 5) and SaveArchiveMaxTotalMB (default 0, no ceiling) decide what is kept, 
+      oldest deleted first.
+    - SaveArchiveIncludeCharacters (default on), SaveArchiveIncludeConfig (default on), SaveArchiveCompression
+      (Fastest / Optimal / NoCompression) and SaveArchivePath (empty = BepInEx/config/ValheimEnforcer/Archives).
+    - Adds enforcer-archive-list, enforcer-archive-now [save] and enforcer-archive-prune
+    - This does drastically increase storage size of the world on disk.
+- Adds Server-Synced Progression (Player Sync, EnableProgressionSync, default off)
+    - SyncMapExploration (default off): Syncs the players map to the server
+    - SyncKnownItems (default off): recipes, build pieces, materials, crafting stations, biomes, runestone texts and
+      permanent unlocks.
+    - SyncTrophies (default off): Syncs trophy list
+    - SyncPlayerStats (default off): Syncs player statistics, these are also used for achievements
+    - SyncSpawnPoint (default off): the bed a character has claimed here, and the fallback point.
+    - NewCharacterClearPlayerStats (default off): a character joining for the first time gets their stats cleared
+    - MapSyncIntervalMinutes (Advanced, default 15): how often a client may upload its map. This is mildly expensive.
+    - Adds enforcer-progress-show <accountId> <characterName>, which reports what the server holds section by section
+    - Adds enforcer-progress-clear <accountId> <characterName> <map|items|stats|spawn|all> allows deleting saved character progress
+- Slight memory optimization when Gzipping contents such as large save data
+```
+
 **0.27.1**
 ---
 ```

@@ -29,6 +29,8 @@ Server saved character progression lock. All of the following features are confi
 - Optionally gives a character joining for the first time a blank map of the world, so a map uncovered in a copy of it elsewhere does not come with them
 - Optionally holds each character's eaten food to what they last had on this server, and clears it on a character's first join
 - Clears the recipes a character joining for the first time discovered elsewhere, so they start crafting and building from what they find here
+- Optionally holds a character's map, known recipes, trophies, statistics and spawn point on the server too, so they cannot be edited in offline and are not lost with a corrupted character file ([Server-Synced Progression](#server-synced-progression))
+- Optionally hands a character joining for the first time a configurable starter kit - items, skill levels and a spawn point ([Starter Loadouts](#starter-loadouts))
 - Optionally limits each account to a single character, with an exemption list ([One Character Per Account](#one-character-per-account))
 - Imports existing characters from ServerCharacters so players migrate without losing anything ([Migrating from ServerCharacters](#migrating-from-servercharacters))
 
@@ -42,6 +44,16 @@ Mod Enforcement. All of the following features are configurable (server authorat
 - Optionally exempts admins from the whole mod gate, so a new mod can be tested against the live server without editing the list first ([Admin Bypass](#admin-bypass))
 
 Nothing needs configuring for the default behaviour — every mod the server loads becomes a required mod. [Mod List](#mod-list) covers the file for when you want something else.
+
+Save archives. Off by default.
+- Rolling, compressed archives of the world save and the character saves from the same moment
+- The game's own backups keep two uncompressed copies of the world only, and none of your players' characters
+- Configurable history, size ceiling and destination ([Save Archives](#save-archives))
+
+Emergency crash recovery. Off by default.
+- Each player holds a sealed, signed snapshot of their own character that only the server can open
+- After an unclean shutdown the server asks for them back and adopts the ones that verify and are newer
+- Narrow window, every restore logged, and an honest note about the duplication it can cause ([Emergency Crash Recovery](#emergency-crash-recovery))
 
 Player activity audit. Off by default; the evidence layer under everything above.
 - What a player is carrying, what they gained and lost, and what they took from or put into chests
@@ -95,9 +107,21 @@ requiredMods:
 | `version` | The version to compare against, kept current for you |
 | `name` | Human-readable label, for logs and the disconnect screen |
 | `enforceVersion` | When `true`, a client's version must match exactly. Defaults to `false` |
+| `keepWhenUnloaded` | When `true`, this entry is never dropped just because the server does not load the mod. Defaults to `false` — see [`RemoveUnloadedModsFromRequired`](#settings) |
 | `acceptedHashes`, `hashSource`, `thunderstorePackage`, `hashEnforcement` | File verification — see [Mod File Verification](#mod-file-verification) |
 
+The same table is written into the top of `Mods.yaml` and `ServerActiveMods.yaml`, so you do not need this page open to edit the file.
+
 Version comparison is an exact string match, so `1.0` and `1.0.0` count as a mismatch. Fields sitting at their default are not written out, which is why most entries are three lines. If you find a `versionStrictness` field in an older file, it does nothing and can be deleted.
+
+An empty list is written as a bare key with nothing under it:
+
+```yaml
+optionalMods:
+adminOnlyMods:
+```
+
+Add entries by indenting them two spaces beneath. Older versions wrote `optionalMods: {}` instead, and adding entries under *that* is not valid YAML — if you have a file still written that way, delete the `{}` first.
 
 #### What happens when someone connects
 
@@ -116,11 +140,12 @@ The client runs the same comparison against the server's list and shows the resu
 | --- | --- |
 | `ServerActiveMods.yaml` deleted and rewritten from the plugins actually loaded | always |
 | Any loaded plugin not already on a list is added to `requiredMods`, with `enforceVersion: false` | `AutoAddModsToRequired` *(on)* |
-| Any `requiredMods` entry for a mod the server does not have loaded is removed | `RemoveUnloadedModsFromRequired` *(off)* |
+| Any `requiredMods` entry for a mod the server does not have loaded is removed, unless it is marked `keepWhenUnloaded` | `RemoveUnloadedModsFromRequired` *(on)* |
 | A mod's `version` is corrected in whichever list holds it when you update the mod | always |
 | The SHA256 of every plugin the server loads is recorded as its accepted hash | `RecordHashesForLoadedMods` *(on)* |
 | Mods pinned with a `thunderstorePackage` are downloaded and hashed | `ResolveThunderstoreHashes` *(off)* |
 | The file is rewritten with all of the above | `UpdateLoadedModsOnStartup` *(on)* |
+| The previous file is copied to `Mods.yaml.bak` before each rewrite | always |
 | Edits are picked up without a restart | `ConfigPollIntervalSeconds` *(30)* |
 
 Updating a mod on the server therefore needs no edit here at all — the version follows it, in whichever list you put it in.
@@ -129,7 +154,19 @@ Updating a mod on the server therefore needs no edit here at all — the version
 
 - Membership of `optionalMods`, `adminOnlyMods` and `serverOnlyMods`. Nothing is ever added to these automatically; move an entry out of `requiredMods` by hand.
 - `enforceVersion: true`. Auto-added mods are always written with it off, so a client that is a patch version behind is not locked out of a server that never asked for exact versions.
+- `keepWhenUnloaded: true`, on any `requiredMods` entry for a mod the server does not run itself.
 - `thunderstorePackage`, `hashEnforcement`, and any `Manual` hash.
+
+#### If the file will not parse
+
+`Mods.yaml` is rewritten on startup, so a file the server cannot read is a file whose contents are at risk. Two things protect it:
+
+- Before every rewrite, the previous file is copied to `Mods.yaml.bak`. Once per launch, so a restart cannot overwrite the backup with the file it just generated.
+- If the file fails to parse, it is copied to `Mods.yaml.unreadable-<date>-<time>.bak` *first*, and the server logs an error naming the line and column that broke, along with what it managed to load. It then writes a fresh file and carries on, so the server still starts.
+
+If your lists come back empty after a restart, look for that error in the log and for an `unreadable` file beside `Mods.yaml` — your entries are in it.
+
+You do not need to restart to fix it. The file is re-read within `ConfigPollIntervalSeconds` of being saved, and a duplicate top-level key — the same list written twice, which used to be silently discarded — is now reported rather than quietly dropping whichever copy came first.
 
 #### Settings
 
@@ -138,7 +175,7 @@ All of these are server-side and synced to admins, so an admin can change them i
 | Setting | Section | Default | Effect |
 | --- | --- | --- | --- |
 | `AutoAddModsToRequired` | Mods | `true` | Adds any loaded plugin that is on no list to `requiredMods`. Turn it off to curate the file by hand — mods you have not listed are then rejected rather than adopted |
-| `RemoveUnloadedModsFromRequired` | Mods | `false` | Removes `requiredMods` entries for mods the server does not have loaded, so a mod you uninstall from the server stops being demanded of clients. Only `requiredMods` is touched. Leave it off if you require a mod the server does not run itself |
+| `RemoveUnloadedModsFromRequired` | Mods | `true` | Removes `requiredMods` entries for mods the server does not have loaded, so a mod you uninstall from the server stops being demanded of clients. Only `requiredMods` is touched. Put `keepWhenUnloaded: true` on any entry you require but do not run yourself, rather than turning this off for everything |
 | `UpdateLoadedModsOnStartup` | Mods | `true` | Writes version corrections, auto-added mods, removed mods and recorded hashes back to the file. With it off, all of that still applies for the session but nothing is saved |
 | `HashEnforcement` | Mods | `WhenKnown` | File verification mode — see [Mod File Verification](#mod-file-verification) |
 | `RecordHashesForLoadedMods` | Mods | `true` | Records the hash of every plugin this machine loads. Needs `UpdateLoadedModsOnStartup` to reach disk |
@@ -159,9 +196,9 @@ All of these are server-side and synced to admins, so an admin can change them i
 
 **Stop a server-side mod being demanded of clients.** Move it to `serverOnlyMods`. Note that this also means no one may connect *with* it.
 
-**Stop requiring a mod you removed from the server.** Delete its entry from `requiredMods`, or turn on `RemoveUnloadedModsFromRequired` and every mod the server no longer loads is dropped from that list on the next start.
+**Stop requiring a mod you removed from the server.** Delete its entry from `requiredMods`, or leave `RemoveUnloadedModsFromRequired` on and every mod the server no longer loads is dropped from that list on the next start, apart from any marked `keepWhenUnloaded`.
 
-**Require a mod the server does not run.** Add it to `requiredMods` by hand with its GUID, version and name, and keep `RemoveUnloadedModsFromRequired` off — it would remove the entry on the next start. To verify the file as well, give it a `thunderstorePackage` and turn on `ResolveThunderstoreHashes`.
+**Require a mod the server does not run.** Add it to `requiredMods` by hand with its GUID, version and name, and give it `keepWhenUnloaded: true` — without that, `RemoveUnloadedModsFromRequired` drops the entry on the next start. To verify the file as well, give it a `thunderstorePackage` and turn on `ResolveThunderstoreHashes`.
 
 ### Mod File Verification
 
@@ -541,6 +578,57 @@ One file per UTC day in `BepInEx/config/ValheimEnforcer/Audit/`, one event per l
 - **There is no history before the server started recording.** Nothing is backfilled, so a day you spent with the audit off stays a blank. The whole value of this feature is that it is already running when you find out you needed it, which is why it does not wait to be asked.
 - **Turning it off mid-session works; turning it back on needs a restart.** Switching it off takes effect on the next packet. Switching it on again starts the item and damage halves immediately, but not the container half — that one has to watch every object a client replicates, so its hook is only installed at startup and is left off entirely when the audit was off at boot. The server log says so if it happens.
 
+### Server-Synced Progression
+
+Off by default. Items and skills have always been held server-side; this extends that to the rest of a character's progress — the part Valheim keeps in the player profile rather than in anything the server ever sees:
+
+- the **map** of this world: explored ground, what a cartography table revealed, and saved pins
+- **known recipes**, build pieces, materials, crafting stations, discovered biomes, runestone texts and permanent unlocks
+- **trophies**
+- **statistics** — the counters behind the in-game Statistics panel and the post-1.0 achievement system
+- the **spawn point**, meaning the bed a character has claimed here
+
+Two problems, one answer. A player can edit any of it offline and arrive with a fully uncovered map or every recipe already known, and there is no way to check that without a copy to check against. And a corrupted local character file loses all of it for good — the one kind of loss the mod could previously do nothing about, because it never held the data.
+
+With `EnableProgressionSync` on and at least one `Sync*` setting beside it, the server keeps its own copy, hands it back on join, and **its copy is the one that counts**: anything above what the server has seen is replaced, and anything lost is restored. This is the same model `PlayerItems` and `SkillLevels` have always used.
+
+Turning a `Sync*` setting on **strips nobody**. A character saved before it was enabled has nothing recorded for that section, and "nothing recorded" is deliberately different from "knows nothing": their next join adopts what they arrive with, and they are tracked from then on.
+
+#### Settings
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `EnableProgressionSync` | `false` | Master switch. Everything below is inert until this is on |
+| `SyncMapExploration` | `false` | Map, cartography reveals and saved pins |
+| `SyncKnownItems` | `false` | Recipes, build pieces, materials, crafting stations, biomes, runestone texts, unlocks |
+| `SyncTrophies` | `false` | The trophy list, kept separate because vanilla files trophies by prefab and everything else by name |
+| `SyncPlayerStats` | `false` | The statistics counters |
+| `SyncSpawnPoint` | `false` | The claimed bed, and the point the game falls back to when it is gone |
+| `NewCharacterClearPlayerStats` | `false` | A character joining for the first time starts with zeroed statistics |
+| `MapSyncIntervalMinutes` | `15` | *(Advanced)* How often a client may upload its map |
+
+#### Commands
+
+- `enforcer-progress-show <accountId> <characterName>` — what the server holds, section by section. Reads only.
+- `enforcer-progress-clear <accountId> <characterName> <map|items|stats|spawn|all> confirm` — deletes part of it. There is no undo and no confiscation record: unlike an item, a forgotten recipe cannot be handed back.
+
+#### What this does and does not prove
+
+**Statistics are progress that survives a lost save, not a cheat-proof record.** The server restores them and refuses a counter reported above the value it holds, the same way `PreventExternalSkillRaises` handles a skill. It has no way to verify that any individual increment was earned honestly, and it never will — the increments happen on the client. Do not read "server-synced achievements" as "achievements are now cheat-proof".
+
+**Steam and Xbox achievement unlocks are not touched.** Valheim does not store them in the save at all; it hands them to the platform, which owns them per account. Only the statistics behind them are stored here.
+
+**Everything in this group is enforced on the client.** All of it hangs off a live `Player` and the local player profile, neither of which exists on a dedicated server, so unlike the item and skill rules there is no second copy running server-side to catch a modified client mid-session. What the server does have is the record, and it re-decides the first save of every session against it — so a client that skips the join-time reconciliation has its upload reconciled anyway.
+
+#### Things worth knowing
+
+- **The map is stored beside the save, not inside it.** A fully explored map is 8.4 MB before compression; compressed it is usually tens of kilobytes and can reach a megabyte. It lives at `Characters/<PlatformID>/<Name>.map` and costs that much disk per character per world.
+- **Uploads are paced.** Building the upload means rebuilding and compressing that 8.4 MB package on the player's own machine, so a client sends its map at most once every `MapSyncIntervalMinutes`, once more at logout, and not at all when nothing has been explored since the last one.
+- **Maps are not stored in `InternalStorageMode`.** That mode puts the character record in a ZDO string inside the world file, which is no place for a megabyte per player. The two together leave the map untracked and say so in the log; everything else in this group still works.
+- **A server that holds no map does not wipe yours.** The first time you switch `SyncMapExploration` on, the server holds nothing for anybody, and treating that as "you have explored nothing" would erase every connected player's map at once. Wiping a new character's map is a separate, narrower decision that `NewCharacterResetMapExploration` already owns.
+- **Known recipes are mostly derived.** Vanilla rediscovers a recipe the moment the player holds its materials and has seen its crafting station, so the materials and stations are what is really being held; the recipe list is rebuilt from them on arrival.
+- **`NewCharacterClearPlayerStats` cannot be undone**, and the counters it zeroes are per character rather than per world — so it discards a record of everything that character has done anywhere, not just here.
+
 ### One Character Per Account
 
 Off by default. Set `EnforceCharacterLimit` to `true` and an account may only join with a character this server already has a save for — anyone else is turned away at the connect handshake and told which character to come back as. Nothing about this is retroactive punishment: **every character an account already has stays playable**, so switching it on locks nobody out. It only stops the *next* new character.
@@ -568,6 +656,176 @@ Exemptions are deliberately independent of admin rights — an exempt account do
 - If the server cannot read its character folder at all, joins are **allowed** and a warning is logged. A disk problem should not lock out your playerbase.
 - On a player-hosted (listen) server the host never goes through the connect handshake, so the host's own account is not checked. Dedicated servers check everyone.
 - Enforcement is tied to the game's network version. If Valheim ships a new one, the rule stops applying until the mod is rebuilt against it — the check goes quiet rather than guessing at a changed wire format.
+
+### Starter Loadouts
+
+Off by default. A kit — items, skill levels, a head start on what they know, and where they wake up — handed to a character joining this server for the first time.
+
+Kits live in `BepInEx/config/ValheimEnforcer/Loadouts.yaml`, which is created with a commented example in it. `DefaultStarterLoadout` picks the one new characters get. The file is re-read while the server is running.
+
+```yaml
+loadouts:
+  starter:
+    description: A hood, a cloak and something to eat
+    items:
+      - prefabName: HelmetLeather
+        quality: 1
+        equipped: true
+      - prefabName: CapeDeerHide
+        equipped: true
+      - prefabName: CookedMeat
+        stack: 5
+    skills:
+      Run: 10
+      Swim: 10
+    knownMaterials:
+      - $item_wood
+      - $item_stone
+    haveSpawnPoint: false
+```
+
+#### How it fits with the new-character rules
+
+The kit is granted **after** the new-character rules have stripped whatever the character arrived carrying. That ordering is the whole of the interaction:
+
+- Nothing in a loadout needs listing in `NewCharacterStartingItems` as well. The allowlist decides what a character may *keep*; a loadout is what the server *hands over*, and the strip has already finished by then.
+- A loadout may grant an **upgraded** item even though the allowlist refuses one that turns up on its own — because the server is the one giving it.
+- Skills are only ever **raised**. A loadout that could lower one would be a second, quieter copy of `NewCharacterSetSkillsToZero`.
+
+Both sides run it: the server writes the kit into the stored record, and the client puts the same items in the player's hands. The same split every other join rule uses.
+
+#### Settings
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `EnableStarterLoadouts` | `false` | Master switch |
+| `DefaultStarterLoadout` | *(empty)* | Which loadout new characters get. Empty means none |
+
+#### Commands
+
+- `enforcer-loadout-list [name]` — the kits in the file, and which one is live. With a name, what is in it.
+- `enforcer-loadout-apply <accountId> <characterName> <name> confirm` — add a kit to a character the server already has a save for: a starter kit for somebody who joined before you set one up, or a replacement for a player who lost something.
+
+#### Things worth knowing
+
+- **`knownMaterials`, `knownRecipes` and the spawn point need progression sync.** They are only applied when `SyncKnownItems` / `SyncSpawnPoint` are on, because those are what give the server somewhere to record them. `enforcer-loadout-list <name>` says so against each line when they are off.
+- **A prefab name that does not exist is named in the log and skipped**, not a reason to refuse the join. A typo is the most likely thing to be wrong with a hand-written loadout.
+- **A `Loadouts.yaml` that will not parse keeps the previously loaded kits** rather than emptying them, and says so. Nothing in this file can make the server *less* strict, so there is no reason to fail closed.
+- Items are added at full durability and are not marked as cheated, so they do not put a character out of the running for the game's own achievements.
+
+### Save Archives
+
+Off by default. Set `EnableSaveArchives` to `true` and the server keeps a rolling history of compressed archives, each holding **the world save and the character saves from the same moment**.
+
+The game already rotates backups of its own — two of them, uncompressed, of the world only. What this adds is a longer history, compression, and the character store in the same archive. That last part is the point: every player's items, skills, confiscation record and synced progression live in `BepInEx/config/ValheimEnforcer/Characters/`, and none of it is in a vanilla backup. Restoring one of those puts the world back and leaves every character exactly as they were, which is its own kind of rollback.
+
+**Know the cost before switching it on.** A real world file reaches 200 MB. Vanilla's own rotation already keeps around a gigabyte beside it. Each archive here is another copy on top — compressed, but still measured in hundreds of megabytes. The defaults are deliberately conservative.
+
+#### When an archive is taken
+
+Only ever just after a world save **finishes**. `SaveArchiveIntervalMinutes` is a minimum gap rather than a schedule, so the real cadence is that interval rounded up to the next save.
+
+This matters more than it sounds. Valheim's `SaveWorld` returns as soon as it has *started* the save — the write happens on the game's own background thread afterwards — so anything that archived when a save was requested would be zipping a half-written world. Enforcer waits for that thread to finish before it reads a single file.
+
+The zip itself is built on a background thread, so compressing 200 MB never costs the server a frame.
+
+#### Settings
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `EnableSaveArchives` | `false` | Master switch. Everything below is inert until this is on |
+| `SaveArchiveIntervalMinutes` | `120` | Shortest gap between archives. Below the server's save interval means "every save" |
+| `SaveArchiveKeepCount` | `5` | How many to keep. Lowering it gives the disk back at the next archive, not one file per cycle |
+| `SaveArchiveMaxTotalMB` | `0` | Ceiling on all archives together, oldest deleted first. `0` means no ceiling |
+| `SaveArchiveIncludeCharacters` | `true` | Include the `Characters/` folder |
+| `SaveArchiveIncludeConfig` | `true` | Include this mod's `.cfg` and YAML files |
+| `SaveArchiveCompression` | `Fastest` | `Fastest`, `Optimal` or `NoCompression` |
+| `SaveArchivePath` | *(empty)* | Where to write. Empty means `BepInEx/config/ValheimEnforcer/Archives` |
+
+#### Commands
+
+- `enforcer-archive-list` — what is on disk, newest first, with sizes and the running totals for this session.
+- `enforcer-archive-now [save]` — take one at the next completed save, ignoring the interval. Add `save` to start a world save immediately rather than waiting for the next one.
+- `enforcer-archive-prune confirm` — apply the keep count and the size ceiling now. Without `confirm` it lists what it would delete and stops.
+
+#### What is in one
+
+```
+<world>-<yyyyMMdd-HHmmss>.zip
+├── world/        the world save, whichever layout it uses
+├── characters/   Characters/<PlatformID>/<Name>.yaml and .map
+└── config/       ValheimEnforcer's .cfg and its YAML files
+```
+
+Both world layouts are handled — the legacy flat `<World>.fwl` + `<World>.db` pair and the current chunked directory — because the file list comes from the game's own save record rather than from a guess at the filenames.
+
+#### Things worth knowing
+
+- **An archive is never half-written.** It is built as `.zip.tmp` and renamed on success, so a crash mid-archive leaves a temporary file that rotation ignores and a later run deletes. Nothing that rotation counts as a good archive is ever incomplete.
+- **Rotation reads the timestamp out of the filename, never the file's modification time.** A restore, a copy or a sync tool rewrites mtimes, and deciding what to delete from a rewritten mtime deletes the wrong archive. A file whose name does not parse is not one of ours and is left completely alone — including anything else you keep in that folder.
+- **The newest archive is never deleted** to satisfy `SaveArchiveMaxTotalMB`. Setting a ceiling smaller than a single archive keeps one rather than none.
+- **A file that cannot be read does not fail the archive.** It is skipped, named in the log, and the rest is still written — an incomplete archive that says so beats no archive at all.
+- **Other mods' configuration is not included.** It is not this mod's to copy around.
+- Archives are not pruned at startup, only after one is written. A server that has been off for a month prunes on its first archive rather than on boot.
+
+### Emergency Crash Recovery
+
+Off by default. Every few minutes the server hands each connected player a **sealed snapshot of their own character** — encrypted and signed with a key that never leaves the server, so it is opaque to whoever is holding it and useless anywhere else. If this server then crashes and comes back from an older save, it asks for those snapshots back and adopts the ones that verify and are genuinely newer than what it holds.
+
+The problem it solves is the one case the character store cannot cover on its own: when the *server* loses data, the server has no copy of what it lost. Every connected client does, because the server sent it to them moments before — and handing that back is only safe if the server can prove the thing it is being handed is its own and is newer than what it has.
+
+#### Read this before switching it on
+
+**Restoring a character can duplicate items.** The world and the character store are separate saves and roll back independently. Putting a character back to a state newer than the world can re-introduce items whose source in the world — the chest they came out of, the vein they were mined from — has itself rolled back. That is inherent to restoring a character, not a fault in how it is done here. It is why restoration only ever happens inside a narrow window after an unclean shutdown, and why `CrashRecoveryAutoRestore` is a separate switch you can turn off.
+
+**This does not protect a player's own save.** The client cannot read its own snapshot, so there is nothing in it for the client. A lost or corrupted *local* character file is what [Server-Synced Progression](#server-synced-progression) covers.
+
+#### How it decides
+
+A snapshot is adopted only when **all** of the following hold. Each failure is a distinct line in the server log.
+
+1. The recovery **window** is open — the previous run left no clean-shutdown marker, or an admin opened one by hand.
+2. The signature verifies under this server's current key. A blob sealed under an older key is reported as such; one that has been altered is reported as tampering. They are different answers on purpose.
+3. The account and character it is sealed for match the peer that sent it, as the *server* resolved them.
+4. The world id matches this world.
+5. Its **sequence number is strictly greater** than the one on the save held here. Every save the server accepts bumps that number, and a client never sets it — so a replayed old snapshot is refused rather than rolling somebody backwards.
+
+The window also closes early the moment this server writes a save of its own: once that has happened, the server's copy is current and a snapshot from before the crash is no longer newer than reality, whatever its number says.
+
+#### The key
+
+Generated on first use into `BepInEx/config/ValheimEnforcer/recovery.key`. It is a **file, not a setting** — every ordinary setting here is pushed to clients by the config sync, and a key pushed to the clients it is meant to be opaque to would make the feature decorative.
+
+Keep it with your backups. Without it, snapshots cannot be opened. Losing it is survivable — every outstanding snapshot is simply refused, which is the safe direction — but it is also unrecoverable.
+
+`enforcer-recovery-key-rotate confirm` replaces it and makes every snapshot every client is holding permanently unopenable. It refuses to run while a recovery window is open.
+
+#### Settings
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `EnableCrashRecovery` | `false` | Master switch. Everything below is inert until this is on |
+| `CrashRecoveryAutoRestore` | `true` | Whether a verified, newer snapshot is adopted on its own inside the window |
+| `CrashRecoveryWindowMinutes` | `30` | How long after an unclean shutdown snapshots are accepted |
+| `CrashRecoveryPushIntervalMinutes` | `10` | How often each player is sent a fresh snapshot — this is the bound on how much a crash can cost, and the bandwidth knob |
+| `CrashRecoveryKeepBlobs` | `3` | How many characters' snapshots a client keeps per world |
+
+#### Commands
+
+- `enforcer-recovery-status` — whether the window is open, why, how long it has left, and which key is in use.
+- `enforcer-recovery-open confirm` — open a window by hand, for a rollback the server could not have noticed: a restore from a backup, or a host reverted underneath the game. Connected players are asked straight away; anyone else is asked when they join.
+- `enforcer-recovery-close` — shut it now.
+- `enforcer-recovery-key-rotate confirm` — replace the key.
+
+#### Things worth knowing
+
+- **The first session after you switch this on never opens a window.** The marker that answers "did the last run stop cleanly" is only written while the feature is on, so the first start finds none and reads that as a first run rather than a crash. Every start after that answers properly.
+- **The clean-shutdown marker is written after the character store has flushed**, never before — a marker claiming a clean stop while a save was still queued would close the window over exactly the data it exists to recover.
+- **A hard kill leaves no marker, which is the point.** `kill -9`, a power cut and a host that vanished all look the same to the next start, and all open a window.
+- **An unclean shutdown while hosting a different world does not open a window.** Whatever went wrong belongs to that world, not this one.
+- **Every restore is logged loudly**, with the sequence it replaced, when it was sealed, and a reminder about the duplication risk. A restore that happened quietly would be worse than none.
+- **The snapshot holds the character, not the map.** A server rollback does not touch a client's own map — the client has been holding it all along — so sealing a megabyte of it into every snapshot would be bandwidth spent recovering something that was never lost.
+- Snapshots live on the client at `BepInEx/config/ValheimEnforcer/Recovery/<world id>/<character>.vebak`. They are safe to delete; the next push replaces them.
 
 ### Discord Notifications
 

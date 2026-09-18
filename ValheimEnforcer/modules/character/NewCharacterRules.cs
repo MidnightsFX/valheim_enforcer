@@ -40,12 +40,23 @@ namespace ValheimEnforcer.modules.character {
             internal bool ClearFoods;
             internal bool ConfiscateUnidentifiable;
             internal bool RecordReductions;     // RecordSkillReductions
+            internal bool ClearKnownItems;      // NewCharacterClearKnownRecipes, when SyncKnownItems is on
+            internal bool ClearStats;           // NewCharacterClearPlayerStats, when SyncPlayerStats is on
+            internal bool ClearSpawn;           // always, when SyncSpawnPoint is on: a bed elsewhere is not one here
+            /// <summary>The starting kit to hand over once the rules above have run, or null. Resolved on the
+            /// main thread like everything else here, so the worker never reads Loadouts.yaml.</summary>
+            internal DataObjects.Loadout Loadout;
+            internal bool ProgressionTracked;   // SyncKnownItems - whether granted knowledge has anywhere to go
+            internal bool SpawnTracked;         // SyncSpawnPoint - likewise for a granted spawn point
             internal HashSet<string> StartingPrefabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             /// <summary>False when every rule is off, in which case there is nothing to apply and the server
             /// side never needs to be told about a first save at all.</summary>
             internal bool AnyEnabled {
-                get { return ZeroSkills || StripItems || ClearCustomData || ClearGuardianPower || ClearFoods; }
+                get {
+                    return ZeroSkills || StripItems || ClearCustomData || ClearGuardianPower || ClearFoods
+                           || ClearKnownItems || ClearStats || ClearSpawn || Loadout != null;
+                }
             }
         }
 
@@ -63,6 +74,15 @@ namespace ValheimEnforcer.modules.character {
                 ClearFoods = ValConfig.PreventExternalFoodChanges.Value,
                 ConfiscateUnidentifiable = ValConfig.ConfiscateUnidentifiableItems.Value,
                 RecordReductions = ValConfig.RecordSkillReductions.Value,
+                // Each nested under the sync setting that makes the server hold the thing in the first place:
+                // with nothing stored there is nothing here to clear, and the client-side rules
+                // (KnownRecipes, ProgressionSync.ResetForNewCharacter) are what act on the live player.
+                ClearKnownItems = ProgressionSync.KnownItemsEnabled && ValConfig.NewCharacterClearKnownRecipes.Value,
+                ClearStats = ProgressionSync.StatsEnabled && ValConfig.NewCharacterClearPlayerStats.Value,
+                ClearSpawn = ProgressionSync.SpawnEnabled,
+                Loadout = StarterLoadouts.Current(),
+                ProgressionTracked = ProgressionSync.KnownItemsEnabled,
+                SpawnTracked = ProgressionSync.SpawnEnabled,
                 StartingPrefabs = StartingPrefabs(),
             };
         }
@@ -89,9 +109,17 @@ namespace ValheimEnforcer.modules.character {
             internal bool GuardianPowerCleared;
             internal bool FoodsCleared;
             internal bool EffectsCleared;
+            internal bool KnownItemsCleared;
+            internal bool StatsCleared;
+            internal bool SpawnCleared;
+            internal StarterLoadouts.Result Loadout;
 
             internal bool Changed {
-                get { return ItemsRemoved > 0 || SkillsZeroed > 0 || CustomDataCleared || GuardianPowerCleared || FoodsCleared || EffectsCleared; }
+                get {
+                    return ItemsRemoved > 0 || SkillsZeroed > 0 || CustomDataCleared || GuardianPowerCleared
+                           || FoodsCleared || EffectsCleared || KnownItemsCleared || StatsCleared || SpawnCleared
+                           || (Loadout != null && Loadout.Changed);
+                }
             }
 
             internal string Describe() {
@@ -102,6 +130,10 @@ namespace ValheimEnforcer.modules.character {
                 if (GuardianPowerCleared) { parts.Add("forsaken power cleared"); }
                 if (FoodsCleared) { parts.Add("foods cleared"); }
                 if (EffectsCleared) { parts.Add("status effects cleared"); }
+                if (KnownItemsCleared) { parts.Add("known recipes and materials cleared"); }
+                if (StatsCleared) { parts.Add("statistics cleared"); }
+                if (SpawnCleared) { parts.Add("spawn point cleared"); }
+                if (Loadout != null && Loadout.Changed) { parts.Add($"starter loadout granted ({Loadout.Describe()})"); }
                 return parts.Count == 0 ? "nothing to do" : string.Join(", ", parts.ToArray());
             }
         }
@@ -180,7 +212,59 @@ namespace ValheimEnforcer.modules.character {
                 result.EffectsCleared = true;
             }
 
+            // The progression record, which a new character arrives with filled in from wherever they were
+            // played before. Each section is answered separately, and each is left alone when its setting is
+            // off - see the null-is-untracked rule on Progression.
+            if (character.Progress != null) {
+                Progression progress = character.Progress;
+                if (policy.ClearKnownItems) {
+                    // Emptied rather than nulled, and that is the difference between "this character knows
+                    // nothing here yet" and "this was never tracked". Null would have their next join adopt
+                    // whatever the client turned up holding, which is exactly what this rule refuses.
+                    if (NotEmpty(progress.KnownRecipes) || NotEmpty(progress.KnownMaterials) || NotEmpty(progress.KnownBiomes)
+                        || NotEmpty(progress.Uniques) || NotEmpty(progress.ShownTutorials) || NotEmpty(progress.Trophies)
+                        || (progress.KnownStations != null && progress.KnownStations.Count > 0)
+                        || (progress.KnownTexts != null && progress.KnownTexts.Count > 0)) {
+                        result.KnownItemsCleared = true;
+                    }
+                    progress.KnownRecipes = new List<string>();
+                    progress.KnownMaterials = new List<string>();
+                    progress.KnownBiomes = new List<string>();
+                    progress.Uniques = new List<string>();
+                    progress.ShownTutorials = new List<string>();
+                    progress.Trophies = new List<string>();
+                    progress.KnownStations = new Dictionary<string, int>();
+                    progress.KnownTexts = new Dictionary<string, string>();
+                }
+                if (policy.ClearStats && progress.Stats != null && progress.Stats.Count > 0) {
+                    progress.Stats = new Dictionary<string, StatBucket>();
+                    result.StatsCleared = true;
+                }
+                if (policy.ClearSpawn && progress.Spawn != null && progress.Spawn.HaveCustomSpawn) {
+                    // A bed claimed in another copy of this world is not a bed here, and respawning at its
+                    // coordinates would drop the player into terrain with nothing on it.
+                    progress.Spawn = new SpawnPoints();
+                    result.SpawnCleared = true;
+                }
+                // The map is a file rather than a field, so it is not cleared here; the server simply has none
+                // for a character it has never seen, and answers a map request with "none held".
+                progress.MapHash = null;
+            }
+
+            // Last, and that ordering is the whole reason a loadout needs no special case anywhere else: the
+            // strip above decides what the character may KEEP of what it arrived with, and this decides what
+            // the server HANDS it. Granting first would have the strip take most of it straight back, and
+            // every loadout prefab would have to be repeated in NewCharacterStartingItems to survive.
+            if (policy.Loadout != null) {
+                result.Loadout = StarterLoadouts.ApplyToRecord(character, policy.Loadout,
+                                                               policy.ProgressionTracked, policy.SpawnTracked);
+            }
+
             return result;
+        }
+
+        private static bool NotEmpty(List<string> values) {
+            return values != null && values.Count > 0;
         }
 
         private static string ReasonFor(PackedItem item) {

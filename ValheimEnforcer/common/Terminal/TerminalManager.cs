@@ -35,11 +35,15 @@ namespace ValheimEnforcer.common {
             RegisterItemCommands();
             RegisterSkillCommands();
             RegisterCharacterCommands();
+            RegisterProgressionCommands();
+            RegisterLoadoutCommands();
             RegisterNotificationCommands();
             RegisterStructureCommands();
             RegisterNetworkCommands();
             RegisterItemOriginCommands();
             RegisterAuditCommands();
+            RegisterBackupCommands();
+            RegisterRecoveryCommands();
             RegisterMemoryCommands();
 
             Logger.LogDebug($"Registered {Registry.Count} ValheimEnforcer console commands.");

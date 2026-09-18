@@ -81,6 +81,37 @@ namespace ValheimEnforcer.modules.character {
         }
         private sealed class DeltaMessage : Message { public DeltaSummaryUpdate Delta; public long Sender; }
         private sealed class DeathMessage : Message { public string HostID; public string Name; }
+        /// <summary>Seal this character into a crash-recovery snapshot for the peer that is playing it. The
+        /// keys are an immutable object captured on the main thread, so the worker never reads the key file
+        /// and an admin rotating it mid-seal cannot change what this one produces.</summary>
+        private sealed class SealMessage : Message {
+            public string HostID;
+            public string Name;
+            public long Sender;
+            public recovery.RecoverySeal.Keys Keys;
+            public long WorldUid;
+        }
+
+        /// <summary>A snapshot handed back by a client. Arrives still sealed: verifying, unsealing and
+        /// parsing it is the expensive half, and it belongs here rather than on a frame.</summary>
+        private sealed class RecoveryMessage : Message {
+            public string HostID;
+            public string Name;
+            public byte[] Blob;
+            public recovery.RecoverySeal.Keys Keys;
+            public long WorldUid;
+            public long Sender;
+        }
+
+        /// <summary>A map blob for a character. The bytes are opaque and already compressed by vanilla, and
+        /// the main thread hands them over and never touches them again, so the threading contract holds.</summary>
+        private sealed class MapMessage : Message {
+            public string HostID;
+            public string Name;
+            public byte[] Blob;
+            public string Hash;
+            public long Sender;
+        }
 
         /// <summary>Why GetOrLoad returned what it did. The distinction is load-bearing: a save that exists but
         /// will not parse must never be mistaken for a character that has never been here, or a corrupt file
@@ -98,6 +129,15 @@ namespace ValheimEnforcer.modules.character {
             public string HostID;
             public string Name;
             public string StrippedYaml;
+        }
+
+        /// <summary>A finished crash-recovery snapshot, waiting for the main thread to put it on the wire.
+        /// Same handoff as <see cref="SanitizedPush"/>, and for the same reason: sealing happens on the
+        /// worker, and ZNet may only be touched from the main thread.</summary>
+        internal sealed class SealedPush {
+            public long Sender;
+            public string Name;
+            public byte[] Blob;
         }
 
         /// <summary>A delta merge on the worker thread found our copy had drifted from the client's baseline.
@@ -125,6 +165,7 @@ namespace ValheimEnforcer.modules.character {
         private static readonly ConcurrentQueue<Message> messages = new ConcurrentQueue<Message>();
         private static readonly ConcurrentQueue<DriftResync> driftResyncs = new ConcurrentQueue<DriftResync>();
         private static readonly ConcurrentQueue<SanitizedPush> sanitizedPushes = new ConcurrentQueue<SanitizedPush>();
+        private static readonly ConcurrentQueue<SealedPush> sealedPushes = new ConcurrentQueue<SealedPush>();
         private static readonly AutoResetEvent signal = new AutoResetEvent(false);
         private static readonly object startLock = new object();
         private static Thread worker;
@@ -191,6 +232,22 @@ namespace ValheimEnforcer.modules.character {
             signal.Set();
         }
 
+        /// <summary>
+        /// Persist a character's map blob. Queued through the worker with everything else so it is ordered
+        /// against a save already in flight for the same character - the hash the save records has to be the
+        /// hash of the blob that ends up on disk.
+        ///
+        /// Both identifiers are the ones the SERVER resolved for this peer, never what the payload claimed;
+        /// the caller has already checked them with PeerIdentity.IsSafeToken because they become path
+        /// segments here.
+        /// </summary>
+        internal static void SubmitMap(string hostId, string name, byte[] blob, string hash, long sender) {
+            if (string.IsNullOrEmpty(hostId) || string.IsNullOrEmpty(name) || blob == null || blob.Length == 0) { return; }
+            EnsureWorker();
+            messages.Enqueue(new MapMessage { HostID = hostId, Name = name, Blob = blob, Hash = hash, Sender = sender });
+            signal.Set();
+        }
+
         /// <summary>Record that a character died: clear its item list and mark it a dirty disconnect, so the
         /// pre-death inventory can no longer be replayed as authoritative. Enqueued through the worker so it is
         /// ordered FIFO with any save/delta already in flight for the same character - a pre-death full save
@@ -222,6 +279,35 @@ namespace ValheimEnforcer.modules.character {
         /// <summary>Drop any queued sanitized-character pushes (server shutting down).</summary>
         internal static void ClearSanitizedPushes() {
             while (sanitizedPushes.TryDequeue(out _)) { }
+        }
+
+        /// <summary>Seal a character into a crash-recovery snapshot for one peer. Queued with everything else
+        /// so it is ordered against a save already in flight - a snapshot must never carry a sequence number
+        /// older than the save it is supposed to be newer than.</summary>
+        internal static void SubmitSeal(string hostId, string name, long sender, recovery.RecoverySeal.Keys keys, long worldUid) {
+            if (string.IsNullOrEmpty(hostId) || string.IsNullOrEmpty(name) || keys == null) { return; }
+            EnsureWorker();
+            messages.Enqueue(new SealMessage { HostID = hostId, Name = name, Sender = sender, Keys = keys, WorldUid = worldUid });
+            signal.Set();
+        }
+
+        /// <summary>Verify a snapshot a client handed back and adopt it when it is genuinely newer.</summary>
+        internal static void SubmitRecoveryRestore(string hostId, string name, byte[] blob,
+                                                   recovery.RecoverySeal.Keys keys, long worldUid, long sender) {
+            if (string.IsNullOrEmpty(hostId) || string.IsNullOrEmpty(name) || blob == null || keys == null) { return; }
+            EnsureWorker();
+            messages.Enqueue(new RecoveryMessage { HostID = hostId, Name = name, Blob = blob, Keys = keys, WorldUid = worldUid, Sender = sender });
+            signal.Set();
+        }
+
+        /// <summary>Main thread: take the next sealed snapshot to send, or null when there are none.</summary>
+        internal static SealedPush TryDequeueSealedPush() {
+            return sealedPushes.TryDequeue(out SealedPush p) ? p : null;
+        }
+
+        /// <summary>Drop any queued snapshots (server shutting down).</summary>
+        internal static void ClearSealedPushes() {
+            while (sealedPushes.TryDequeue(out _)) { }
         }
 
         /// <summary>Drop any cached state for a character so the next access reloads from disk. Used
@@ -471,6 +557,19 @@ namespace ValheimEnforcer.modules.character {
                     }
                     c.PendingSkillRestores = existing?.PendingSkillRestores;
 
+                    // Server-owned, for the same reason the lists above are: the client is told these, so it
+                    // can echo them back with anything it likes in them. SaveSequence is the number crash
+                    // recovery orders two copies of a character by, so a client that could set it could
+                    // replay an old snapshot over a newer one; MapHash names a file only the server writes.
+                    c.SaveSequence = existing?.SaveSequence ?? 0L;
+                    if (c.Progress != null) {
+                        c.Progress.MapHash = existing?.Progress?.MapHash;
+                    } else if (existing?.Progress?.MapHash != null) {
+                        // The client is not tracking progression but the server still holds a map for this
+                        // character. Keep the pointer to it rather than orphaning the file.
+                        c.Progress = new Progression { MapHash = existing.Progress.MapHash };
+                    }
+
                     // The server's own copy of the new-character rules. The client is supposed to have applied
                     // these already (CharacterManager.BuildNewCharacter), but the client is the thing being
                     // defended against, so this runs regardless of whether it did.
@@ -514,6 +613,7 @@ namespace ValheimEnforcer.modules.character {
                     // A full save is a new object, not a mutation, so it replaces the entry. The file mtime
                     // carries over: the file is still the one the previous copy came from, until DrainOnce
                     // writes this one.
+                    c.SaveSequence++;
                     Entry fresh = new Entry {
                         Character = c,
                         Dirty = true,
@@ -546,6 +646,7 @@ namespace ValheimEnforcer.modules.character {
                         // Worker thread - queue the recovery request rather than touching ZNet from here.
                         driftResyncs.Enqueue(new DriftResync { Sender = deltaMsg.Sender, HostID = d.HostID, Name = d.Name });
                     }
+                    cur.SaveSequence++;
                     entry.Dirty = true;
                     entry.LastSender = deltaMsg.Sender;
                     Logger.LogInfo($"Saved delta update for {cur.Name}.");
@@ -564,11 +665,146 @@ namespace ValheimEnforcer.modules.character {
                     cur.ActiveCharacterEffects?.Clear();
                     cur.Foods?.Clear(); // vanilla empties the stomach on death; null stays null (not tracked)
                     cur.LastDisconnect = DisconnectionState.DirtyDisconnect;
+                    cur.SaveSequence++;
                     entry.Dirty = true;
+                    return entry;
+                }
+                case SealMessage seal: {
+                    // Deliberately returns null: sealing reads the character and changes nothing about it, so
+                    // there is no write to schedule and the entry must not be marked dirty.
+                    string sealKey = KeyFor(seal.HostID, seal.Name);
+                    DataObjects.Character c = GetOrLoad(sealKey, seal.HostID, seal.Name, out LoadState sealState);
+                    if (c == null) {
+                        Logger.LogDebug($"No character to seal a recovery snapshot from for {sealKey} ({sealState}).");
+                        return null;
+                    }
+                    try {
+                        // The FULL record, server-owned lists included. The client cannot read any of it, and
+                        // a restore that dropped the confiscation history would hand back items an admin had
+                        // already taken - the snapshot has to be the save, not a version of it.
+                        recovery.RecoverySeal.Header header = new recovery.RecoverySeal.Header {
+                            KeyId = seal.Keys.Id,
+                            WorldUid = seal.WorldUid,
+                            AccountId = c.HostID,
+                            CharacterName = c.Name,
+                            Sequence = c.SaveSequence,
+                            SealedUtc = DateTime.UtcNow,
+                        };
+                        byte[] blob = recovery.RecoverySeal.Seal(seal.Keys, header, yamlserializer.Serialize(c));
+                        sealedPushes.Enqueue(new SealedPush { Sender = seal.Sender, Name = c.Name, Blob = blob });
+                    } catch (Exception e) {
+                        Logger.LogWarning($"Could not seal a recovery snapshot for {sealKey}: {e.Message}");
+                    }
+                    return null;
+                }
+                case RecoveryMessage recovery_: {
+                    key = KeyFor(recovery_.HostID, recovery_.Name);
+                    recovery.RecoverySeal.Verdict verdict = recovery.RecoverySeal.Open(
+                        recovery_.Keys, recovery_.Blob, out recovery.RecoverySeal.Header header, out string yaml);
+                    if (verdict != recovery.RecoverySeal.Verdict.Ok) {
+                        // Each verdict is a different thing to tell an admin, which is why they are distinct.
+                        Logger.LogWarning($"Refused a recovery snapshot for {key}: {Describe(verdict)}.");
+                        key = null;
+                        return null;
+                    }
+
+                    // Re-checked against the AUTHENTICATED header. The main thread checked the same two
+                    // fields before this was queued, but it read them out of a header nothing had verified
+                    // yet - so that was a filter and this is the decision.
+                    if (header.WorldUid != recovery_.WorldUid) {
+                        Logger.LogWarning($"Refused a recovery snapshot for {key}: it is sealed for a different world.");
+                        key = null;
+                        return null;
+                    }
+                    if (!PlatformIds.Matches(recovery_.HostID, header.AccountId)
+                        || !string.Equals(recovery_.Name, header.CharacterName, StringComparison.OrdinalIgnoreCase)) {
+                        Logger.LogWarning($"Refused a recovery snapshot for {key}: it is sealed for {header.CharacterName} ({header.AccountId}).");
+                        key = null;
+                        return null;
+                    }
+
+                    Entry existingEntry = GetOrLoadEntry(key, recovery_.HostID, recovery_.Name, out LoadState restoreState);
+                    if (restoreState == LoadState.Unreadable) {
+                        // A save that is present but will not parse. Overwriting it would destroy whatever is
+                        // still recoverable from it by hand, and there is no sequence to compare against.
+                        Logger.LogWarning($"Not applying a recovery snapshot for {key}: the stored save exists but could not be read.");
+                        key = null;
+                        return null;
+                    }
+                    long held = existingEntry?.Character?.SaveSequence ?? 0L;
+                    if (header.Sequence <= held) {
+                        // The anti-rollback check, and the reason SaveSequence exists. A snapshot that is not
+                        // strictly newer is either a replay of an old one or simply nothing new.
+                        Logger.LogInfo($"Not applying a recovery snapshot for {key}: its sequence {header.Sequence} is not newer than the {held} held here.");
+                        key = null;
+                        return null;
+                    }
+
+                    DataObjects.Character restored;
+                    try {
+                        restored = yamldeserializer.Deserialize<DataObjects.Character>(yaml);
+                    } catch (Exception e) {
+                        Logger.LogWarning($"Refused a recovery snapshot for {key}: it verified but would not parse ({e.Message}).");
+                        key = null;
+                        return null;
+                    }
+                    if (restored == null) { key = null; return null; }
+
+                    // Past the snapshot's own number, so the very same blob offered twice is refused the
+                    // second time rather than reapplied.
+                    restored.SaveSequence = header.Sequence + 1L;
+                    Entry adopted = new Entry {
+                        Character = restored,
+                        Dirty = true,
+                        LastSender = recovery_.Sender,
+                        SourceMtime = existingEntry?.SourceMtime ?? DateTime.MinValue,
+                        LastTouchedTicks = DateTime.UtcNow.Ticks,
+                    };
+                    cache[key] = adopted;
+                    Logger.LogWarning($"CRASH RECOVERY: adopted the snapshot {restored.Name} ({restored.HostID}) handed back - sequence {header.Sequence}, sealed {header.SealedUtc:u}, replacing the sequence {held} this server held. Items and progression in it are from before the rollback; if the WORLD also rolled back, anything they took out of it since may now exist twice.");
+                    return adopted;
+                }
+                case MapMessage map: {
+                    key = KeyFor(map.HostID, map.Name);
+                    Entry entry = GetOrLoadEntry(key, map.HostID, map.Name, out LoadState state);
+                    DataObjects.Character cur = entry?.Character;
+                    if (cur == null) {
+                        // No save to hang the hash off. Dropping the blob is right: a .map file with no
+                        // character beside it would never be read, and would never be cleaned up either.
+                        Logger.LogWarning($"CharacterStore dropped a map for {map.Name} ({map.HostID}): no existing save to record it against ({state}).");
+                        return null;
+                    }
+                    // Written here rather than queued into the coalescing pass below, which keys one write per
+                    // character and would have the blob and the YAML fight over that slot. A client may only
+                    // send a map once every MapSyncIntervalMinutes, so there is no burst to coalesce.
+                    try {
+                        AtomicFile.WriteBytes(MapSync.PathFor(map.HostID, map.Name), map.Blob);
+                    } catch (Exception e) {
+                        // The save is not marked dirty, so the hash is not recorded either - the two stay in
+                        // agreement, and the client sends the same blob again on its next cadence.
+                        Logger.LogWarning($"CharacterStore failed to write the map for {key}: {e.Message}");
+                        return null;
+                    }
+                    if (cur.Progress == null) { cur.Progress = new Progression(); }
+                    cur.Progress.MapHash = map.Hash;
+                    cur.SaveSequence++;
+                    entry.Dirty = true;
+                    entry.LastSender = map.Sender;
+                    Logger.LogInfo($"Stored the map for {cur.Name} ({map.Blob.Length} bytes).");
                     return entry;
                 }
             }
             return null;
+        }
+
+        private static string Describe(recovery.RecoverySeal.Verdict verdict) {
+            switch (verdict) {
+                case recovery.RecoverySeal.Verdict.NotOurs: return "it is not in a format this server wrote";
+                case recovery.RecoverySeal.Verdict.WrongKey: return "it is sealed under a different key - this server's key has been rotated, or the snapshot is from somewhere else";
+                case recovery.RecoverySeal.Verdict.Tampered: return "it has been altered since this server sealed it";
+                case recovery.RecoverySeal.Verdict.Unreadable: return "it verified but could not be unsealed";
+                default: return verdict.ToString();
+            }
         }
 
         // Worker-thread only. Pure string comparison, no ZNet access - the caller resolved the peer's identity

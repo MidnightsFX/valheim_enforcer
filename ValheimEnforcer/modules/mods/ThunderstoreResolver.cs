@@ -544,7 +544,9 @@ namespace ValheimEnforcer.modules.mods {
 
                 bool changed = false;
                 foreach (Dictionary<string, DataObjects.Mod> list in new[] { settings.RequiredMods, settings.OptionalMods, settings.AdminOnlyMods }) {
-                    if (list == null || !list.TryGetValue(entry.PluginID, out DataObjects.Mod mod)) { continue; }
+                    // The null check is on the value, not just on the lookup: an entry written with nothing under
+                    // it is a present key with a null value, which TryGetValue reports as a hit.
+                    if (list == null || !list.TryGetValue(entry.PluginID, out DataObjects.Mod mod) || mod == null) { continue; }
 
                     // Never overwrite a hash an admin pinned by hand.
                     if (string.Equals(mod.HashSource, HashPolicy.SourceManual, StringComparison.OrdinalIgnoreCase)) {

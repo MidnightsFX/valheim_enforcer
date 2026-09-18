@@ -52,9 +52,11 @@
     <Reference Include="System.Data" />
     <Reference Include="System.Xml" />
     <Reference Include="System.Net.Http" />
-    <!-- ZipArchive over a stream, for hashing DLLs inside a downloaded Thunderstore package in memory.
-         System.IO.Compression.FileSystem is deliberately not referenced: that is where ZipFile.OpenRead lives,
-         and nothing here ever touches the disk. -->
+    <!-- ZipArchive over a stream: reading DLLs inside a downloaded Thunderstore package in memory, and
+         writing the save archives. System.IO.Compression.FileSystem is still deliberately not referenced -
+         that is where ZipFile and CreateEntryFromFile live, and both open files with sharing rules of their
+         own choosing. The archiver needs FileShare.ReadWrite|Delete, because the game or a backup tool may
+         hold a save file open, so it opens each file itself and copies the stream into the entry. -->
     <Reference Include="System.IO.Compression" />
   </ItemGroup>
 
