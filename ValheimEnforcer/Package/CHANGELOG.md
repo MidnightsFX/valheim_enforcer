@@ -2,31 +2,11 @@
 ---
 ```
 - Adds detection for injected cheat menus
-- Adds the inventory grid check (World Integrity, DetectInventoryGrid, default on). Every item records the
-  grid cell it occupies, so an item in column 11 of an eight-column inventory is not suspicious, it is
-  impossible - resizing the grid is a feature of the injected menus and of nothing else. Valheaven announces
-  its own grid as it changes it ("Inv 12x8", then "10x8", then "8x8" as one player walked it back).
-    - Width is the check; rows are not. Vanilla builds the player inventory eight columns wide and offers no
-      way to change that - Player.SetInventorySize takes ROWS only - while rows are genuinely mod territory:
-      vanilla sells them at the trader up to nine, ExtraSlots and AzuExtendedPlayerInventory add more, and
-      EquipmentAndQuickSlots writes the height directly for its visible and hidden slot rows. All of them
-      leave the width at eight. So MaxInventoryWidth (Advanced) ships at 8, correct for vanilla and for all
-      three, and MaxInventoryHeight (Advanced) ships at 0, meaning rows are not checked at all.
-    - Only items that have just appeared are examined, so nothing a character already had is re-examined and
-      no migration is needed. Negative coordinates are never flagged - (-1,-1) is the "no position" sentinel.
-      An ExtraSlots equipment slot is never flagged either; those sit outside the ordinary grid flow.
+- Adds the inventory grid check (World Integrity, DetectInventoryGrid, default on).
     - Warns and never confiscates, like the item origin checks beside it. It does record a contradiction
       against the connection, so it counts toward ContradictionThreshold and shows up in enforcer-trust.
-    - It cannot see a resize that stays inside legal bounds. The 8x8 the player above settled on is a legal
-      vanilla inventory; only the 12x8 and 10x8 phases were ever catchable this way.
 - Adds enforcer-harden: reports which of this server's defences against an injected cheat menu are switched
-  off and what each one leaves open, then the actions currently configured. Reads settings and changes
-  nothing. Most of what a cheat menu DOES already runs into code the server runs for itself - the spawner
-  into BlockSpawnObjectRPC, impossible damage into GuardDamageRpc, free building into GuardGlobalKeys - and
-  most of that ships off, which is hard to see reading the config file top to bottom. A setting that is on
-  but whose prerequisite is off reports as ineffective rather than on.
-- Fixes the documented DetectSpeedhack setting, which has not existed for some time - its field, its
-  binding and the loop behind it were all commented out, and the settings table still listed it as on
+  off and what each one leaves open.
 - Fixes a chance that customdata will become stale
 ```
 
