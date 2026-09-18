@@ -71,6 +71,9 @@ namespace ValheimEnforcer.modules.character {
             [HarmonyPriority(Priority.First)]
             private static void Prefix() {
                 CharacterManager.ResetServerCharacterState();
+                // A shutdown that armed the latch but never reached SavePlayerProfile (vanilla skipped it)
+                // must not leave it armed for the next session.
+                finalSavePending = false;
             }
         }
 
@@ -138,12 +141,13 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
-        // NOTE: full character saves are no longer triggered by the vanilla Player.Save (world/profile
-        // autosave). Persistence map:
-        //  - End-of-session: SaveSyncForShutdown (Game.Shutdown prefix) writes a full save recorded Clean.
-        //    Game.Shutdown is the choke point both exit paths funnel through — menu logout
+        // NOTE: full character saves are not triggered by the vanilla Player.Save itself. Persistence map:
+        //  - End-of-session: SaveSyncForShutdown (Game.Shutdown prefix) arms the latch and marks the session
+        //    clean; CaptureAfterProfileSave (Game.SavePlayerProfile postfix) writes the full save recorded
+        //    Clean. Game.Shutdown is the choke point both exit paths funnel through — menu logout
         //    (Game.Logout -> ContinueLogout -> Shutdown) AND quit-to-desktop / Alt+F4
-        //    (Game.OnApplicationQuit -> Shutdown, which never calls Game.Logout).
+        //    (Game.OnApplicationQuit -> Shutdown, which never calls Game.Logout) — and it reaches
+        //    SavePlayerProfile before it tears the scene and the connection down, so the save still sends.
         //  - Mid-session: routine changes are picked up by CharacterDeltaTracker, which watches the player's
         //    inventory for changes rather than polling. On networked clients they stream up incrementally and
         //    the server also pulls periodic full saves on its own schedule (FullSyncScheduler); both are
@@ -166,6 +170,11 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
+        // Armed by the Game.Shutdown prefix, consumed by the Game.SavePlayerProfile postfix below. The two are
+        // split because the end-of-session save has to be taken AFTER vanilla has flushed the profile, not
+        // before — see CaptureAfterProfileSave.
+        private static bool finalSavePending = false;
+
         [HarmonyPatch(typeof(Game), nameof(Game.Shutdown))]
         public static class SaveSyncForShutdown {
             [HarmonyPrefix]
@@ -183,10 +192,56 @@ namespace ValheimEnforcer.modules.character {
                 // records the character as cleanly disconnected. Reset by ClearPlayerCharacterOnLogout on a
                 // return-to-menu, and by LoadAndValidatePlayer on the next spawn.
                 CharacterManager.LogoutInProgress = true;
-                // Never let this throw. An exception out of a prefix skips the original, and for Game.Shutdown
-                // that means no profile save, no ZNet shutdown, and - since it unwinds ContinueLogout too - no
-                // return to the menu: the logout button simply stops working. Losing the enforcer's copy of
-                // one save is the far smaller failure.
+                // The save itself is deferred to the SavePlayerProfile postfix, which this same Shutdown call
+                // is about to reach. Taking it here read the player one flush too early.
+                finalSavePending = true;
+            }
+        }
+
+        // Where a full character save is actually taken.
+        //
+        // Mods do not keep Player.m_customData current. The established pattern is to serialize into it from a
+        // Player.Save prefix, so between one profile save and the next the dictionary describes a past state.
+        // EpicLoot's adventure data (bounty progress, claimed rewards, treasure maps) is written exactly that
+        // way, and vanilla's own save interval is twenty minutes. Reading the dictionary at any other moment
+        // captures that stale past, and because LoadPlayerCustomData re-imposes the tracked copy on the next
+        // Player.Load, the stale past then overwrites the player's real one: completed bounties reverted to
+        // in-progress on the next login, permanently, because their targets were already dead.
+        //
+        // Game.SavePlayerProfile is the one point where that is not true. It calls PlayerProfile.SavePlayerData
+        // -> Player.Save, so by the time a postfix runs every such mod has just flushed. Both jobs hang off it:
+        //  - the end-of-session save, which Game.Shutdown reaches here BEFORE ZNetScene.Shutdown() and
+        //    ZNet.Shutdown(), so the server peer is still live and FinalSaveRpc can still send synchronously;
+        //  - the periodic profile autosave, which only wakes the delta tracker. That is deliberate: full saves
+        //    stay on the server's own schedule (FullSyncScheduler), and all this has to do is let a
+        //    custom-data-only change reach the delta stream at a moment when the dictionary is honest. The
+        //    tracker's dirty flag is otherwise raised only by Inventory.Changed, so a change that never touches
+        //    the inventory was never sampled at all — the same reason ForsakenPower and FoodSync nudge it.
+        [HarmonyPatch(typeof(Game), nameof(Game.SavePlayerProfile))]
+        public static class CaptureAfterProfileSave {
+            [HarmonyPostfix]
+            [HarmonyPriority(Priority.Last)]
+            private static void Postfix(bool isFromRpc) {
+                if (Player.m_localPlayer == null) { return; } // dedicated server
+
+                // Mirror every reason vanilla's own body returned without saving the character. Saving when it
+                // did not is the same divergence this patch exists to avoid, just in the other direction; the
+                // pending latch is left armed so a later profile save still takes the end-of-session copy.
+                if (SaveSystem.HasSessionFlag(SaveSystemSessionFlags.DontSaveCharacter)) { return; }
+                if (isFromRpc && ZNet.instance != null && ZNet.instance.HardSaveBlock()) { return; }
+
+                if (!finalSavePending) {
+                    // Routine profile save: the custom data is current as of right now, so let the delta
+                    // tracker pick it up on its next tick.
+                    CharacterDeltaTracker.MarkBaselineDirty();
+                    return;
+                }
+
+                finalSavePending = false;
+                // Never let this throw. An exception out of a postfix propagates into Game.Shutdown, and that
+                // means no ZNet shutdown and - since it unwinds ContinueLogout too - no return to the menu:
+                // the logout button simply stops working. Losing the enforcer's copy of one save is the far
+                // smaller failure.
                 try {
                     CharacterManager.SavePlayerCharacter(Player.m_localPlayer);
                 } catch (Exception e) {

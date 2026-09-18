@@ -37,12 +37,13 @@ Older command names — `Enforcer-List-Players`, `Enforcer-Return-Confiscated` a
 
 ## Memory
 
-The character sync keeps a parsed copy of each character's save in memory while that character is being played, so incremental updates apply without re-reading the file. The file is always the authority: every update reaches it within about a second, and a copy that has gone idle is dropped and read back on the next update. Memory therefore follows who is playing now, not everyone who has joined since the last restart.
+The character sync keeps a parsed copy of each character's save in memory while that character is being played, so incremental updates apply without re-reading the file. The file is always the authority: every update reaches it within about a second (or within `CharacterWriteIntervalSeconds`, for routine updates, if you have set one), and a copy that has gone idle is dropped and read back on the next update. Memory therefore follows who is playing now, not everyone who has joined since the last restart.
 
 | Setting | Section | Default | Effect |
 | --- | --- | --- | --- |
 | `CharacterCacheIdleMinutes` | Advanced | `30` | How long a character stays in memory after it was last touched. Keep it above `FullSyncPullIntervalMinutes`, or players who are online but idle are re-read after every periodic pull. `0` keeps every character until restart |
 | `MemoryReportIntervalMinutes` | Advanced | `0` | Writes the `enforcer-memory` summary to the server log this often. `0` is off |
+| `CharacterWriteIntervalSeconds` | Advanced | `0` | The setting that matters most for memory *churn* on a busy server, as opposed to memory held — see [Storage and timing](character-progression.md#storage-and-timing) |
 
 `enforcer-memory` shows the process working set and managed heap, what the mod is holding (characters, audit buffers, per-player tables) and the world's object counts. The last two lines are the game's own: how many live and destroyed objects it remembers, and the per-connection tables it keeps of which objects each player has been sent. Both grow with uptime and neither is something this mod changes; they are shown so a server whose memory climbs can tell the two apart.
 

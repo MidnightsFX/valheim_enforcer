@@ -16,6 +16,10 @@ namespace ValheimEnforcer.modules.character {
     /// <see cref="ValConfig.FullSyncMaxConcurrentPlayers"/> at once — larger player counts are spread across
     /// successive waves so incoming saves never spike the server's bandwidth.
     ///
+    /// With <see cref="ValConfig.FullSyncSpreadAcrossInterval"/> on, which is the default, the waves give way
+    /// to a timer per player spread across the whole interval (see SpreadPull): the same saves, the same
+    /// cadence for each player, without the once-an-interval burst of parsing and rewriting them all at once.
+    ///
     /// Full saves are only a periodic reconciliation on top of the incremental delta stream
     /// (<see cref="DeltaChangeTracker"/>), so a coarse interval (default 25 minutes) is intentional.
     /// </summary>
@@ -99,9 +103,94 @@ namespace ValheimEnforcer.modules.character {
             // is still being written. Returns immediately unless a save has just started - see SaveArchiver.
             modules.archive.SaveArchiver.Tick();
 
+            if (ValConfig.FullSyncSpreadAcrossInterval != null && ValConfig.FullSyncSpreadAcrossInterval.Value) {
+                SpreadPull();
+                return;
+            }
+
             if (cycleRunning) { return; }
             if (Time.unscaledTime < nextCycle) { return; }
             StartCoroutine(RunPullCycle());
+        }
+
+        // ---- Spread pulls ---------------------------------------------------------------------------------
+
+        // When each connected peer falls due for a full save. Keyed by peer uid; entries for peers that have
+        // left are dropped on the pass that notices.
+        private readonly Dictionary<long, float> nextAsk = new Dictionary<long, float>();
+        private readonly List<long> departedScratch = new List<long>();
+        private float nextSpreadCheck;
+
+        /// <summary>How long after first being seen a peer is left alone. A fresh join has just pushed a full
+        /// save of its own accord and is still loading in; asking again straight away would be a second copy of
+        /// the same save from a client that is busy.</summary>
+        private const float SettleSeconds = 60f;
+
+        /// <summary>
+        /// Gives every player a timer of their own, started at a random point in the interval, so that
+        /// everybody is asked once per FullSyncPullIntervalMinutes without everybody being asked in the same
+        /// minute.
+        ///
+        /// A full save is the heaviest thing a client sends: the server parses the whole character, merges the
+        /// lists it owns into it and writes it back out. The wave cycle below did that for every player inside
+        /// a minute or so, once per interval - a hundred players was half a gigabyte of short-lived memory in
+        /// that minute, and then nothing for the next twenty-four. The same hundred saves arriving one every
+        /// fifteen seconds is no load at all.
+        ///
+        /// The random start is what makes that hold after a restart, which is the case that matters: everybody
+        /// rejoins inside a couple of minutes, and timers started from the join would all come due inside the
+        /// same couple of minutes, every interval, for as long as those players stayed. Started at a random
+        /// phase they are spread from the first round on, and a player's own cadence after that is exactly the
+        /// interval.
+        ///
+        /// At most one player is asked per pass. With timers spread across the interval two coming due in the
+        /// same second is rare, and the second one simply goes a second later.
+        ///
+        /// Costs one float comparison a frame; the peer list is walked once a second, and nothing is allocated.
+        /// </summary>
+        private void SpreadPull() {
+            float now = Time.unscaledTime;
+            if (now < nextSpreadCheck) { return; }
+            nextSpreadCheck = now + 1f;
+
+            float interval = IntervalSeconds();
+            List<ZNetPeer> peers = ZNet.instance.GetPeers();
+            ZNetPeer due = null;
+            float dueSince = float.MaxValue;
+            int ready = 0;
+            for (int i = 0; i < peers.Count; i++) {
+                ZNetPeer peer = peers[i];
+                if (peer == null || !peer.IsReady()) { continue; }
+                ready++;
+                if (!nextAsk.TryGetValue(peer.m_uid, out float when)) {
+                    // Somewhere in the coming interval, but never inside the settle period.
+                    when = now + Mathf.Max(SettleSeconds, Random.Range(0f, interval));
+                    nextAsk[peer.m_uid] = when;
+                } else if (when > now + interval) {
+                    // The interval was shortened; do not make them wait out the old one.
+                    when = now + interval;
+                    nextAsk[peer.m_uid] = when;
+                }
+                // Whoever has been due longest goes first, so nobody is starved by a run of others.
+                if (when <= now && when < dueSince) {
+                    dueSince = when;
+                    due = peer;
+                }
+            }
+
+            // Forget whoever has left. Only worth a second walk when the table has outgrown the peer list.
+            if (nextAsk.Count > ready) {
+                departedScratch.Clear();
+                foreach (KeyValuePair<long, float> entry in nextAsk) {
+                    if (ZNet.instance.GetPeer(entry.Key) == null) { departedScratch.Add(entry.Key); }
+                }
+                for (int i = 0; i < departedScratch.Count; i++) { nextAsk.Remove(departedScratch[i]); }
+                departedScratch.Clear();
+            }
+
+            if (due == null) { return; }
+            nextAsk[due.m_uid] = now + interval;
+            RequestFullSync(due);
         }
 
         // Pushes queued by the CharacterStore worker after it held a first save to the new-character rules.

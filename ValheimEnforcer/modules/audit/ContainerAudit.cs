@@ -72,9 +72,10 @@ namespace ValheimEnforcer.modules.audit {
         private static readonly Dictionary<int, string> containerNames = new Dictionary<int, string>();
 
         /// <summary>
-        /// Works out which prefabs are containers, once per world. Everything with a Container component
-        /// counts, which picks up chests, ships, carts and - usefully for a moderator - tombstones, so
-        /// somebody looting a grave that is not theirs is recorded by the same code path.
+        /// Works out which prefabs hold items on their own ZDO, once per world. That picks up chests, the loot
+        /// pots and - usefully for a moderator - tombstones, so somebody looting a grave that is not theirs is
+        /// recorded by the same code path, and it picks up the carts, sleds, ships and the incinerator whose
+        /// Container hangs off a child object.
         ///
         /// Returns false until the scene is far enough along to answer, in which case nothing is recorded
         /// this packet. A detector that cannot tell what a prefab is must not guess.
@@ -88,7 +89,7 @@ namespace ValheimEnforcer.modules.audit {
                 containerNames.Clear();
                 foreach (GameObject prefab in ZNetScene.instance.m_prefabs) {
                     if (prefab == null) { continue; }
-                    if (prefab.GetComponent<Container>() == null) { continue; }
+                    if (!StoresItemsOnOwnZdo(prefab)) { continue; }
                     int hash = prefab.name.GetStableHashCode();
                     containerPrefabs.Add(hash);
                     containerNames[hash] = prefab.name;
@@ -104,6 +105,34 @@ namespace ValheimEnforcer.modules.audit {
                 Logger.LogWarning($"Could not build the container audit index; container auditing is inactive: {e.Message}");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// Whether a Container on this prefab keeps its contents in this prefab's own ZDO - which is the only
+        /// thing the audit can act on, because a root ZDO under its own prefab hash is what arrives here.
+        ///
+        /// GetComponent on the root answers that for a chest, a pot or a tombstone, and used to be the whole
+        /// test. It is not enough: Container carries m_rootObjectOverride precisely so that a cart, a sled, a
+        /// ship or the incinerator can mount the component on a child and still bind it to the vehicle's root
+        /// ZNetView (Container.Awake), which is where Save then writes the items. Those seven prefabs never
+        /// matched the root-only test, so vehicle storage - the one container a player can empty out of sight
+        /// of everybody and drive away - was the single thing this audit did not see.
+        ///
+        /// A child Container only counts when its override resolves to this prefab's own root ZNetView. The
+        /// dungeon and camp pieces are built by parenting whole chest prefabs underneath them, and those
+        /// children carry their own ZNetView and their own ZDO; treating one as part of its parent would file
+        /// a chest's contents under the building it happens to stand in.
+        /// </summary>
+        private static bool StoresItemsOnOwnZdo(GameObject prefab) {
+            if (prefab.GetComponent<Container>() != null) { return true; }
+
+            ZNetView root = prefab.GetComponent<ZNetView>();
+            if (root == null) { return false; }
+
+            foreach (Container container in prefab.GetComponentsInChildren<Container>(true)) {
+                if (container.m_rootObjectOverride == root) { return true; }
+            }
+            return false;
         }
 
         internal static void InvalidateIndex() {
@@ -218,7 +247,11 @@ namespace ValheimEnforcer.modules.audit {
             // reaches here, so nothing more expensive may happen before this returns.
             if (!containerPrefabs.Contains(prefab)) { return; }
 
-            string raw = zdo.GetString(ZDOVars.s_items, "");
+            // Container.Save writes the blob with ZDO.Set(int, byte[]), and ZDOExtraData keeps byte arrays in
+            // a different store from strings - so reading "items" as a string returns the default for every
+            // container that has ever existed, and nothing downstream of it can fire. Both are plain lookups
+            // that hand back the stored reference, so this costs what the wrong one did.
+            byte[] raw = zdo.GetByteArray(ZDOVars.s_items, null);
             bool inUse = zdo.GetInt(ZDOVars.s_inUse, 0) == 1;
             long hash = InventoryBlob.HashOf(raw);
 
@@ -265,7 +298,7 @@ namespace ValheimEnforcer.modules.audit {
         /// it re-seeds and the one after that is diffed again - the same behaviour a container has when it is
         /// first seen.
         /// </summary>
-        private static void RecordChanges(Snapshot snapshot, string afterRaw, string containerName, string position) {
+        private static void RecordChanges(Snapshot snapshot, byte[] afterRaw, string containerName, string position) {
             Dictionary<string, InventoryBlob.Slot> before = snapshot.Items;
             Dictionary<string, InventoryBlob.Slot> after = InventoryBlob.Parse(afterRaw);
             snapshot.Items = after;

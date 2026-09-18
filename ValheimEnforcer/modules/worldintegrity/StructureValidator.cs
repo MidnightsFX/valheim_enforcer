@@ -512,8 +512,10 @@ namespace ValheimEnforcer.modules.worldintegrity {
         /// </summary>
         private static bool IsExempt(ZNetPeer peer) {
             if (!ValConfig.StructureValidationExemptAdmins.Value) { return false; }
-            string hostId = peer.m_socket != null ? peer.m_socket.GetHostName() : null;
-            return !string.IsNullOrEmpty(hostId) && ZNet.instance.IsAdmin(hostId);
+            // Asked once per ZDOData packet, which on a full server is thousands of times a second. It used to
+            // read the socket's host name (a fresh string every call) and hand it to ZNet.IsAdmin (several more);
+            // PeerIdentity remembers both answers for the life of the connection and a few seconds respectively.
+            return PeerIdentity.IsAdmin(peer);
         }
 
         // ---- Reporting and enforcement --------------------------------------------------------------------

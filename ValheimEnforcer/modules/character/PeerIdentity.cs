@@ -111,6 +111,57 @@ namespace ValheimEnforcer.modules.character {
             return host;
         }
 
+        // ---- Admin verdict -------------------------------------------------------------------------------
+
+        /// <summary>
+        /// How long an admin verdict is reused. Vanilla's SyncedList only re-reads adminlist.txt every ten
+        /// seconds, so a verdict this old is no staler than the game's own answer could already be.
+        /// </summary>
+        private const float AdminVerdictSeconds = 10f;
+
+        private struct AdminVerdict {
+            internal bool IsAdmin;
+            internal float Expires;
+        }
+
+        /// <summary>Same keying, same no-lock rule and same lifetime as <see cref="AccountsByPeer"/>.</summary>
+        private static readonly Dictionary<ZNetPeer, AdminVerdict> AdminByPeer = new Dictionary<ZNetPeer, AdminVerdict>();
+
+        /// <summary>
+        /// Whether the account behind this connection is on the server's admin list, remembered for a few
+        /// seconds.
+        ///
+        /// ZNet.IsAdmin looks cheap and is not: it parses the id into a PlatformUserID, renders it back to a
+        /// string two or three times and scans the list for each rendering - 320 to 424 bytes of garbage per
+        /// call, measured. That is nothing for a command, and a great deal for the admin exemptions, which ask
+        /// once per ZDOData packet (structure validation) and twice per relayed hit (the damage guard).
+        ///
+        /// Only a peer this class is tracking gets a remembered answer, for the reason AccountFor never inserts
+        /// on a miss: this is reachable from a ZNet.Disconnect prefix, and filing a peer that has just been
+        /// forgotten would keep it alive until the session ended. Anything else is answered straight from
+        /// vanilla.
+        ///
+        /// For exemptions and reporting only. A decision to RUN something for a player - the command relay's
+        /// admin gate - asks vanilla directly every time; that path is rare, and ten seconds of a revoked admin
+        /// still being treated as one is not a trade worth making there.
+        /// </summary>
+        internal static bool IsAdmin(ZNetPeer peer) {
+            if (peer == null || ZNet.instance == null) { return false; }
+
+            float now = UnityEngine.Time.realtimeSinceStartup;
+            bool tracked = AccountsByPeer.ContainsKey(peer);
+            if (tracked && AdminByPeer.TryGetValue(peer, out AdminVerdict held) && now < held.Expires) {
+                return held.IsAdmin;
+            }
+
+            string account = AccountFor(peer);
+            bool isAdmin = !string.IsNullOrEmpty(account) && ZNet.instance.IsAdmin(account);
+            if (tracked) {
+                AdminByPeer[peer] = new AdminVerdict { IsAdmin = isAdmin, Expires = now + AdminVerdictSeconds };
+            }
+            return isAdmin;
+        }
+
         /// <summary>Records a connection as it joins. Safe to call twice for the same peer.</summary>
         internal static void Remember(ZNetPeer peer) {
             ZRpc rpc = peer?.m_rpc;
@@ -128,6 +179,7 @@ namespace ValheimEnforcer.modules.character {
         internal static void Forget(ZNetPeer peer) {
             if (peer == null) { return; }
             AccountsByPeer.Remove(peer);
+            AdminByPeer.Remove(peer);
             ZRpc rpc = peer.m_rpc;
             if (rpc == null) { return; }
             PeersByRpc.Remove(rpc);
@@ -137,6 +189,7 @@ namespace ValheimEnforcer.modules.character {
         internal static void Reset() {
             PeersByRpc.Clear();
             AccountsByPeer.Clear();
+            AdminByPeer.Clear();
         }
 
         /// <summary>

@@ -685,16 +685,24 @@ namespace ValheimEnforcer.modules {
             // Admin-only mods are optional for admins: permitted, never demanded - of admins or anyone else. A mod
             // on both lists is the normal way to get here rather than a typo: the server loads a mod, it lands in
             // requiredMods by itself, and the admin then adds it to adminOnlyMods without deleting the original.
-            List<string> requiredModsMissing = AuthoratativeMods.RequiredMods.Keys.Where(key => !adminOnlyMods.ContainsKey(key)).Distinct().ToList();
+            //
+            // Worked out in one pass over the required list rather than by building it whole and striking a
+            // name off it for every mod the peer declared. List.Remove is a scan, so that was declared-mods
+            // times required-mods - on the server, before the password check, on a list whose length the
+            // connecting peer chooses.
+            List<string> requiredModsMissing = new List<string>();
+            foreach (string required in AuthoratativeMods.RequiredMods.Keys) {
+                if (adminOnlyMods.ContainsKey(required)) { continue; }
+                if (CheckingMods.ActiveMods.ContainsKey(required)) { continue; }
+                requiredModsMissing.Add(required);
+            }
             // At least one version mismatch was found by the file check rather than by enforceVersion, so the
             // list gets the extra line saying why a version the server never marked as enforced still matters.
             bool versionPinnedByHash = false;
 
-            Logger.LogDebug($"Validating modlist of {CheckingMods.ActiveMods.Count} mods isAdmin? {isAdmin}");
+            if (Logger.DebugEnabled) { Logger.LogDebug($"Validating modlist of {CheckingMods.ActiveMods.Count} mods isAdmin? {isAdmin}"); }
 
             foreach (KeyValuePair<string, DataObjects.Mod> mod in CheckingMods.ActiveMods) {
-                requiredModsMissing.Remove(mod.Key);
-
                 // The authoritative record this client mod matched, and which list it came from. Captured
                 // rather than continue'd out of, because file verification runs on top of whatever the
                 // version/admin check decided and needs the same record.
@@ -1199,6 +1207,15 @@ namespace ValheimEnforcer.modules {
                     Logger.LogWarning($"Mod compatibility check failed for client.");
                 }
             } else {
+                // One declaration per connection, and this is it. A client sends its mod list exactly once - from
+                // the ClientHandshake prefix above, which vanilla fires once per connection - so the handler is
+                // taken off this connection before anything else happens. Left registered it was a pre-password,
+                // pre-ban-check YAML parse that any peer could invoke as often as it liked for as long as it held
+                // the socket open, which RejectPeer does not close: ZRpc drains every queued message in one frame,
+                // so a loop of these was a main-thread stall on demand. A second one now reaches no handler.
+                // Removing an entry from inside its own invocation is safe; ZRpc looked it up before calling us.
+                sender.Unregister(nameof(RPC_ReceiveModVersionData));
+
                 // Server received data from client. This is a pre-authentication parse (it rides the handshake),
                 // so bound it before deserializing a hostile or malformed blob.
                 if ((data?.Size() ?? 0) > ValConfig.MaxModListBytes) {
@@ -1207,6 +1224,15 @@ namespace ValheimEnforcer.modules {
                     return;
                 }
                 Mods clientMods = new Mods().FromZPackage(data);
+                // Bounded again once it is an object, before anything walks it. The byte ceiling alone still
+                // admits tens of thousands of five-byte entries, each of which is validated, named in the
+                // rejection text and logged.
+                int declared = (clientMods.ActiveMods?.Count ?? 0) + (clientMods.ActivePatchers?.Count ?? 0);
+                if (declared > ValConfig.MaxDeclaredModEntries) {
+                    Logger.LogWarning($"Rejecting a mod list from {peerAddress} declaring {declared} entries; the ceiling is {ValConfig.MaxDeclaredModEntries}.");
+                    RejectPeer(sender);
+                    return;
+                }
                 string validatingHost = sender.m_socket?.GetHostName();
                 bool isadmin = ZNet.instance.IsAdmin(validatingHost);
                 // Whether anything found below is allowed to end this connection. The checks themselves still

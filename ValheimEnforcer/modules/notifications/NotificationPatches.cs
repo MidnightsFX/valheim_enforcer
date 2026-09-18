@@ -84,14 +84,17 @@ namespace ValheimEnforcer.modules.notifications {
             [HarmonyPrefix]
             private static void Prefix(ZNet __instance, ZNetPeer peer) {
                 if (!__instance.IsServer() || peer == null) { return; }
+                // Resolved here rather than beside the message it feeds, and ahead of both early returns: the
+                // ledger entry has to be dropped whether or not this disconnect ends up announced, or a server
+                // with the notification off never drains it. See FinalSaveRpc.ConsumeCleanLogout, which also
+                // records why this is not read off the player's save file any more.
+                bool clean = character.FinalSaveRpc.ConsumeCleanLogout(peer.m_uid);
+
                 // Only announce a leave for a peer we announced joining (skips rejected/handshake-failed peers).
                 if (!AnnouncedPeers.Remove(peer.m_uid)) { return; }
                 if (!ValConfig.DiscordNotifyPlayerLeft.Value) { return; }
 
-                DisconnectionState state = ResolveSavedDataState(peer);
                 int deltaWindow = ValConfig.DeltaSynchronizationFrequencyInSeconds.Value;
-
-                bool clean = state == DisconnectionState.Clean;
                 string disconnectText = clean ? "Clean logout" : "Disconnected";
                 string savedDataText = clean
                     ? "✅ Player Data up to date."
@@ -113,9 +116,9 @@ namespace ValheimEnforcer.modules.notifications {
         }
 
         /// <summary>
-        /// The account id behind a peer, with the port stripped off the socket's host name the same way
-        /// <see cref="ResolveSavedDataState"/> does. Returns an empty string when it cannot be read, which
-        /// makes the field carrying it drop out of the message rather than printing something misleading.
+        /// The account id behind a peer, with the port stripped off the socket's host name. Returns an empty
+        /// string when it cannot be read, which makes the field carrying it drop out of the message rather
+        /// than printing something misleading.
         /// </summary>
         private static string ResolveHostId(ZNetPeer peer) {
             try {
@@ -136,22 +139,6 @@ namespace ValheimEnforcer.modules.notifications {
             } catch (System.Exception e) {
                 Logger.LogDebug($"Discord notifications: could not read admin status for {hostId}: {e.Message}");
                 return false;
-            }
-        }
-
-        // Read the players current save state data to give an estimate on if they could have their character rolled back
-        private static DisconnectionState ResolveSavedDataState(ZNetPeer peer) {
-            try {
-                string id = ResolveHostId(peer);
-                DataObjects.Character chara = ValConfig.LoadCharacterFromSave(id, peer.m_playerName);
-                if (chara == null) {
-                    Logger.LogDebug($"Discord notifications: no saved character for {peer.m_playerName} ({id}); reporting saved data as stale.");
-                    return DisconnectionState.DirtyDisconnect;
-                }
-                return chara.LastDisconnect;
-            } catch (System.Exception e) {
-                Logger.LogDebug($"Discord notifications: failed to resolve saved-data state for {peer.m_playerName}: {e.Message}");
-                return DisconnectionState.DirtyDisconnect;
             }
         }
     }

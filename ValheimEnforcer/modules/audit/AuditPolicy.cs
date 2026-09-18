@@ -36,8 +36,10 @@ namespace ValheimEnforcer.modules.audit {
         internal static bool Recorded(ZNetPeer peer) {
             if (peer == null) { return false; }
             if (ValConfig.AuditExemptAdmins == null || !ValConfig.AuditExemptAdmins.Value) { return true; }
-            string hostId = AccountOf(peer);
-            return string.IsNullOrEmpty(hostId) || !ZNet.instance.IsAdmin(hostId);
+            // The remembered verdict: with the exemption on this is asked once per ZDOData packet and once per
+            // relayed hit. A peer with no readable account is not an admin, so it is recorded - the same answer
+            // the unresolved case gave before.
+            return !modules.character.PeerIdentity.IsAdmin(peer);
         }
 
         /// <summary>

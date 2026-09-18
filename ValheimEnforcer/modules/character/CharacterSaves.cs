@@ -91,9 +91,56 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
+        // ---- Account folder listing -----------------------------------------------------------------------
+
+        /// <summary>
+        /// The names of the account folders, as last read, with the last-write time the character folder had
+        /// when they were. Immutable once published, and swapped as a whole, so a reader on any thread sees one
+        /// consistent listing.
+        ///
+        /// Every lookup below used to list the character folder afresh. That folder holds one directory per
+        /// account that has EVER joined, so the cost grew with the age of the server rather than with who was
+        /// online - a path string and a name string per account, thousands of them on a server a few months
+        /// old, on the main thread, for every join, every death and every map upload. The listing only changes
+        /// when an account joins for the first time.
+        /// </summary>
+        private sealed class FolderListing {
+            internal string[] Names;
+            internal DateTime RootWritten;
+        }
+
+        private static volatile FolderListing folderListing;
+
+        /// <summary>Forgets the listing, so the next lookup reads the folder again. Called by anything in the
+        /// mod that creates an account folder; a folder created by hand is caught by the time stamp instead.</summary>
+        internal static void InvalidateFolderListing() {
+            folderListing = null;
+        }
+
+        /// <param name="fresh">Read the folder now whatever is remembered.</param>
+        private static string[] AccountFolders(string root, bool fresh) {
+            // Creating or removing an entry in a directory updates that directory's last-write time, on NTFS
+            // and on every Linux filesystem alike, so one stat answers "has an account been added".
+            DateTime written = Directory.GetLastWriteTimeUtc(root);
+            FolderListing held = folderListing;
+            if (!fresh && held != null && held.RootWritten == written) { return held.Names; }
+
+            string[] paths = Directory.GetDirectories(root);
+            string[] names = new string[paths.Length];
+            for (int i = 0; i < paths.Length; i++) { names[i] = Path.GetFileName(paths[i]); }
+            folderListing = new FolderListing { Names = names, RootWritten = written };
+            return names;
+        }
+
         // Shared disk resolution. Walks the account folders rather than composing a path, so a folder written
         // under a different platform-prefix spelling - or a character file whose case does not match what the
         // caller was handed - is still found. Returns the spellings that actually exist.
+        //
+        // "Found" may be answered from the remembered listing, because it is checked against the disk anyway:
+        // the character file is looked for inside the folder. "Not found" never is. That answer is what gets a
+        // player treated as new here, and a new character's inventory is stripped - so before it is given the
+        // folder is read again, which is exactly what every call used to cost. A listing that has gone stale
+        // can therefore make a lookup slower, and cannot make it wrong.
         private static bool TryResolveOnDisk(string accountId, string characterName,
                                              out string resolvedAccountId, out string resolvedName) {
             resolvedAccountId = accountId;
@@ -101,12 +148,37 @@ namespace ValheimEnforcer.modules.character {
             string root = ValConfig.CharacterFilePath;
             if (!Directory.Exists(root)) { return false; }
 
+            FolderListing before = folderListing;
+            if (TryResolveIn(AccountFolders(root, fresh: false), root, accountId, characterName, out resolvedAccountId, out resolvedName)) {
+                return true;
+            }
+            // Already read from the disk on this call, so there is nothing a second read could add.
+            if (before == null || !ReferenceEquals(before, folderListing)) { return false; }
+            return TryResolveIn(AccountFolders(root, fresh: true), root, accountId, characterName, out resolvedAccountId, out resolvedName);
+        }
+
+        private static void CollectNames(string[] folders, string root, string accountId, List<string> into) {
+            foreach (string folder in folders) {
+                if (!PlatformIds.Matches(folder, accountId)) { continue; }
+                string accountFolder = Path.Combine(root, folder);
+                if (!Directory.Exists(accountFolder)) { continue; } // removed since the listing was read
+                foreach (string characterFile in Directory.GetFiles(accountFolder, "*.yaml")) {
+                    into.Add(Path.GetFileNameWithoutExtension(characterFile));
+                }
+            }
+        }
+
+        private static bool TryResolveIn(string[] folders, string root, string accountId, string characterName,
+                                         out string resolvedAccountId, out string resolvedName) {
+            resolvedAccountId = accountId;
+            resolvedName = characterName;
             // Resolved as a pair on purpose. An account can own more than one folder, so picking a folder and
             // a name independently could hand back a name that lives in a different folder than the one
             // returned - which composes into a path that does not exist.
-            foreach (string accountFolder in Directory.GetDirectories(root)) {
-                string folder = Path.GetFileName(accountFolder);
+            foreach (string folder in folders) {
                 if (!PlatformIds.Matches(folder, accountId)) { continue; }
+                string accountFolder = Path.Combine(root, folder);
+                if (!Directory.Exists(accountFolder)) { continue; } // removed since the listing was read
                 foreach (string characterFile in Directory.GetFiles(accountFolder, "*.yaml")) {
                     string onDisk = Path.GetFileNameWithoutExtension(characterFile);
                     if (!string.Equals(onDisk, characterName, StringComparison.OrdinalIgnoreCase)) { continue; }
@@ -146,11 +218,12 @@ namespace ValheimEnforcer.modules.character {
 
                 string root = ValConfig.CharacterFilePath;
                 if (!Directory.Exists(root)) { return new List<string>(); }
-                foreach (string accountFolder in Directory.GetDirectories(root)) {
-                    if (!PlatformIds.Matches(Path.GetFileName(accountFolder), accountId)) { continue; }
-                    foreach (string characterFile in Directory.GetFiles(accountFolder, "*.yaml")) {
-                        found.Add(Path.GetFileNameWithoutExtension(characterFile));
-                    }
+                // Same rule as TryResolveOnDisk: names may come from the remembered listing, "this account has
+                // nothing" may not - that answer is what lets a character through the account limit.
+                FolderListing before = folderListing;
+                CollectNames(AccountFolders(root, fresh: false), root, accountId, found);
+                if (found.Count == 0 && before != null && ReferenceEquals(before, folderListing)) {
+                    CollectNames(AccountFolders(root, fresh: true), root, accountId, found);
                 }
                 return Dedupe(found);
             } catch (Exception e) {

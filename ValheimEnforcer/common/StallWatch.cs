@@ -25,13 +25,15 @@ namespace ValheimEnforcer.common {
         private static readonly ConcurrentDictionary<string, DateTime> lastWarned = new ConcurrentDictionary<string, DateTime>();
 
         private readonly string label;
-        private readonly Stopwatch watch;
+        // A raw timestamp rather than a Stopwatch. Stopwatch is a class, so holding one made every timed
+        // operation an allocation - and the things worth timing are exactly the things that run often.
+        private readonly long started;
         private readonly bool background;
 
         private StallWatch(string label, bool background) {
             this.label = label;
             this.background = background;
-            watch = Stopwatch.StartNew();
+            started = Stopwatch.GetTimestamp();
         }
 
         /// <summary>
@@ -58,10 +60,9 @@ namespace ValheimEnforcer.common {
         /// already happened, so a problem here must not take the caller down with it.
         /// </summary>
         internal void Stop() {
-            if (watch == null) { return; } // default(StallWatch), never started
-            watch.Stop();
+            if (label == null) { return; } // default(StallWatch), never started
             try {
-                long ms = watch.ElapsedMilliseconds;
+                long ms = (Stopwatch.GetTimestamp() - started) * 1000L / Stopwatch.Frequency;
                 if (Logger.DebugEnabled) { Logger.LogDebug($"[timing] {label} took {ms}ms."); }
 
                 // Bound rather than defaulted: the config is not yet bound this early in startup.
@@ -76,14 +77,22 @@ namespace ValheimEnforcer.common {
                     return;
                 }
                 lastWarned[label] = now;
-                if (Logger.DebugEnabled) {
-                    Logger.LogDebug(background
-                        ? $"{label} took {ms}ms on a background thread. This does not stall the game - no frame " +
-                          "time is spent on it - but it is slower than it should be. Further warnings for this " +
-                          "operation are suppressed for a minute."
-                        : $"{label} took {ms}ms, which is long enough to show as a frame hitch. " +
-                          "Further warnings for this operation are suppressed for a minute.");
+                if (background) {
+                    // Debug only. No frame time is spent on a worker thread, so this is a note for whoever is
+                    // already looking, not something to put in front of an admin who is not.
+                    if (Logger.DebugEnabled) {
+                        Logger.LogDebug($"{label} took {ms}ms on a background thread. This does not stall the game - no frame " +
+                                        "time is spent on it - but it is slower than it should be. Further warnings for this " +
+                                        "operation are suppressed for a minute.");
+                    }
+                    return;
                 }
+                // A warning, with debug logging off. This is the whole reason the class exists: a main-thread
+                // stall is felt by every connected player, and one that only reports itself once somebody has
+                // already turned debug on is one nobody ever hears about. It stays quiet through the cooldown
+                // above and StallWarningThresholdMs, which an admin can raise - or set to 0 - if it is noise.
+                Logger.LogWarning($"{label} took {ms}ms, which is long enough to show as a frame hitch. " +
+                                  "Further warnings for this operation are suppressed for a minute.");
             } catch (Exception e) {
                 Logger.LogDebug($"StallWatch could not report {label}: {e.Message}");
             }

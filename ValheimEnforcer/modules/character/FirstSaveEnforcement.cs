@@ -123,6 +123,10 @@ namespace ValheimEnforcer.modules.character {
             private static void Prefix(ZNet __instance, ZNetPeer peer) {
                 if (__instance == null || !__instance.IsServer()) { return; }
                 ClearForPeer(peer);
+                // Whatever this player last sent should reach their file now rather than when the write
+                // interval comes round: nothing further is coming from them, and the next thing to want that
+                // file is their own rejoin. Does nothing with CharacterWriteIntervalSeconds at 0.
+                if (peer != null) { CharacterStore.RequestWriteForSender(peer.m_uid); }
             }
         }
 

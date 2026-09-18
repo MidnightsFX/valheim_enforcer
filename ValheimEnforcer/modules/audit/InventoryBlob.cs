@@ -8,7 +8,7 @@ namespace ValheimEnforcer.modules.audit {
     /// <summary>
     /// Reads the item list out of a container's ZDO without touching the scene.
     ///
-    /// A container stores its contents as base64 of an Inventory.Save package in the "items" ZDO string
+    /// A container stores its contents as an Inventory.Save package in the "items" ZDO byte array
     /// (Container.Save). The obvious way to read that back is Inventory.Load - but Load resolves every entry
     /// through ObjectDB.GetItemPrefab and Instantiates then Destroys a GameObject per item, which is far too
     /// expensive to do inside the ZDO stream and pointless when all that is wanted is names and counts. This
@@ -55,16 +55,19 @@ namespace ValheimEnforcer.modules.audit {
         /// The audit sees a container's ZDO every time anything about it is replicated, and for a cart or a
         /// ship being moved that is twenty times a second with the contents untouched - so the cheap
         /// "unchanged" answer has to stay cheap, which rules out parsing every time. Holding the previous
-        /// base64 to compare against was the obvious alternative and cost a multi-kilobyte string per tracked
-        /// container; this is eight bytes and reads the same characters the comparison would have.
+        /// blob to compare against was the obvious alternative and cost a couple of kilobytes per tracked
+        /// container; this is eight bytes and reads the same bytes the comparison would have.
+        ///
+        /// The array belongs to ZDOExtraData and is only read here, so the whole unchanged path - lookup,
+        /// hash, compare - allocates nothing.
         ///
         /// FNV-1a. Not a checksum against tampering - nothing here is a security decision - just a spread wide
         /// enough that two different blobs colliding is not a thing that happens. A collision would cost one
         /// unrecorded container change, and the next change to that container is measured against the state
         /// this one established, so it cannot compound.
         /// </summary>
-        internal static long HashOf(string raw) {
-            if (string.IsNullOrEmpty(raw)) { return 0L; }
+        internal static long HashOf(byte[] raw) {
+            if (raw == null || raw.Length == 0) { return 0L; }
             ulong hash = 14695981039346656037UL;
             for (int i = 0; i < raw.Length; i++) {
                 hash ^= raw[i];
@@ -81,11 +84,11 @@ namespace ValheimEnforcer.modules.audit {
         /// tidying a chest as a flurry of takes and stores. Summing by prefab and quality makes a rearrange
         /// produce no difference at all, which is exactly the behaviour a moderator needs.
         /// </summary>
-        internal static Dictionary<string, Slot> Parse(string base64) {
-            if (string.IsNullOrEmpty(base64)) { return new Dictionary<string, Slot>(StringComparer.Ordinal); }
+        internal static Dictionary<string, Slot> Parse(byte[] blob) {
+            if (blob == null || blob.Length == 0) { return new Dictionary<string, Slot>(StringComparer.Ordinal); }
 
             try {
-                ZPackage pkg = new ZPackage(base64);
+                ZPackage pkg = new ZPackage(blob);
                 int version = pkg.ReadInt();
 
                 // Versions below 100 are not a format this has ever seen; above ItemVersionMax is a game newer

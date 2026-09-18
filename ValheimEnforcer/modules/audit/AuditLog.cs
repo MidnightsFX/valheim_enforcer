@@ -275,16 +275,33 @@ namespace ValheimEnforcer.modules.audit {
 
             int written = 0;
             try {
-                foreach (IGrouping<DateTime, AuditEvent> day in batch.GroupBy(e => e.TimeUtc().Date)) {
-                    string path = PathForDay(day.Key);
-                    List<string> lines = new List<string>();
-                    foreach (AuditEvent entry in day) {
-                        string line = Format(entry);
-                        if (line != null) { lines.Add(line); }
+                // One pass, one builder, and a writer that is only swapped when the day changes. A batch is in
+                // time order because events are stamped as they are enqueued, so in practice that is once - or
+                // twice, for the flush that straddles midnight. Same bytes as File.AppendAllLines wrote: UTF-8,
+                // with a BOM only when the file is new.
+                StringBuilder line = new StringBuilder(512);
+                char[] chars = new char[512];
+                StreamWriter writer = null;
+                DateTime writerDay = DateTime.MinValue;
+                try {
+                    foreach (AuditEvent entry in batch) {
+                        if (!TryFormat(entry, line)) { continue; }
+                        DateTime day = entry.TimeUtc().Date;
+                        if (writer == null || day != writerDay) {
+                            writer?.Dispose();
+                            writer = new StreamWriter(PathForDay(day), true, Encoding.UTF8);
+                            writerDay = day;
+                        }
+                        // Copied out through one reused buffer rather than line.ToString(), so nothing at all
+                        // is allocated per event once the buffer has grown to fit the longest line in the batch.
+                        if (chars.Length < line.Length) { chars = new char[Math.Max(line.Length, chars.Length * 2)]; }
+                        line.CopyTo(0, chars, 0, line.Length);
+                        writer.Write(chars, 0, line.Length);
+                        writer.WriteLine();
+                        written++;
                     }
-                    if (lines.Count == 0) { continue; }
-                    File.AppendAllLines(path, lines, Encoding.UTF8);
-                    written += lines.Count;
+                } finally {
+                    writer?.Dispose();
                 }
             } catch (Exception e) {
                 Logger.LogWarning($"Could not write the audit log; {batch.Length} event(s) stay buffered for the next flush: {e.Message}");
@@ -307,20 +324,43 @@ namespace ValheimEnforcer.modules.audit {
         internal static List<string> ToLines(IEnumerable<AuditEvent> events) {
             List<string> lines = new List<string>();
             if (events == null) { return lines; }
+            StringBuilder line = new StringBuilder(512);
             foreach (AuditEvent entry in events) {
-                string line = Format(entry);
-                if (line != null) { lines.Add(line); }
+                if (TryFormat(entry, line)) { lines.Add(line.ToString()); }
             }
             return lines;
         }
 
-        private static string Format(AuditEvent entry) {
+        /// <summary>
+        /// Renders one event into <paramref name="line"/>, replacing whatever it held. False when the event
+        /// cannot be rendered at all, which drops it rather than writing half a line.
+        ///
+        /// The line is written by hand (<see cref="AuditEvent.AppendJsonLine"/>) rather than by the serializer
+        /// above. Measured, YamlDotNet allocated 50 KB to produce one 275 character line - it walks the object
+        /// through reflection and builds an event object per token - and this is called for every item a player
+        /// gains or loses and every container they touch. An event is fourteen flat fields; appending them to a
+        /// reused builder costs nothing. The serializer stays as the fallback, so a problem in the hand-written
+        /// path costs speed rather than a record.
+        /// </summary>
+        private static bool TryFormat(AuditEvent entry, StringBuilder line) {
+            line.Length = 0;
+            if (entry == null) { return false; }
             try {
+                if (AuditEvent.HandWrittenLineUsable) {
+                    entry.AppendJsonLine(line);
+                    return true;
+                }
+            } catch (Exception e) {
+                Logger.LogDebug($"The hand-written audit line failed, falling back to the serializer: {e.Message}");
+            }
+            try {
+                line.Length = 0;
                 // JsonCompatible still emits a document-terminating newline; a day file is one event per line.
-                return LineSerializer.Serialize(entry).Replace("\r", "").Replace("\n", "").Trim();
+                line.Append(LineSerializer.Serialize(entry).Replace("\r", "").Replace("\n", "").Trim());
+                return line.Length > 0;
             } catch (Exception e) {
                 Logger.LogDebug($"Could not serialize an audit event: {e.Message}");
-                return null;
+                return false;
             }
         }
 

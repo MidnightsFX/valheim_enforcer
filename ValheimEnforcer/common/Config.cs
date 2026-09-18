@@ -112,10 +112,16 @@ namespace ValheimEnforcer {
         public static ConfigEntry<int> StallWarningThresholdMs;
         public static ConfigEntry<int> CharacterCacheIdleMinutes;
         public static ConfigEntry<int> MemoryReportIntervalMinutes;
+        public static ConfigEntry<int> CharacterWriteIntervalSeconds;
+        public static ConfigEntry<bool> FullSyncSpreadAcrossInterval;
+        public static ConfigEntry<bool> FastCharacterWriter;
+        public static ConfigEntry<bool> BinaryDeltaUpdates;
 
         public static ConfigEntry<bool> EnableCheatDetection;
         public static ConfigEntry<bool> DetectCheatEngine;
         public static ConfigEntry<bool> DetectValheimTooler;
+        public static ConfigEntry<bool> DetectInjectedCheatAssemblies;
+        public static ConfigEntry<bool> DetectProxyLoaders;
         public static ConfigEntry<bool> DetectCheatTools;
         public static ConfigEntry<bool> DetectGenericTrainers;
         public static ConfigEntry<bool> ScanLoadedModules;
@@ -210,6 +216,9 @@ namespace ValheimEnforcer {
         internal static CustomRPC CharacterSaveRPC;
         internal static CustomRPC CheatDetectionRPC;
         internal static CustomRPC ItemDeltaUpdateRPC;
+        // The same update as plain package fields. A second RPC rather than a second format on the first one,
+        // so a server that predates it simply has no handler - see DeltaWire for how a client finds that out.
+        internal static CustomRPC ItemDeltaBinaryRPC;
         internal static CustomRPC FullSyncRequestRPC;
 
         // Server to the affected client only. Both used to double as the admin's request channel as well;
@@ -257,6 +266,7 @@ namespace ValheimEnforcer {
             ReturnConfiscatedItemsRPC = NetworkManager.Instance.AddRPC("VENFORCE_RETURN_CONFISCATED", NoServerHandler, OnClientReceiveConfiscatedItems);
             CheatDetectionRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHEAT", OnServerReceiveCheatReport, OnClientReceiveCheatReport);
             ItemDeltaUpdateRPC = NetworkManager.Instance.AddRPC("VENFORCE_ITEMDELTA", OnServerRecieveDeltaItemUpdate, OnClientReceiveDeltaItemUpdate);
+            ItemDeltaBinaryRPC = NetworkManager.Instance.AddRPC("VENFORCE_ITEMDELTA_BIN", OnServerReceiveBinaryDelta, NoClientHandler);
             ClearConfiscatedRPC = NetworkManager.Instance.AddRPC("VENFORCE_CLEAR_CONFISCATED", NoServerHandler, OnClientReceiveClearConfiscated);
             SkillRestoreRPC = NetworkManager.Instance.AddRPC("VENFORCE_SKILL_RESTORE", NoServerHandler, OnClientReceiveSkillRestore);
             FullSyncRequestRPC = NetworkManager.Instance.AddRPC("VENFORCE_FULLSYNC_REQ", OnServerReceiveFullSyncRequest, OnClientReceiveFullSyncRequest);
@@ -401,19 +411,30 @@ namespace ValheimEnforcer {
             modules.character.CharacterStore.SetIdleEvictionMinutes(CharacterCacheIdleMinutes.Value);
             MemoryReportIntervalMinutes = BindServerConfig("Advanced", "MemoryReportIntervalMinutes", 0, "When above 0, writes the summary enforcer-memory prints to the server log every this-many minutes: process working set, managed heap, what this mod is holding (cached characters, audit buffers, per-player tables) and the world's object counts. Purely diagnostic. Off by default.", advanced: true, valmin: 0, valmax: 1440);
 
+            CharacterWriteIntervalSeconds = BindServerConfig("Advanced", "CharacterWriteIntervalSeconds", 0, "When above 0, a character changed by an incremental update is written to disk at most once every this-many seconds, instead of after every update. The copy in memory is what the server works from either way, so nothing a connected player does is affected; what changes is how far the FILE can trail it. Full saves, deaths, a player leaving, a player joining and a server shutdown all still write straight away, so this only ever delays the routine updates in between. The cost is the obvious one: a server that dies without shutting down loses up to this many seconds of those updates for whoever was mid-session, on top of the rate limit they already ride (CharacterDeltaTracker). Worth turning on for a busy server, where rewriting a whole character for every player every few seconds is the largest single source of memory churn this mod has; 30 to 60 is a sensible value. 0, the default, writes after every update as earlier versions did. Not used with InternalStorageMode.", advanced: true, valmin: 0, valmax: 600);
+            CharacterWriteIntervalSeconds.SettingChanged += (sender, args) => modules.character.CharacterStore.SetWriteIntervalSeconds(CharacterWriteIntervalSeconds.Value);
+            modules.character.CharacterStore.SetWriteIntervalSeconds(CharacterWriteIntervalSeconds.Value);
+            FullSyncSpreadAcrossInterval = BindServerConfig("Advanced", "FullSyncSpreadAcrossInterval", true, "If enabled (the default), the periodic full character saves are asked for one player at a time, evenly spaced across FullSyncPullIntervalMinutes, rather than from everybody at once in waves at the end of it. Each player is still asked exactly as often. The difference is to the server: a full save is the most expensive thing a player sends, and a hundred of them inside a minute is a burst of work and memory every interval where one every few seconds is nothing at all. Turn it off to go back to waves of FullSyncMaxConcurrentPlayers, which that setting then controls again.", advanced: true);
+            FastCharacterWriter = BindServerConfig("Advanced", "FastCharacterWriter", true, "If enabled (the default), character saves are written by a purpose-built writer instead of the general YAML serializer. The file is the same file - same keys, same layout, read back by the same reader, and interchangeable with saves written the other way - but producing it costs a small fraction of the memory, which matters because a character is rewritten every time a player's inventory changes. The writer checks itself against the serializer once at startup and hands everything back to the serializer for the session if the two disagree about anything, saying so in the log. Turn this off only if you suspect it of a problem; saves keep working exactly as they did before it existed.", advanced: true);
+            FastCharacterWriter.SettingChanged += (sender, args) => CharacterYaml.SetEnabled(FastCharacterWriter.Value);
+            CharacterYaml.SetEnabled(FastCharacterWriter.Value);
+            BinaryDeltaUpdates = BindServerConfig("Advanced", "BinaryDeltaUpdates", true, "If enabled (the default), the server tells connecting clients it accepts incremental character updates in a compact binary form, and clients that understand that send it instead of YAML. Same content either way; the binary form costs the server a few kilobytes to read where the YAML one cost around a hundred and fifty, once per player every few seconds, on the main thread. Clients running a build from before this existed keep sending YAML and are handled as they always were, and turning this off makes every client do the same from its next connection.", advanced: true);
+
             EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Master switch for client-side cheat scanning. When enabled the client checks running processes, the DLLs loaded into the game, and open window titles against a catalog of known cheat tools. Only matched entries are reported to the server - the player's full process list is never transmitted.");
-            DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Detect ValheimTooler by the namespace of the types it loads (rename-proof), including assemblies injected mid-session. A confirmed detection is always auto-banned regardless of ActionOnDetection. High confidence, very low cost.");
+            DetectInjectedCheatAssemblies = BindServerConfig("Anti-Cheat", "DetectInjectedCheatAssemblies", true, "Detect injected cheat menus by the namespace of the types they load into the game, including assemblies that arrive mid-session. This is the vector that sees a cheat which is not a BepInEx plugin: it has no file in BepInEx/plugins to hash, it is not in the mod list the client declares at join, and a menu that draws inside the game has neither a process nor a window to find it by - but its own types are loaded in this process, and their namespace survives renaming the file. Currently covers ValheimTooler and Valheaven (a.k.a. ValheimAdminMenu). Both are auto-banned on a confirmed detection regardless of ActionOnDetection. High confidence, very low cost: an assembly is inspected once and the result cached for the session.");
+            DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Include ValheimTooler in the injected-assembly scan. Split out from the rest because it predates the catalog and servers may already have turned it off. Requires DetectInjectedCheatAssemblies.");
+            DetectProxyLoaders = BindServerConfig("Anti-Cheat", "DetectProxyLoaders", true, "Detect proxy-DLL loaders: a copy of a Windows system DLL sitting beside valheim.exe instead of in System32. Windows resolves a DLL from the game folder first, so dropping one there gets it loaded into the game ahead of the real one, which then does as it likes and forwards the genuine exports on. This is how Valheaven ships (as version.dll) and it is the standard way to load a cheat that is not a mod. The check is not the name - every name involved is a real Windows DLL the game legitimately loads - it is where the file was loaded FROM, so it survives renaming and rebuilding. BepInEx's own doorstop is a winhttp.dll proxy and is recognised as such. The graphics names (dxgi, d3d9/10/11/12, ddraw, opengl32) are reported as low confidence and never enforced on their own, because ReShade, Special K and ENB all install exactly this way. Requires ScanLoadedModules.");
             DetectCheatTools = BindServerConfig("Anti-Cheat", "DetectCheatTools", true, "Scan for the built-in catalog of known cheat tools: WeMod/Wand, ArtMoney, PLITCH, Speed Gear, Squalr, WPE Pro, and the injectors/loaders used to deliver Valheim cheats (SharpMonoInjector, Xenos, Extreme Injector, ValheimTooler launcher, ValHack, Valheim Mod Menu). Tools with no legitimate purpose are auto-banned; the rest follow ActionOnDetection.");
             DetectCheatEngine = BindServerConfig("Anti-Cheat", "DetectCheatEngine", true, "Include Cheat Engine in the catalog scan (process names, window titles, and injected speedhack/DBK modules). Its TfrmMain/TfrmMemView window classes are generic Delphi names shared by legitimate software, so a class-only sighting is logged but never kicked or banned. Note: Cheat Engine has legitimate uses — prefer Log action over Kick/Ban. Requires DetectCheatTools.");
             DetectGenericTrainers = BindServerConfig("Anti-Cheat", "DetectGenericTrainers", true, "Flag any running process whose executable name contains the word 'trainer' (e.g. 'Valheim Trainer.exe', 'Hitman 3 Trainer - FLiNG.exe'). Catches FLiNG, MrAntiFun and Cheat Happens trainers without listing each one. Follows ActionOnDetection.");
-            ScanLoadedModules = BindServerConfig("Anti-Cheat", "ScanLoadedModules", true, "Scan the native DLLs loaded into the game process itself. This is the only way to see a cheat that has already injected and then closed its launcher, and it survives renaming the tool's executable. Cheap - the module list is local to our own process.");
+            ScanLoadedModules = BindServerConfig("Anti-Cheat", "ScanLoadedModules", true, "Scan the native DLLs loaded into the game process itself. This is the only way to see a cheat that has already injected and then closed its launcher, and it survives renaming the tool's executable. Also carries the proxy-loader check (DetectProxyLoaders). Cheap - the module list is local to our own process.");
             ScanWindowTitles = BindServerConfig("Anti-Cheat", "ScanWindowTitles", true, "Scan open window classes and titles. Catches tools that have been renamed to evade the process-name check, most notably Cheat Engine. Generic framework window classes (e.g. Delphi's TfrmMain) are treated as low confidence: the server logs the sighting but takes no action on it alone.");
             ScanElevatedProcesses = BindServerConfig("Anti-Cheat", "ScanElevatedProcesses", true, "Let the process scan see programs run as administrator and background services. Valheim's runtime silently leaves those out of its own process list - roughly a third of what runs on a typical desktop - so without this any cheat tool started elevated, WeMod/Wand included, is invisible to the process check. Names are read from a Windows process snapshot without opening any process, and as before only matched names are reported to the server. Turn off only to go back to the old process list if this causes a problem. Windows only.", advanced: true);
             AdditionalCheatProcesses = BindServerConfig("Anti-Cheat", "AdditionalCheatProcesses", "", "Comma-separated list of extra process names to treat as cheat tools, without the '.exe' suffix, matched exactly and case-insensitively. Empty by default. Suggested opt-in values for strict servers: x64dbg, x32dbg, x96dbg, ProcessHacker, SystemInformer, HxD, ReClass.NET, ollydbg, Scylla_x64, frida, Fiddler, Charles. WARNING: every one of those is a standard developer tool with heavy legitimate use by modders and streamers, which is why none of them ship enabled. Deliberately excluded from the built-in catalog and NOT recommended here: Aurora (collides with Aurora RGB lighting software), Process Lasso (a CPU priority optimiser, not a speedhack), AutoHotkey (compiled scripts take arbitrary names, so the check is worthless, and it is widely used for accessibility and key remapping), and MSI Afterburner/RivaTuner/OBS (their overlay DLLs look injector-shaped).");
             IgnoredCheatProcesses = BindServerConfig("Anti-Cheat", "IgnoredCheatProcesses", "", "Comma-separated allowlist of process, module or window names to never flag, matched as a case-insensitive substring. Applied last, so it overrides the built-in catalog and AdditionalCheatProcesses. Use this to keep playing when a legitimate program trips a signature.");
             //DetectSpeedhack = BindServerConfig("Anti-Cheat", "DetectSpeedhack", true, "Detect speedhack via Unity time vs. wall-clock drift.");
-            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a cheat tool is reported. Note that dedicated game-cheating tools (injectors, ValheimTooler, ValHack, Valheim Mod Menu) are always auto-banned regardless of this setting, and low-confidence sightings (generic window classes) are always logged only, regardless of this setting.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
-            CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 30, "Seconds between periodic client scan ticks. The process, module and window scans are staggered across successive ticks so their cost never lands on the same frame, so each individual scan runs every three intervals. ValheimTooler assembly detection is event-driven and not affected by this interval.", false, 5, 300);
+            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a cheat tool is reported. Note that dedicated game-cheating tools (injectors, ValheimTooler, Valheaven, ValHack, Valheim Mod Menu) are always auto-banned regardless of this setting, and low-confidence sightings (generic window classes, graphics proxy DLLs) are always logged only, regardless of this setting. An unidentified proxy loader follows this setting: it says a loader is installed, not which one.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
+            CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 30, "Seconds between periodic client scan ticks. The process, module and window scans are staggered across successive ticks so their cost never lands on the same frame, so each individual scan runs every three intervals. Injected-assembly detection is event-driven and not affected by this interval.", false, 5, 300);
 
             EnableStructureValidation = BindServerConfig("World Integrity", "EnableStructureValidation", false, "Master switch for server-side validation of the structures clients place. When enabled, the server inspects the objects arriving from each client and reports the ones no legitimate client can produce: geometry that is not in any build menu, and pieces whose health is above what the prefab was designed to hold. This is the check for somebody spawning dungeon rooms, dvergr towns and ruins into a world - the structures that show a nameplate with no crafter on it, cannot be destroyed, and flatten the ground where they land. Off by default; every part of the feature is inert until this is on.");
             DetectNonBuildableStructures = BindServerConfig("World Integrity", "DetectNonBuildableStructures", true, "Flag a client that creates a structure which is in no build menu. Membership of a piece table is what makes a prefab placeable at all - by the hammer, the hoe, the cultivator, and by every blueprint or bulk-building mod, which all place out of those same tables - so a mod's own pieces are covered automatically and a large blueprint cannot trip this.");
@@ -508,7 +529,11 @@ namespace ValheimEnforcer {
             }
             // Double write the data so that if the storage mode is switched the data will still be present.
             Directory.CreateDirectory(Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder));
-            var saveDir = Directory.CreateDirectory(Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, id));
+            string accountDir = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, id);
+            // A folder that is about to exist for the first time is a new account, which the remembered folder
+            // listing in CharacterSaves does not know about yet.
+            if (!Directory.Exists(accountDir)) { modules.character.CharacterSaves.InvalidateFolderListing(); }
+            var saveDir = Directory.CreateDirectory(accountDir);
             string path = Path.Combine(saveDir.FullName, $"{character.Name}.yaml");
             if (routine) { Logger.LogDebug($"Writing to {path}"); } else { Logger.LogInfo($"Writing to {path}"); }
             // Serializing the whole character and writing it is synchronous and on the main thread on
@@ -517,7 +542,9 @@ namespace ValheimEnforcer {
             // rather than as an unexplained hitch.
             StallWatch timer = StallWatch.Start("Character save (serialize + write)");
             try {
-                File.WriteAllText(path, DataObjects.yamlserializer.Serialize(character));
+                // Through CharacterYaml rather than Serialize + WriteAllText: the same document for a fraction of
+                // the allocation, and published by rename so a crash mid-write cannot leave half a save behind.
+                CharacterYaml.WriteFile(path, character);
             } catch (Exception e) {
                 Logger.LogWarning($"Failed to write character data to disk at {path}: {e.Message}");
             } finally {
@@ -532,11 +559,28 @@ namespace ValheimEnforcer {
             }
             if (ValConfig.InternalStorageMode.Value) {
                 Logger.LogInfo("Loading character from internal storage system.");
-                DataObjects.Character savedChar = InternalDataStore.GetAccountCharacter(id, name);
+                // Timed for the same reason as the write side, and this branch is the heavier of the two: the
+                // registry holds one YAML document per ACCOUNT, so this inflates every character on it to
+                // return one of them.
+                StallWatch internalTimer = StallWatch.Start("Character load (internal storage)");
+                DataObjects.Character savedChar;
+                try {
+                    savedChar = InternalDataStore.GetAccountCharacter(id, name);
+                } finally {
+                    internalTimer.Stop();
+                }
                 if (savedChar == null) {
                     Logger.LogDebug($"No character file found for player with {id}-{name} is this character new?");
                 }
                 return savedChar;
+            }
+
+            // The store may be holding a change for this character that has not reached the file yet - for about
+            // a second normally, and for up to CharacterWriteIntervalSeconds when that is set. Everything that
+            // comes through here on a server is about to act on what the file says (an admin command, the death
+            // observer), so ask for that write first. Costs a dictionary probe when nothing is outstanding.
+            if (modules.character.CharacterStore.HasUnwrittenChanges(id, name)) {
+                modules.character.CharacterStore.FlushCharacter(id, name, LoginFlushBound);
             }
 
             var charFile = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, id, $"{name}.yaml");
@@ -544,8 +588,19 @@ namespace ValheimEnforcer {
                 Logger.LogDebug($"No character file found for player with {id}-{name} is this character new?");
                 return null;
             }
-            var chartext = File.ReadAllText(charFile);
-            return DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(chartext);
+            // Reading the file and inflating the whole character is synchronous and on the main thread for
+            // every caller of this (join validation, the death observer, the admin commands), and a large save
+            // - hundreds of confiscated items, a full progression record - makes it long enough to see. Timed
+            // like WritePlayerCharacterToSave so it shows up as itself rather than as an unexplained hitch;
+            // the load side used to be the untimed half, which is why the cost of the old disconnect-path
+            // read never appeared in a log.
+            StallWatch timer = StallWatch.Start("Character load (read + deserialize)");
+            try {
+                var chartext = File.ReadAllText(charFile);
+                return DataObjects.yamldeserializer.Deserialize<DataObjects.Character>(chartext);
+            } finally {
+                timer.Stop();
+            }
         }
 
         public static string GetSecondaryConfigDirectoryPath() {
@@ -796,7 +851,8 @@ loadouts: {}
             if (modules.character.CharacterStore.HasUnwrittenChanges(saveId, saveName)) {
                 StallWatch wait = StallWatch.Start("Character login (waiting for a pending save write)");
                 try {
-                    if (!modules.character.CharacterStore.Flush(LoginFlushBound, pollMs: 5)) {
+                    // This character's write only, not the whole queue: see HasUnwrittenChanges.
+                    if (!modules.character.CharacterStore.FlushCharacter(saveId, saveName, LoginFlushBound, pollMs: 5)) {
                         Logger.LogWarning($"A save was still being written when {saveName} ({saveId}) connected; the character sent to them may be one update behind.");
                     }
                 } finally {
@@ -837,7 +893,13 @@ loadouts: {}
         internal const int MaxMapRequestBytes = 1024;
         internal const int MaxDeltaPayloadBytes = 1 * 1024 * 1024;
         internal const int MaxCheatReportBytes = 64 * 1024;
-        internal const int MaxModListBytes = 2 * 1024 * 1024;
+        // Parsed before the password and the ban list are checked, so this is the one ceiling here that is
+        // about a stranger rather than a player. A client's declaration runs to roughly 240 bytes a mod with
+        // its hash, so half a megabyte is two thousand mods - several times the largest pack anybody ships -
+        // while being a quarter of what a connecting peer could previously make the main thread parse.
+        internal const int MaxModListBytes = 512 * 1024;
+        // The same ceiling expressed as a count, applied once the list is an object.
+        internal const int MaxDeclaredModEntries = 4096;
         internal const int MaxCommandArgs = 32;
         // An audit request names a player and two dates; nothing legitimate in one is large. The download
         // ceiling doubles as the decompression bound on the receiving client.
@@ -1045,7 +1107,7 @@ loadouts: {}
             // The store may still be holding an unwritten map for this character from their previous session.
             // One short wait here beats sending a stale map that the client then adopts over a newer one.
             if (modules.character.CharacterStore.HasUnwrittenChanges(accountId, characterName)) {
-                modules.character.CharacterStore.Flush(LoginFlushBound);
+                modules.character.CharacterStore.FlushCharacter(accountId, characterName, LoginFlushBound);
             }
 
             // Resolve the spelling actually on disk before composing a path: on a case-sensitive filesystem
@@ -1230,7 +1292,7 @@ loadouts: {}
             try {
                 chara.ConfiscatedItems = null;
                 chara.SkillReductions = null;
-                payload = CharacterPayload(DataObjects.yamlserializer.Serialize(chara), CharPayloadSanitized);
+                payload = CharacterPayload(CharacterYaml.ToYaml(chara), CharPayloadSanitized);
             } finally {
                 // The caller's object is server-side authoritative state; never leave it stripped.
                 chara.ConfiscatedItems = held;
@@ -1385,6 +1447,10 @@ loadouts: {}
                 // Older servers send the YAML with no tag after it.
                 if (package.GetPos() < package.Size()) {
                     kind = package.ReadString();
+                }
+                // And older ones still send nothing after the tag, which leaves this session on YAML deltas.
+                if (package.GetPos() < package.Size()) {
+                    DeltaWire.NoteServerCapabilities(package.ReadInt());
                 }
             } catch (Exception e) {
                 Logger.LogWarning($"Could not read the character payload from the server: {e.Message}");
@@ -1698,6 +1764,10 @@ loadouts: {}
             yield break;
         }
 
+        /// <summary>
+        /// The YAML form of a delta. Kept for clients that predate <see cref="ItemDeltaBinaryRPC"/>, and for any
+        /// client talking to a server that has BinaryDeltaUpdates switched off - both still send this one.
+        /// </summary>
         internal static IEnumerator OnServerRecieveDeltaItemUpdate(long sender, ZPackage package) {
             if (!WithinLimit(package, MaxDeltaPayloadBytes, sender, "delta update")) { yield break; }
             string yaml = package.ReadString(); // must run on the main thread (consumes the ZPackage); cheap
@@ -1709,7 +1779,14 @@ loadouts: {}
             // and it is the half whose cost rises with the player count.
             StallWatch timer = StallWatch.Start("Delta update (server receive)");
             try {
-                HandleDeltaItemUpdate(sender, yaml);
+                DeltaSummaryUpdate deltaUpdate;
+                try {
+                    deltaUpdate = DataObjects.yamldeserializer.Deserialize<DeltaSummaryUpdate>(yaml);
+                } catch (Exception e) {
+                    Logger.LogWarning($"Failed to deserialize delta update from {sender}: {e.Message}");
+                    yield break;
+                }
+                HandleDeltaItemUpdate(sender, deltaUpdate);
             } finally {
                 timer.Stop();
             }
@@ -1717,17 +1794,42 @@ loadouts: {}
         }
 
         /// <summary>
-        /// Everything the delta handler does once the package has been read off the wire.
+        /// The same delta, read straight off the package instead of parsed out of YAML.
         ///
-        /// Split out of the coroutine so it can be timed as a unit - an iterator cannot be wrapped in a
-        /// try/finally around its own yields. Every step is synchronous; the coroutine above never suspends.
+        /// Measured on a real character, the YAML form of one delta - twenty-six skills, three status effects and
+        /// three items, 2.3 KB on the wire - cost 152 KB of garbage to parse, on the main thread, once per player
+        /// per rate-limit window. Both ends of this message are this mod, so none of what YAML buys is needed
+        /// here; the fields are read in the order <see cref="DeltaWire.Write"/> wrote them.
         /// </summary>
-        private static void HandleDeltaItemUpdate(long sender, string yaml) {
-            DeltaSummaryUpdate deltaUpdate;
+        internal static IEnumerator OnServerReceiveBinaryDelta(long sender, ZPackage package) {
+            if (!WithinLimit(package, MaxDeltaPayloadBytes, sender, "delta update")) { yield break; }
+
+            StallWatch timer = StallWatch.Start("Delta update (server receive)");
             try {
-                deltaUpdate = DataObjects.yamldeserializer.Deserialize<DeltaSummaryUpdate>(yaml);
-            } catch (Exception e) {
-                Logger.LogWarning($"Failed to deserialize delta update from {sender}: {e.Message}");
+                DeltaSummaryUpdate deltaUpdate;
+                try {
+                    deltaUpdate = DeltaWire.Read(package);
+                } catch (Exception e) {
+                    Logger.LogWarning($"Failed to read a delta update from {sender}: {e.Message}");
+                    yield break;
+                }
+                HandleDeltaItemUpdate(sender, deltaUpdate);
+            } finally {
+                timer.Stop();
+            }
+            yield break;
+        }
+
+        /// <summary>
+        /// Everything the delta handler does once the payload has been turned into an object, whichever form it
+        /// arrived in.
+        ///
+        /// Split out of the coroutines so it can be timed as a unit - an iterator cannot be wrapped in a
+        /// try/finally around its own yields. Every step is synchronous; the coroutines above never suspend.
+        /// </summary>
+        private static void HandleDeltaItemUpdate(long sender, DeltaSummaryUpdate deltaUpdate) {
+            if (deltaUpdate == null) {
+                Logger.LogWarning($"Malformed delta update from {sender}: it was empty.");
                 return;
             }
             if (string.IsNullOrEmpty(deltaUpdate.Name) || string.IsNullOrEmpty(deltaUpdate.HostID)) {
@@ -1754,8 +1856,14 @@ loadouts: {}
             // Runs after the identity binding above, so the report names the character the connection is
             // actually playing rather than whatever the payload claimed, and before the delta is applied, so a
             // flagged item is reported whether or not the save that follows succeeds.
-            modules.worldintegrity.ItemOriginValidator.InspectDelta(
-                deltaUpdate, deltaUpdate.HostID, deltaUpdate.Name, SenderIsAdmin(sender));
+            // The admin question is only asked when something will use the answer. ZNet.IsAdmin builds several
+            // strings per call and this runs for every delta from every player, while the detector it feeds is
+            // off by default.
+            if (modules.worldintegrity.ItemOriginValidator.Enabled()) {
+                bool senderIsAdmin = modules.character.PeerIdentity.IsAdmin(ZNet.instance?.GetPeer(sender));
+                modules.worldintegrity.ItemOriginValidator.InspectDelta(
+                    deltaUpdate, deltaUpdate.HostID, deltaUpdate.Name, senderIsAdmin);
+            }
 
             // Same placement, and for the same two reasons: after the identity binding above, so a recorded
             // event names the character this connection is really playing rather than whatever the payload
@@ -1765,13 +1873,12 @@ loadouts: {}
 
             if (ValConfig.InternalStorageMode.Value) {
                 // Internal storage reads/writes touch a registry ZDO and must stay on the main thread.
-                Logger.LogInfo("Loading character for delta update with internal storage mode.");
                 DataObjects.Character character = InternalDataStore.GetAccountCharacter(deltaUpdate.HostID, deltaUpdate.Name);
                 if (character == null) {
                     RequestFullSync(sender, deltaUpdate);
                     return;
                 }
-                Logger.LogInfo($"Received delta update from {deltaUpdate.Name} ({deltaUpdate.HostID}): {deltaUpdate.ItemModifications?.Count ?? 0} item delta(s).");
+                LogDeltaReceived(deltaUpdate);
                 if (UpdatePlayerSaveWithDeltaData(deltaUpdate, character)) {
                     // Our copy no longer matches the client's baseline, so no later delta can repair it.
                     RequestFullSyncForDrift(sender, deltaUpdate.HostID, deltaUpdate.Name);
@@ -1792,8 +1899,17 @@ loadouts: {}
                 }
             }
 
-            Logger.LogInfo($"Received delta update from {deltaUpdate.Name} ({deltaUpdate.HostID}): {deltaUpdate.ItemModifications?.Count ?? 0} item delta(s).");
+            LogDeltaReceived(deltaUpdate);
             modules.character.CharacterStore.SubmitDelta(deltaUpdate, sender);
+        }
+
+        // Debug, and built only when debug is on. This used to be an Info line, which on a full server is one
+        // line per player per rate-limit window - several a second, all day - for something that is the normal
+        // running of the mod rather than news. WritePlayerCharacterToSave demotes its routine saves for the same
+        // reason.
+        private static void LogDeltaReceived(DeltaSummaryUpdate deltaUpdate) {
+            if (!Logger.DebugEnabled) { return; }
+            Logger.LogDebug($"Received delta update from {deltaUpdate.Name} ({deltaUpdate.HostID}): {deltaUpdate.ItemModifications?.Count ?? 0} item delta(s).");
         }
 
         // No authoritative save exists yet (e.g. the connect-time full push was skipped or a delta beat it
@@ -1950,23 +2066,24 @@ loadouts: {}
             bool drifted = MergeDelta(deltaSummary, character);
 
             if (ValConfig.InternalStorageMode.Value) {
-                Logger.LogInfo("Saving character with internal storage mode.");
                 InternalDataStore.SaveAccountCharacter(character);
             }
 
             var charDir = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, deltaSummary.HostID);
             // Ensure the per-id folder exists (internal-storage mode loads from a ZDO and may not have
             // written the file yet). Mirrors WritePlayerCharacterToSave.
+            if (!Directory.Exists(charDir)) { modules.character.CharacterSaves.InvalidateFolderListing(); }
             Directory.CreateDirectory(charDir);
             string fullpath = Path.Combine(charDir, $"{deltaSummary.Name}.yaml");
-            File.WriteAllText(fullpath, DataObjects.yamlserializer.Serialize(character));
-            Logger.LogInfo($"Saved delta update for {character.Name}.");
+            CharacterYaml.WriteFile(fullpath, character);
+            // Routine, like the delta it follows - see LogDeltaReceived.
+            if (Logger.DebugEnabled) { Logger.LogDebug($"Saved delta update for {character.Name}."); }
 
             return drifted;
         }
 
         internal static ZPackage SendCharacterAsZpackage(DataObjects.Character chara) {
-            string serialChara = DataObjects.yamlserializer.Serialize(chara);
+            string serialChara = CharacterYaml.ToYaml(chara);
             ZPackage package = new ZPackage();
             package.Write(serialChara);
             return package;
@@ -1995,6 +2112,11 @@ loadouts: {}
             ZPackage package = new ZPackage();
             package.Write(yaml ?? "");
             package.Write(kind);
+            // What this server can be sent, appended last for the same reason the tag is: an older client reads
+            // the two strings it knows and never looks further. This is how a client learns it may send deltas
+            // in the binary form - see DeltaWire - and it rides every character payload rather than only the
+            // connect one, so there is one layout to read instead of two.
+            package.Write(DeltaWire.ServerCapabilities());
             return package;
         }
 
@@ -2023,7 +2145,7 @@ loadouts: {}
                 // Tagged so every server -> client character payload carries its kind explicitly. Not tagging
                 // would still work (the client defaults an untagged payload to CHAR, for older servers), but
                 // leaving one path implicit is how the "silence means no character" ambiguity started.
-                return CharacterPayload(DataObjects.yamlserializer.Serialize(chara), CharPayloadCharacter);
+                return CharacterPayload(CharacterYaml.ToYaml(chara), CharPayloadCharacter);
             } finally {
                 // The caller's object is server-side authoritative state; never leave it stripped.
                 chara.ConfiscatedItems = held;
@@ -2042,7 +2164,7 @@ loadouts: {}
                 if (chara == null) { return yaml; }
                 chara.ConfiscatedItems = null;
                 chara.SkillReductions = null;
-                return DataObjects.yamlserializer.Serialize(chara);
+                return CharacterYaml.ToYaml(chara);
             } catch (Exception e) {
                 Logger.LogWarning($"Could not strip the server-owned lists from a character payload, sending it as-is: {e.Message}");
                 return yaml;

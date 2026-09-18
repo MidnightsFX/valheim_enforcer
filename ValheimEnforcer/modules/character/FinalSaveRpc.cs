@@ -1,5 +1,6 @@
 using HarmonyLib;
 using System;
+using System.Collections.Generic;
 using ValheimEnforcer.common;
 
 namespace ValheimEnforcer.modules.character {
@@ -21,6 +22,38 @@ namespace ValheimEnforcer.modules.character {
     internal static class FinalSaveRpc {
         internal const string RPC_NAME = "VE_FINAL_CHAR_SAVE";
 
+        /// <summary>
+        /// Peers whose end-of-session save reached the server, so a disconnect can tell a clean logout from a
+        /// drop without reading anything off disk.
+        ///
+        /// This is the same fact the payload's own LastDisconnect field carried, one round trip earlier. The
+        /// client fills that field from LogoutInProgress and sends over this RPC only when the same flag is
+        /// set (see CharacterManager.SavePlayerCharacter), so "arrived here" and "LastDisconnect == Clean" are
+        /// one signal rather than two. Reading it back off the file was a race the disconnect path lost almost
+        /// every time: in disk mode the save is queued for the CharacterStore worker, and ZRpc.Update drains
+        /// this RPC and the vanilla Disconnect from the SAME Recv batch, so the file the disconnect read still
+        /// held the DirtyDisconnect a mid-session delta wrote. Clean logouts were reported as stale data.
+        ///
+        /// Records that the save ARRIVED, not that it was accepted - in disk mode the identity check runs on
+        /// the worker, later. The file read could not answer that either (it read a file written before the
+        /// save landed), and this feeds an admin's freshness estimate, not a security decision.
+        ///
+        /// Main thread only: the RPC handler, ZNet.Disconnect and ZNet.Shutdown all run there. Hence no lock,
+        /// matching NotificationPatches.AnnouncedPeers.
+        /// </summary>
+        private static readonly HashSet<long> CleanLogouts = new HashSet<long>();
+
+        /// <summary>
+        /// Whether this peer logged out cleanly, clearing the record as it answers.
+        ///
+        /// Call this on EVERY disconnect, ahead of any early return of the caller's own: the entry has to be
+        /// dropped whether or not that disconnect is announced, or a server with the notification switched off
+        /// accumulates one uid per clean logout until it shuts down.
+        /// </summary>
+        internal static bool ConsumeCleanLogout(long uid) {
+            return CleanLogouts.Remove(uid);
+        }
+
         // Register the server-side receiver on every incoming connection, mirroring how vanilla registers
         // per-peer methods in OnNewConnection (and how ModManager already patches this method). Clients do
         // not register it — they only Invoke it by name, so the server resolves it by name-hash on receipt.
@@ -30,6 +63,16 @@ namespace ValheimEnforcer.modules.character {
             private static void Postfix(ZNet __instance, ZNetPeer peer) {
                 if (__instance == null || !__instance.IsServer() || peer == null) { return; }
                 peer.m_rpc.Register<ZPackage>(RPC_NAME, new Action<ZRpc, ZPackage>(RPC_FinalCharSave));
+            }
+        }
+
+        // The ledger is per-session state about connections that no longer exist. A listen host that returns to
+        // the menu and hosts again must not start with the last session's logouts still in it.
+        [HarmonyPatch(typeof(ZNet), nameof(ZNet.Shutdown))]
+        public static class ZNet_Shutdown_ClearCleanLogouts {
+            [HarmonyPostfix]
+            private static void Postfix(ZNet __instance) {
+                if (__instance != null && __instance.IsServer()) { CleanLogouts.Clear(); }
             }
         }
 
@@ -78,6 +121,10 @@ namespace ValheimEnforcer.modules.character {
                 return;
             }
             Logger.LogDebug($"Received synchronous final character save from {sender}.");
+            // Recorded here rather than alongside the checks above: a payload dropped as oversize or
+            // undecompressable never reaches the store, so that session's data really is stale and the
+            // disconnect notification should say so.
+            CleanLogouts.Add(sender);
             ValConfig.PersistReceivedCharacterYaml(sender, yaml);
         }
 
@@ -86,7 +133,7 @@ namespace ValheimEnforcer.modules.character {
         internal static void SendFinalSaveSync(ZNetPeer serverPeer, DataObjects.Character character) {
             if (serverPeer == null || character == null) { return; }
             ZPackage package = new ZPackage();
-            package.Write(Gzip.CompressText(DataObjects.yamlserializer.Serialize(character)));
+            package.Write(Gzip.CompressText(CharacterYaml.ToYaml(character)));
             if (serverPeer.m_socket is ZPlayFabSocket) {
                 InvokeOnPlayFab(serverPeer, package);
                 Logger.LogDebug($"Sent synchronous final character save for {character.Name} ({package.Size()} bytes) over PlayFab.");

@@ -129,6 +129,108 @@ namespace ValheimEnforcer.modules.audit {
             return parsedTime;
         }
 
+        // ---- The on-disk line -----------------------------------------------------------------------------
+
+        /// <summary>How many public properties <see cref="AppendJsonLine"/> knows how to write.</summary>
+        private const int WrittenProperties = 14;
+
+        /// <summary>
+        /// False when this class has a property <see cref="AppendJsonLine"/> does not write, in which case the
+        /// audit log goes back to the serializer rather than silently leaving the new field out of every line.
+        /// Checked once. The cost of forgetting to extend the writer is therefore speed, never a gap in the
+        /// record - and the log says which, the first time it matters.
+        /// </summary>
+        internal static readonly bool HandWrittenLineUsable = CheckWriterCoversEveryProperty();
+
+        private static bool CheckWriterCoversEveryProperty() {
+            try {
+                int found = typeof(AuditEvent).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance).Length;
+                if (found == WrittenProperties) { return true; }
+                Logger.LogWarning($"AuditEvent has {found} properties but its line writer covers {WrittenProperties}; audit lines are being written by the slower serializer until AppendJsonLine is updated.");
+                return false;
+            } catch (Exception) {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Appends this event as the one-line JSON object a day file holds, in exactly the shape the
+        /// JsonCompatible serializer produced: camelCase keys in declaration order, and every field still at its
+        /// default left out. Read back by the ordinary YAML deserializer, because JSON is YAML.
+        ///
+        /// Anything a YAML or JSON reader could trip over inside a string is escaped, including the three
+        /// characters YAML treats as line breaks that a line-oriented reader does not - a player name containing
+        /// one must not be able to split an event across two lines.
+        /// </summary>
+        internal void AppendJsonLine(System.Text.StringBuilder line) {
+            line.Append('{');
+            bool any = false;
+            AppendField(line, ref any, "t", T);
+            AppendField(line, ref any, "acct", Acct);
+            AppendField(line, ref any, "character", Character);
+            AppendField(line, ref any, "kind", Kind);
+            AppendField(line, ref any, "prefab", Prefab);
+            AppendField(line, ref any, "qty", Qty);
+            AppendField(line, ref any, "quality", Quality);
+            AppendField(line, ref any, "crafterId", CrafterId);
+            AppendField(line, ref any, "crafter", Crafter);
+            AppendField(line, ref any, "container", Container);
+            AppendField(line, ref any, "pos", Pos);
+            // A total that is not a number is not a damage figure; DamageAudit never records one, and there is
+            // no spelling of it that is both JSON and YAML.
+            if (Amount != 0f && !float.IsNaN(Amount) && !float.IsInfinity(Amount)) {
+                AppendKey(line, ref any, "amount");
+                line.Append(Amount.ToString("R", CultureInfo.InvariantCulture));
+            }
+            AppendField(line, ref any, "target", Target);
+            AppendField(line, ref any, "note", Note);
+            line.Append('}');
+        }
+
+        private static void AppendKey(System.Text.StringBuilder line, ref bool any, string key) {
+            if (any) { line.Append(", "); }
+            any = true;
+            line.Append('"').Append(key).Append("\": ");
+        }
+
+        private static void AppendField(System.Text.StringBuilder line, ref bool any, string key, long value) {
+            if (value == 0L) { return; }
+            AppendKey(line, ref any, key);
+            line.Append(value);
+        }
+
+        private static void AppendField(System.Text.StringBuilder line, ref bool any, string key, string value) {
+            if (value == null) { return; }
+            AppendKey(line, ref any, key);
+            line.Append('"');
+            for (int i = 0; i < value.Length; i++) {
+                char c = value[i];
+                switch (c) {
+                    case '"': line.Append("\\\""); continue;
+                    case '\\': line.Append("\\\\"); continue;
+                    case '\n': line.Append("\\n"); continue;
+                    case '\r': line.Append("\\r"); continue;
+                    case '\t': line.Append("\\t"); continue;
+                }
+                if (char.IsHighSurrogate(c) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1])) {
+                    line.Append(c).Append(value[++i]); // a whole pair is an ordinary character
+                    continue;
+                }
+                if (char.IsSurrogate(c)) {
+                    line.Append((char)0xFFFD); // half a pair cannot be written as UTF-8, nor escaped in YAML
+                    continue;
+                }
+                // Control characters, the C1 block, YAML's extra line breaks (NEL, LS, PS) and the byte order
+                // mark: all legal inside a quoted string only when escaped.
+                if (c < ' ' || (c >= (char)0x7F && c <= (char)0x9F) || c == (char)0x2028 || c == (char)0x2029 || c == (char)0xFEFF) {
+                    line.Append("\\u").Append(((int)c).ToString("X4", CultureInfo.InvariantCulture));
+                    continue;
+                }
+                line.Append(c);
+            }
+            line.Append('"');
+        }
+
         /// <summary>One human-readable line for a terminal report.</summary>
         internal string Describe() {
             switch (Kind) {

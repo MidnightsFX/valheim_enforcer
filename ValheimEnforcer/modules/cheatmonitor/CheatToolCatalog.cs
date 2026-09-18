@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text.RegularExpressions;
 
 namespace ValheimEnforcer.modules.cheatmonitor {
@@ -21,6 +22,17 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         public MatchMode ProcessMatch = MatchMode.Exact;
         /// <summary>Prefix-matched against the module names loaded into our own process.</summary>
         public string[] ModuleNames = Empty;
+        /// <summary>
+        /// Namespaces hosted by a managed assembly loaded into the game. Matched exactly or as a dotted
+        /// prefix, so "Valheaven.UI" matches "Valheaven" and "ValheavenSomething" does not.
+        ///
+        /// This is the vector that sees an injected cheat: it has no file in BepInEx/plugins to hash, it may
+        /// have no process and no window of its own, and the namespace of its own types is the one thing it
+        /// cannot rename without rewriting itself.
+        /// </summary>
+        public string[] AssemblyNamespaces = Empty;
+        /// <summary>Simple assembly names, matched exactly. Weaker than a namespace - the file is renameable.</summary>
+        public string[] AssemblyNames = Empty;
         /// <summary>Prefix-matched against top-level window class names.</summary>
         public string[] WindowClasses = Empty;
         /// <summary>
@@ -53,6 +65,10 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
         internal const string AdditionalToolLabel = "Admin-listed tool";
         internal const string GenericTrainerLabel = "Generic trainer";
+        internal const string ProxyLoaderLabel = "Proxy loader";
+        // The one tool with its own config toggle predating the assembly vector, so the label is needed
+        // by name in AssemblySignatures. Everything else is gated by the vector, not per-tool.
+        internal const string ToolerLabel = "ValheimTooler";
 
         // Catches "Valheim Trainer.exe", "Hitman 3 Trainer - FLiNG.exe" and the Cheat Happens
         // "<id>-<author>-<Game> Trainer.exe" naming, without enumerating every trainer author.
@@ -65,12 +81,38 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// pre-existing ValheimTooler carve-out in OnServerReceiveCheatReport.
         /// </summary>
         private static readonly CheatToolSignature[] AutoBanTools = {
-            // Complements the assembly-namespace scan in CheatDetector: catches the launcher before
-            // it has injected, and the injected assembly if the managed AssemblyLoad event is missed.
+            // Three vectors on one tool: the launcher process before it has injected, the native module if
+            // one is loaded, and - the rename-proof one - the namespace of the types the injected assembly
+            // hosts. The namespace used to be a pair of constants in CheatDetector; it lives here now so
+            // that adding the next injected menu is an entry in this table rather than a code change.
             new CheatToolSignature {
-                Tool = "ValheimTooler",
+                Tool = ToolerLabel,
                 ProcessNames = new[] { "valheimtoolerlauncher" }, ProcessMatch = MatchMode.Contains,
                 ModuleNames = new[] { "valheimtooler" },
+                AssemblyNamespaces = new[] { "ValheimTooler" },
+                AutoBan = true
+            },
+            // Valheaven, internally "ValheimAdminMenu". Neither a BepInEx plugin nor an external memory
+            // editor: it ships as a version.dll proxy dropped beside valheim.exe, which Windows loads ahead
+            // of the real one, and which then boots a managed assembly into the game - taking BepInEx's
+            // Harmony if BepInEx is there and loading its own if not.
+            //
+            // That shape is invisible to everything else this mod does. It is not in BepInEx/plugins so the
+            // plugin hashes never see it, it is not chainloaded so it is not in the declared mod list, it
+            // has no process of its own, and it draws inside the game so it has no window. The two vectors
+            // that do see it are the assembly it loads, by namespace, and the proxy DLL itself - caught not
+            // by its name, which is a real Windows DLL, but by where it is loaded from (ClassifyProxyModule).
+            //
+            // Both spellings are carried because the tool answers to two names and we are working from its
+            // release and from a server log rather than from the binary. "Valheaven" is what it calls itself
+            // on screen and in its log lines; "ValheimAdminMenu" is the project behind it, which showed up in
+            // the ValheimAdminMenu.Locales.<lang>.json resources it ships - and a resource named that way is
+            // named after the assembly's root namespace, which makes it the likelier of the two to be what
+            // the types actually sit in.
+            new CheatToolSignature {
+                Tool = "Valheaven",
+                AssemblyNamespaces = new[] { "Valheaven", "ValheimAdminMenu" },
+                AssemblyNames = new[] { "Valheaven", "ValheimAdminMenu" },
                 AutoBan = true
             },
             // Injected-only; it has no process of its own, so the module vector is the only way to see it.
@@ -182,7 +224,11 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             // Rebuilt only when one of the settings feeding it changes. This is called once per scan
             // tick and the result is handed to a worker thread, so it must be a stable snapshot rather
             // than a list rebuilt (and reallocated) underneath the scan every time.
-            string key = $"{ValConfig.DetectCheatTools.Value}|{ValConfig.DetectCheatEngine.Value}|{ValConfig.AdditionalCheatProcesses.Value}";
+            // DetectProxyLoaders belongs in this key even though it adds no signature to the list: the key
+            // feeds PolicyKey, and PolicyKey is what makes the module scan re-examine modules it has already
+            // seen. Leave it out and turning the setting on mid-session would find nothing, because every
+            // module worth looking at was examined and dismissed under the old policy.
+            string key = $"{ValConfig.DetectCheatTools.Value}|{ValConfig.DetectCheatEngine.Value}|{ValConfig.DetectProxyLoaders.Value}|{ValConfig.AdditionalCheatProcesses.Value}";
             List<CheatToolSignature> cached = enabledCache;
             if (cached != null && key == enabledCacheKey) { return cached; }
 
@@ -215,6 +261,62 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         private static string enabledCacheKey;
         private static volatile List<CheatToolSignature> enabledCache;
 
+        /// <summary>
+        /// The signatures carrying an assembly fingerprint, for the injected-assembly vector.
+        ///
+        /// Deliberately NOT filtered by DetectCheatTools. That setting governs scanning the machine - what
+        /// else is running, what else is installed - and this vector never leaves our own process: it looks
+        /// only at assemblies already loaded into the game. DetectValheimTooler keeps gating its own entry,
+        /// the way DetectCheatEngine gates Cheat Engine inside the main catalog, so a server that had turned
+        /// that one off gets the behaviour it asked for and nothing else changes underneath it.
+        /// </summary>
+        internal static List<CheatToolSignature> AssemblySignatures() {
+            string key = $"{ValConfig.DetectInjectedCheatAssemblies.Value}|{ValConfig.DetectValheimTooler.Value}";
+            List<CheatToolSignature> cached = assemblyCache;
+            if (cached != null && key == assemblyCacheKey) { return cached; }
+
+            List<CheatToolSignature> signatures = new List<CheatToolSignature>();
+            if (ValConfig.DetectInjectedCheatAssemblies.Value) {
+                CollectAssemblySignatures(AutoBanTools, signatures);
+                CollectAssemblySignatures(GeneralTools, signatures);
+            }
+
+            assemblyCacheKey = key;
+            assemblyCache = signatures;
+            return signatures;
+        }
+
+        private static void CollectAssemblySignatures(CheatToolSignature[] source, List<CheatToolSignature> into) {
+            foreach (CheatToolSignature sig in source) {
+                if (sig.AssemblyNamespaces.Length == 0 && sig.AssemblyNames.Length == 0) { continue; }
+                if (sig.Tool == ToolerLabel && !ValConfig.DetectValheimTooler.Value) { continue; }
+                into.Add(sig);
+            }
+        }
+
+        private static string assemblyCacheKey;
+        private static volatile List<CheatToolSignature> assemblyCache;
+
+        /// <summary>
+        /// True if a type in <paramref name="ns"/> belongs to this signature. Matched exactly or as a dotted
+        /// prefix: "Valheaven" covers "Valheaven.UI" and does not cover "ValheavenAdjacent".
+        /// </summary>
+        internal static bool MatchesNamespace(string ns, string[] namespaces) {
+            if (string.IsNullOrEmpty(ns) || namespaces == null) { return false; }
+            foreach (string needle in namespaces) {
+                if (string.IsNullOrEmpty(needle)) { continue; }
+                if (ns.Length == needle.Length) {
+                    if (string.Equals(ns, needle, StringComparison.OrdinalIgnoreCase)) { return true; }
+                    continue;
+                }
+                if (ns.Length > needle.Length && ns[needle.Length] == '.'
+                    && ns.StartsWith(needle, StringComparison.OrdinalIgnoreCase)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         /// <summary>Splits a comma-separated config value, trimming blanks.</summary>
         internal static List<string> SplitList(string value) {
             List<string> entries = new List<string>();
@@ -243,6 +345,121 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         internal static bool IsGenericTrainerName(string processName) {
             if (string.IsNullOrEmpty(processName)) { return false; }
             return GenericTrainerPattern.IsMatch(processName);
+        }
+
+        // ---- Proxy loaders -------------------------------------------------------------------------
+        //
+        // Windows resolves a DLL from the application directory before it looks in System32. Dropping a
+        // copy of a system DLL beside valheim.exe therefore gets it loaded into the game first; it does
+        // whatever it likes and forwards the genuine exports on, and the game never notices. That is the
+        // whole of a "proxy loader" install, and it is how Valheaven ships.
+        //
+        // The name is not the signal - every name below is a real Windows DLL the game genuinely loads.
+        // The PATH is: the real one always resolves out of the Windows directory, and a copy next to the
+        // game does not.
+
+        // Names with no reason to exist beside a game executable. A copy of one of these in the game
+        // folder is a loader and nothing else, so a sighting is enforceable.
+        private static readonly string[] StrongProxyNames = {
+            "version.dll", "winmm.dll", "dinput8.dll", "xinput1_3.dll", "xinput1_4.dll",
+            "xinput9_1_0.dll", "dsound.dll", "wininet.dll", "msacm32.dll"
+        };
+
+        // The same trick with the names the graphics injectors use. ReShade, Special K and ENB all install
+        // exactly this way, all three are legitimate, and between shader presets and streaming setups they
+        // are common enough that convicting on one would be a false positive machine. Reported and logged,
+        // never enforced on its own - the same treatment Cheat Engine's generic Delphi window classes get.
+        private static readonly string[] WeakProxyNames = {
+            "dxgi.dll", "d3d9.dll", "d3d10.dll", "d3d11.dll", "d3d12.dll", "ddraw.dll", "opengl32.dll"
+        };
+
+        // BepInEx's own doorstop is a winhttp.dll proxy in the game root, which is to say the mod loader
+        // this server requires is itself an instance of the thing being detected. The name alone says
+        // nothing; what separates them is the files Doorstop ships beside it.
+        private const string DoorstopName = "winhttp.dll";
+        private static readonly string[] DoorstopMarkers = {
+            "doorstop_config.ini", ".doorstop_version", "winhttp.dll.config"
+        };
+
+        // Published SHA256s of Valheaven's version.dll. A proxy DLL says a loader is installed; a hash match
+        // says which one, which is the difference between ActionOnDetection and an auto-ban. The author
+        // reposted three builds in three days, so this names what it can and the path check above is what
+        // actually does the detecting.
+        private static readonly Dictionary<string, string> ProxyLoaderHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) {
+            { "b381ba752c760398866dc8933816f07b9b0c64651972d413a716ad1d255c7985", "Valheaven" },
+            { "229aa381485ea15099775581673cd6388ce7dbeadb6a1bde8858df4021e418e3", "Valheaven" },
+            { "726066d7780ae8bd9f9e0e4e3604584a47df4bf85dedfc61b2495716bff42d85", "Valheaven" }
+        };
+
+        /// <summary>
+        /// Whether this module name is one worth resolving a path for. Called once per newly loaded module,
+        /// so it is a name comparison and nothing else; the path lookup only happens for a name that hits.
+        /// </summary>
+        internal static bool IsProxyLoaderName(string moduleName) {
+            return Matches(moduleName, StrongProxyNames, MatchMode.Exact)
+                || Matches(moduleName, WeakProxyNames, MatchMode.Exact)
+                || string.Equals(moduleName, DoorstopName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Classifies a module that <see cref="IsProxyLoaderName"/> accepted, now that its path is known.
+        /// False means this is the genuine system DLL, or BepInEx, or that the path could not be read -
+        /// none of which is evidence of anything.
+        /// </summary>
+        internal static bool ClassifyProxyModule(string moduleName, string modulePath, out bool weak) {
+            weak = false;
+            if (string.IsNullOrEmpty(moduleName) || string.IsNullOrEmpty(modulePath)) { return false; }
+
+            // The genuine article. Everything the game legitimately loads under these names lives here.
+            if (IsUnderWindows(modulePath)) { return false; }
+
+            if (string.Equals(moduleName, DoorstopName, StringComparison.OrdinalIgnoreCase)) {
+                // Expected on every modded install, so it only counts when the files Doorstop ships beside
+                // it are absent - the case where something has taken the name. Weak even then: a broken or
+                // hand-assembled BepInEx install reaches the same state honestly.
+                if (HasDoorstopMarker(modulePath)) { return false; }
+                weak = true;
+                return true;
+            }
+
+            weak = !Matches(moduleName, StrongProxyNames, MatchMode.Exact);
+            return true;
+        }
+
+        /// <summary>The tool a proxy DLL's SHA256 identifies, or null when the build is not one we know.</summary>
+        internal static string ProxyToolForHash(string sha256) {
+            if (string.IsNullOrEmpty(sha256)) { return null; }
+            return ProxyLoaderHashes.TryGetValue(sha256, out string tool) ? tool : null;
+        }
+
+        private static bool IsUnderWindows(string path) {
+            try {
+                // SystemRoot first: it is what the loader itself resolves against, and it is set on every
+                // Windows. SpecialFolder.Windows is the fallback for a stripped environment block.
+                string windows = Environment.GetEnvironmentVariable("SystemRoot");
+                if (string.IsNullOrEmpty(windows)) {
+                    windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                }
+                if (string.IsNullOrEmpty(windows)) { return false; }
+                return path.StartsWith(windows, StringComparison.OrdinalIgnoreCase);
+            } catch (Exception) {
+                return false;
+            }
+        }
+
+        private static bool HasDoorstopMarker(string modulePath) {
+            try {
+                string dir = Path.GetDirectoryName(modulePath);
+                if (string.IsNullOrEmpty(dir)) { return false; }
+                foreach (string marker in DoorstopMarkers) {
+                    if (File.Exists(Path.Combine(dir, marker))) { return true; }
+                }
+                // BepInEx sitting beside it is the same evidence by another route, and covers the installs
+                // that ship a doorstop without its ini.
+                return Directory.Exists(Path.Combine(dir, "BepInEx"));
+            } catch (Exception) {
+                return false;
+            }
         }
 
         /// <summary>

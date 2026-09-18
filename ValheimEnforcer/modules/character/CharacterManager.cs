@@ -63,6 +63,8 @@ namespace ValheimEnforcer.modules.character {
             MapExploration.CancelPending();
             MapSync.CancelPending();
             MapSync.ResetSession();
+            // What the last server said it could be sent does not carry over to the next one.
+            DeltaWire.ForgetServer();
             // Invalidates any JoinGate coroutine still running from the session being torn down. Coroutines
             // live on a DontDestroyOnLoad object, so nothing else stops one - and a leftover coroutine would
             // otherwise clear the NEXT session's pending flag, or run a duplicate validation against a

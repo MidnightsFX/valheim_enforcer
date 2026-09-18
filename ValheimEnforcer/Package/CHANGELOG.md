@@ -1,3 +1,124 @@
+﻿**0.29.0**
+---
+```
+- Adds detection for injected cheat menus - cheats that are not mods and that every existing check
+  therefore misses. The prompting case is Valheaven (internally ValheimAdminMenu), which ships as a
+  version.dll dropped beside valheim.exe: Windows loads it ahead of the real one, and it boots a managed
+  assembly into the game, taking BepInEx's Harmony when BepInEx is there and loading its own when it is
+  not. It has no file in BepInEx/plugins to hash, it is not chainloaded so it is not in the mod list the
+  client declares at join, it has no process of its own, and it draws inside the game so it has no window.
+  Two new vectors see it, and both key on what it is rather than what it is called:
+    - Adds DetectInjectedCheatAssemblies (Anti-Cheat, default on): matches the namespaces of the managed
+      types loaded into the game against the catalog, as they load and on a periodic sweep, so a menu that
+      arrives after mod validation has passed is still caught. Covers ValheimTooler and Valheaven; both are
+      auto-banned on a confirmed detection. This generalises the ValheimTooler check, which was a pair of
+      hardcoded constants - the next menu is now an entry in the catalog rather than a code change.
+      DetectValheimTooler still gates its own tool, the way DetectCheatEngine does inside DetectCheatTools,
+      so a server that had turned it off keeps the behaviour it asked for.
+    - Adds DetectProxyLoaders (Anti-Cheat, default on, requires ScanLoadedModules): reports a Windows
+      system DLL loaded into the game from somewhere other than the Windows directory. The name is not the
+      signal - version.dll, winmm.dll and the rest are genuine DLLs the game legitimately loads - the path
+      is, which is why this survives the tool being renamed or rebuilt. Known builds are identified by
+      SHA256 and reported under the tool's own name; an unrecognised one says a loader is installed, not
+      which one, and follows ActionOnDetection.
+    - BepInEx's own doorstop is a winhttp.dll proxy and is recognised by the files Doorstop ships beside
+      it. The graphics names (dxgi, d3d9/10/11/12, ddraw, opengl32) are how ReShade, Special K and ENB
+      install, so a sighting there is low confidence: reported and logged, never enforced on its own.
+      IgnoredCheatProcesses overrides the proxy check as it does everything else.
+- Fixes the documented DetectSpeedhack setting, which has not existed for some time - its field, its
+  binding and the loop behind it were all commented out, and the settings table still listed it as on.
+```
+
+**0.28.3**
+---
+```
+- Fixes clean logouts being reported as stale data in the Discord player-left message. The check read the
+  departing player's save off disk, but their final save was still queued for the character store's background
+  writer at that point - ZRpc hands the final-save RPC and vanilla's disconnect to us from the same batch of
+  incoming packets - so it read back the DirtyDisconnect a mid-session delta had written and announced the data
+  as outdated by a delta window. Almost every clean logout was reported wrongly. The final save's arrival is now
+  recorded as it is received and the message reads that instead: the same fact the file's own field carried, a
+  round trip earlier.
+- Removes a main-thread stall from every disconnect. Resolving that same clean/stale state read and fully
+  deserialized the departing player's save - inventory, confiscated list, custom data and the whole progression
+  record - to recover one enum, on the server's main thread, whether or not a Discord webhook was configured.
+  With no webhook, which is the default, the message it was for was discarded, so the work was pure waste on
+  every server running the mod. In internal storage mode it inflated every character on the account rather than
+  the one leaving.
+    - This is also the allocation most worth removing from a world autosave. ZDOExtraData.PrepareSave clones the
+      world's entire extra-data store and holds it live for the duration of the background save thread, and a
+      large character graph inflating on the main thread inside that window can push Unity's Boehm collector
+      into a mark stack overflow it cannot recover from - an immediate SIGABRT, exit code 134. The clone itself
+      is vanilla and is not patched here.
+- Times the character load path, which was the untimed half of character persistence. A slow read or
+  deserialize now reports itself through the stall watch the way the save path already did, rather than showing
+  up as an unexplained hitch.
+- Fixes the container audit reading the item list out of the wrong place, which had left it unable to record
+  anything at all. Container.Save writes the list with ZDO.Set(int, byte[]) and ZDOExtraData keeps byte arrays
+  in a different store from strings, so asking for "items" as a string returned the default for every container
+  on the server and no take or store could ever be diffed. It reads the byte array now. Both are dictionary
+  lookups that hand back the stored reference, so the unchanged path - the one every replicated container walks
+  - still allocates nothing.
+- Fixes cart, sled and ship storage never being audited. The index of which prefabs are containers was built
+  with GetComponent, which only looks at a prefab's root object, and vanilla mounts the Container of a Cart,
+  Sled, Karve, VikingShip, VikingShip_Ashlands, Trailership and the incinerator on a child instead - pointing
+  Container.m_rootObjectOverride back at the root so the contents still live on the root's ZDO. That is the ZDO
+  the server receives, under the root prefab's hash, so none of the seven ever matched and the one container a
+  player can empty out of sight of everybody and then drive away was the single thing this audit did not watch.
+  A child's Container now counts when its override resolves to the prefab's own root, which deliberately
+  excludes the dungeon and camp pieces that are built by parenting whole chest prefabs underneath them - those
+  carry their own ZDO, and filing their contents under the building they stand in would be a false record.
+- A performance pass aimed at servers running 50 to 100 players, where the concern is how much short-lived memory
+  the mod produces: Unity's collector stops every thread to clean up, so garbage made on a worker thread costs the
+  main thread exactly what garbage made on the main thread does. Measured on a real 66 KB character save:
+    - Character saves are written by a purpose-built writer instead of the general YAML serializer
+      (FastCharacterWriter, Advanced, default on). Same file, same keys and layout, read back by the same reader and
+      interchangeable with saves written the old way. Writing one cost 3.5 MB of garbage and now costs about 90 KB,
+      and a character is rewritten for every incremental update from every player. The writer checks itself
+      against the serializer once at startup - every property of every nested type, found by reflection so a field
+      added later is covered, plus a set of strings chosen to break a YAML writer - and hands every save back to
+      the serializer for the session if the two disagree about anything, saying so in the log.
+    - Incremental updates travel in a compact binary form instead of YAML (BinaryDeltaUpdates, Advanced, default
+      on). Reading one on the server cost 152 KB on the main thread and now costs 7 KB. Negotiated rather than
+      assumed: the server says it understands the form in the character payload every client is sent at connect,
+      so a client from before this existed keeps sending YAML and is handled as it always was, and a newer client
+      on an older server does the same.
+    - Audit lines are written by hand into a reused buffer. One 275 character line cost 50 KB and now costs
+      nothing to speak of. The line is unchanged - same keys, same order, still read back as YAML - and the
+      serializer remains as the fallback.
+    - The periodic full saves are asked for one player at a time, spread evenly across FullSyncPullIntervalMinutes,
+      rather than from everybody in waves at the end of it (FullSyncSpreadAcrossInterval, Advanced, default on).
+      Each player is asked exactly as often. A hundred full saves inside a minute was half a gigabyte of garbage
+      every interval; one every fifteen seconds is nothing.
+    - Adds CharacterWriteIntervalSeconds (Advanced, default 0, which changes nothing). When set, a character
+      changed by an incremental update is written at most that often instead of after every update. Full saves,
+      deaths, a player joining or leaving, admin commands and a shutdown still write at once. The cost is that a
+      server which dies without shutting down loses up to that many seconds of routine updates. 30 to 60 is a
+      sensible value for a busy server.
+    - A login no longer waits on other players' saves. It asked the character store whether anything at all was
+      queued, and on a busy server something nearly always is, so a join could hold the main thread for up to
+      three quarters of a second - twice, with map sync on - over a save that had nothing to do with it. It now asks
+      about its own character only.
+    - Looking up a character's save no longer lists every account that has ever joined. That listing is remembered
+      and only re-read when the character folder changes, which is when an account joins for the first time. "This
+      player has no save here" is still always checked against the disk before it is believed, because that answer
+      is what gets a new character's inventory stripped.
+    - The admin exemptions for structure validation, the RPC guards and the audit remember whether a connection is
+      an admin for ten seconds - the same staleness vanilla's own admin list already has. ZNet.IsAdmin builds
+      several strings per call and these asked it once per ZDO packet and twice per relayed hit. The command relay's
+      admin gate still asks vanilla directly, every time.
+    - Three log lines per incremental update move from Info to Debug. On a full server that was around twenty
+      lines a second, all day.
+- Main-thread stall warnings are written as warnings again, without debug logging on. They had ended up behind the
+  debug switch along with the background-thread ones, so a production server never reported a stall at all.
+  Background-thread timings stay debug-only, and StallWarningThresholdMs = 0 still silences both.
+- A connecting client's mod list is accepted once per connection. The handler stayed registered, so a peer could
+  send the list again as often as it liked - before the password and the ban list are checked - and have the
+  server parse up to 2 MB of YAML on the main thread each time, for as long as it held the socket open. The
+  ceiling on that list is now 512 KB and 4096 entries, and working out which required mods are missing no longer
+  costs declared-mods times required-mods.
+```
+
 **0.28.2**
 ---
 ```

@@ -11,15 +11,11 @@ using System.Threading.Tasks;
 using UnityEngine;
 using ValheimEnforcer.common;
 using ValheimEnforcer.modules.character;
+using ValheimEnforcer.modules.mods;
 using static ValheimEnforcer.common.DataObjects;
 
 namespace ValheimEnforcer.modules.cheatmonitor {
     internal static class CheatDetector {
-
-        // ValheimTooler is detected by the namespace of the types it loads rather than the
-        // assembly name, so renaming the injected assembly does not evade detection.
-        private const string ToolerNamespace = "ValheimTooler";
-        private const string ToolerNamespacePrefix = "ValheimTooler.";
 
         // Upper bound on window matches collected in a single EnumWindows pass, so a pathological
         // desktop cannot turn one scan into an unbounded report.
@@ -65,14 +61,40 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         }
 
         /// <summary>
-        /// True if the assembly hosts any type in the ValheimTooler namespace. Skips dynamic
-        /// assemblies (Harmony/DMD) which never host the cheat and throw on GetTypes(), and
-        /// tolerates partially-loadable assemblies via ReflectionTypeLoadException.
+        /// Matches one loaded assembly against the assembly fingerprints in the catalog.
+        ///
+        /// This is the vector that sees an injected cheat menu. Such a menu has no file in BepInEx/plugins
+        /// to hash, is not in the chainloader's plugin list, and - when it draws inside the game, as they all
+        /// now do - has neither a process nor a window of its own. What it cannot hide is that its types are
+        /// loaded in this AppDomain, and the namespace they sit in survives renaming the file.
+        ///
+        /// Skips dynamic assemblies: Harmony and MonoMod generate them constantly, none of them can host a
+        /// cheat, and GetTypes() throws on them. Partially-loadable assemblies are read through
+        /// ReflectionTypeLoadException.Types rather than being skipped, because an assembly that fails to
+        /// resolve half its references is a fairly good description of one that was injected.
         /// </summary>
-        internal static bool AssemblyHostsTooler(Assembly asm, out string detail) {
+        internal static bool MatchAssembly(Assembly asm, List<CheatToolSignature> signatures, out string tool, out string detail) {
+            tool = null;
             detail = null;
-            if (asm == null || asm.IsDynamic) { return false; }
+            if (asm == null || asm.IsDynamic || signatures == null || signatures.Count == 0) { return false; }
             try {
+                string asmName = asm.GetName().Name;
+                foreach (CheatToolSignature sig in signatures) {
+                    if (CheatToolCatalog.Matches(asmName, sig.AssemblyNames, MatchMode.Exact)) {
+                        tool = sig.Tool;
+                        detail = $"asm:{asmName}";
+                        return true;
+                    }
+                }
+
+                // Only worth walking the type table if some signature actually names a namespace. Reading
+                // types is the expensive half and most catalogs will not need it.
+                bool wantNamespaces = false;
+                foreach (CheatToolSignature sig in signatures) {
+                    if (sig.AssemblyNamespaces.Length > 0) { wantNamespaces = true; break; }
+                }
+                if (!wantNamespaces) { return false; }
+
                 Type[] types;
                 try {
                     types = asm.GetTypes();
@@ -84,13 +106,16 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                     if (t == null) { continue; }
                     string ns = t.Namespace;
                     if (ns == null) { continue; }
-                    if (ns == ToolerNamespace || ns.StartsWith(ToolerNamespacePrefix, StringComparison.Ordinal)) {
-                        detail = $"type:{t.FullName} asm:{asm.GetName().Name}";
-                        return true;
+                    foreach (CheatToolSignature sig in signatures) {
+                        if (CheatToolCatalog.MatchesNamespace(ns, sig.AssemblyNamespaces)) {
+                            tool = sig.Tool;
+                            detail = $"type:{t.FullName} asm:{asmName}";
+                            return true;
+                        }
                     }
                 }
             } catch (Exception e) {
-                Logger.LogDebug($"CheatDetector.AssemblyHostsTooler failed for {asm.FullName}: {e.Message}");
+                Logger.LogDebug($"CheatDetector.MatchAssembly failed for {asm.FullName}: {e.Message}");
             }
             return false;
         }
@@ -201,7 +226,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// a cheat which has already injected and then closed its launcher, and it is unaffected by
         /// renaming the tool's executable.
         /// </summary>
-        internal static List<CheatToolDetection> ScanLoadedModules(List<CheatToolSignature> signatures, string policyKey) {
+        internal static List<CheatToolDetection> ScanLoadedModules(List<CheatToolSignature> signatures, string policyKey, bool detectProxies) {
             List<CheatToolDetection> found = new List<CheatToolDetection>();
             StallWatch timer = StallWatch.StartBackground("Cheat scan: loaded module enumeration");
             try {
@@ -213,13 +238,20 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                     moduleScanPolicy = policyKey;
                 }
 
-                foreach (string name in NewlyLoadedModuleNames()) {
+                foreach (LoadedModule module in NewlyLoadedModules()) {
+                    string name = module.Name;
                     if (name.Length == 0 || CheatToolCatalog.IsIgnored(name)) { continue; }
 
                     foreach (CheatToolSignature sig in signatures) {
                         if (CheatToolCatalog.Matches(name, sig.ModuleNames, MatchMode.Prefix)) {
                             Add(found, sig.Tool, "module", name);
                         }
+                    }
+
+                    // Path resolution is deliberately behind the name test: it is a syscall per module, and
+                    // only a handful of names can possibly be a proxy loader.
+                    if (detectProxies && CheatToolCatalog.IsProxyLoaderName(name)) {
+                        InspectProxyModule(found, module);
                     }
                 }
             } catch (Exception e) {
@@ -228,6 +260,77 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 timer.Stop();
             }
             return found;
+        }
+
+        /// <summary>
+        /// Judges one module whose name is in the proxy-loader family, now that resolving its path is worth
+        /// the syscall. A proxy loader is only visible in where it was loaded from, so a module we cannot get
+        /// a path for produces nothing - that is a failed lookup, not a finding.
+        ///
+        /// A strong sighting says a loader is installed, not which one, so it rides ActionOnDetection like
+        /// any other general tool. Hashing the file is what turns it into a named tool, and a known build is
+        /// reported under that tool's own label so the server resolves the auto-ban from its own catalog,
+        /// exactly as it does for every other detection.
+        /// </summary>
+        private static void InspectProxyModule(List<CheatToolDetection> found, LoadedModule module) {
+            string path = ResolveModulePath(module);
+            if (!CheatToolCatalog.ClassifyProxyModule(module.Name, path, out bool weak)) { return; }
+
+            string hash = null;
+            if (!weak) {
+                // Only the enforceable tier is worth hashing: a few milliseconds on a file that is almost
+                // always a megabyte or less, and only when something has already looked wrong.
+                hash = PluginHasher.HashFile(path, out string _);
+                string named = CheatToolCatalog.ProxyToolForHash(hash);
+                if (named != null) {
+                    Add(found, named, "proxy", $"{module.Name} at {DirectoryOf(path)} sha256={hash}");
+                    return;
+                }
+            }
+
+            string detail = $"{module.Name} at {DirectoryOf(path)}";
+            if (hash != null) { detail += $" sha256={hash}"; }
+            Add(found, $"{CheatToolCatalog.ProxyLoaderLabel} ({module.Name})", "proxy", detail, weak);
+        }
+
+        // The directory rather than the full path: the file name is already in the detail, and the directory
+        // is the whole of the evidence. Keeps a long install path from eating the 256-character field cap.
+        private static string DirectoryOf(string path) {
+            try {
+                string dir = System.IO.Path.GetDirectoryName(path);
+                return string.IsNullOrEmpty(dir) ? path : dir;
+            } catch (Exception) {
+                return path;
+            }
+        }
+
+        /// <summary>
+        /// The full path a module was loaded from. The managed enumeration already has one; the native one
+        /// deliberately does not, and pays for it here only for the modules that need it.
+        /// </summary>
+        private static string ResolveModulePath(LoadedModule module) {
+            if (module.Path != null) { return module.Path; }
+            if (module.Handle == IntPtr.Zero) { return null; }
+            try {
+                // 512 rather than MAX_PATH: a truncated path would still carry the directory, but a Steam
+                // library nested a few levels deep is close enough to 260 to be worth not thinking about.
+                StringBuilder buffer = new StringBuilder(512);
+                uint written = NativeWin32.GetModuleFileNameEx(NativeWin32.GetCurrentProcess(), module.Handle, buffer, (uint)buffer.Capacity);
+                return written == 0 ? null : buffer.ToString();
+            } catch (Exception e) {
+                Logger.LogDebug($"CheatDetector.ResolveModulePath failed for {module.Name}: {e.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// One module loaded into this process. The native path carries a handle and resolves the file name
+        /// on demand; the managed fallback has the path already and no handle to speak of.
+        /// </summary>
+        private struct LoadedModule {
+            public string Name;
+            public IntPtr Handle;
+            public string Path;
         }
 
         // Module handles already examined, and the catalog+allowlist they were examined under. Worker-thread
@@ -264,15 +367,15 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// Nothing about what gets detected changes: a cheat that injects mid-session appears as a new handle
         /// on the next tick, which is exactly the case this vector exists for.
         /// </summary>
-        private static IEnumerable<string> NewlyLoadedModuleNames() {
+        private static IEnumerable<LoadedModule> NewlyLoadedModules() {
             // psapi is Windows-only, and the managed path still works everywhere else. Not a Unity API, so it
             // is safe to read from the worker thread.
             bool windows = Environment.OSVersion.Platform == PlatformID.Win32NT;
             return windows ? NativeModuleNames() : ManagedModuleNames();
         }
 
-        private static IEnumerable<string> NativeModuleNames() {
-            List<string> names = new List<string>();
+        private static IEnumerable<LoadedModule> NativeModuleNames() {
+            List<LoadedModule> names = new List<LoadedModule>();
             IntPtr self = NativeWin32.GetCurrentProcess(); // pseudo-handle; nothing to close
 
             IntPtr[] handles = new IntPtr[512];
@@ -302,7 +405,9 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 buffer.Length = 0;
                 uint written = NativeWin32.GetModuleBaseName(self, handle, buffer, (uint)buffer.Capacity);
                 if (written == 0) { continue; } // unloaded between the two calls
-                names.Add(buffer.ToString());
+                // The handle rides along so the proxy check can resolve a full path for the one or two
+                // modules that need one, without this loop paying for the other several hundred.
+                names.Add(new LoadedModule { Name = buffer.ToString(), Handle = handle });
             }
             return names;
         }
@@ -312,8 +417,8 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// handle, since that is what this path exposes; the saving is only in the signature matching, but the
         /// enumeration cost is not worth optimising for a platform Valheim has no native client on.
         /// </summary>
-        private static IEnumerable<string> ManagedModuleNames() {
-            List<string> names = new List<string>();
+        private static IEnumerable<LoadedModule> ManagedModuleNames() {
+            List<LoadedModule> names = new List<LoadedModule>();
             using (Process self = Process.GetCurrentProcess()) {
                 foreach (ProcessModule m in self.Modules) {
                     string name;
@@ -322,7 +427,11 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                     // A synthetic handle per distinct name: this path has no real ones, and the seen-set is
                     // what makes a repeat scan cheap either way.
                     if (!seenModules.Add(new IntPtr(name.GetStableHashCode()))) { continue; }
-                    names.Add(name);
+                    // This path already paid for the full path when it built the ProcessModule, so take it
+                    // rather than looking it up again later.
+                    string path;
+                    try { path = m.FileName; } catch { path = null; }
+                    names.Add(new LoadedModule { Name = name, Path = path });
                 }
             }
             return names;
@@ -456,6 +565,12 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             [DllImport("psapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
             public static extern uint GetModuleBaseName(IntPtr hProcess, IntPtr hModule, StringBuilder lpBaseName, uint nSize);
 
+            // Resolved only for modules whose name could be a proxy loader - see InspectProxyModule. The
+            // base name says nothing there, because every name in that family is a genuine Windows DLL;
+            // where it was loaded from is the entire signal.
+            [DllImport("psapi.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "GetModuleFileNameExW")]
+            public static extern uint GetModuleFileNameEx(IntPtr hProcess, IntPtr hModule, StringBuilder lpFilename, uint nSize);
+
             [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
             public static extern bool CheckRemoteDebuggerPresent(IntPtr hProcess, ref bool isDebuggerPresent);
 
@@ -503,9 +618,16 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             // inspect on the main thread in Update() where types are fully available.
             private readonly ConcurrentQueue<Assembly> pending = new ConcurrentQueue<Assembly>();
 
+            // Assembly matches found but not yet sent, because a report is addressed with the local
+            // character identity and that is not available until the world has loaded. Injection typically
+            // happens before it, so this is the normal path rather than an edge case.
+            private readonly List<CheatToolDetection> pendingAssemblyDetections = new List<CheatToolDetection>();
+
+            // ValheimToolerStatus is the pre-catalog wire field for that one tool, kept so a server running
+            // an older build - whose catalog has no assembly vector at all - still auto-bans it. Latched
+            // because the branch it drives on the server is an outright ban; repeating it says nothing new.
             private bool toolerDetected;
-            private string toolerDetail;
-            private bool reported;
+            private bool toolerReported;
 
             // Tools already reported this session. Without this latch a tool left running would be
             // re-reported every scan interval, flooding the server log under the Log action and
@@ -545,12 +667,15 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             private void Update() {
                 // Always drain the queue so it cannot grow unbounded, even while disabled.
                 bool enabled = ValConfig.EnableCheatDetection.Value;
-                DrainPending(enabled && ValConfig.DetectValheimTooler.Value);
+                DrainPending(enabled);
 
                 if (!enabled) { return; }
 
-                // Retry reporting until the local character identity is available.
-                if (toolerDetected && !reported) { TryReportTooler(); }
+                // Retry until the local character identity is available.
+                if (pendingAssemblyDetections.Count > 0 && CharacterManager.PlayerCharacter != null) {
+                    ReportNewDetections(pendingAssemblyDetections);
+                    pendingAssemblyDetections.Clear();
+                }
 
                 CollectFinishedScan();
 
@@ -560,17 +685,25 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             }
 
             private void DrainPending(bool inspect) {
+                // Nothing to drain is the steady state - assemblies load at startup and essentially never
+                // after - so this returns before it asks the catalog for anything.
+                if (pending.IsEmpty) { return; }
+                List<CheatToolSignature> signatures = inspect ? CheatToolCatalog.AssemblySignatures() : null;
                 while (pending.TryDequeue(out Assembly asm)) {
-                    if (inspect) { InspectAssembly(asm); }
+                    if (signatures != null) { InspectAssembly(asm, signatures); }
                 }
             }
 
             private IEnumerator InitialAssemblySweep() {
                 const int batchSize = 15;
                 int processed = 0;
+                // Taken once for the sweep rather than per assembly: the lookup is cached, but building its
+                // cache key allocates, and this runs against every assembly the game has loaded. The sweep
+                // lasts a handful of frames, so a setting toggled inside it lands on the next tick instead.
+                List<CheatToolSignature> signatures = CheatToolCatalog.AssemblySignatures();
                 foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies()) {
-                    if (ValConfig.EnableCheatDetection.Value && ValConfig.DetectValheimTooler.Value) {
-                        InspectAssembly(asm);
+                    if (ValConfig.EnableCheatDetection.Value) {
+                        InspectAssembly(asm, signatures);
                     }
                     if (++processed % batchSize == 0) {
                         yield return null;
@@ -578,29 +711,17 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 }
             }
 
-            // Inspects an assembly exactly once (deduped by full name). Latches detection; the
-            // actual report is sent from TryReportTooler once the player identity is known.
-            private void InspectAssembly(Assembly asm) {
+            // Inspects an assembly exactly once (deduped by full name). Queues the detection; the actual
+            // report goes out from Update once the player identity is known.
+            private void InspectAssembly(Assembly asm, List<CheatToolSignature> signatures) {
                 if (asm == null) { return; }
                 string id = asm.FullName;
                 if (id != null && !inspected.Add(id)) { return; }
 
-                if (!toolerDetected && AssemblyHostsTooler(asm, out string detail)) {
-                    toolerDetected = true;
-                    toolerDetail = detail;
-                    Logger.LogWarning($"ValheimTooler detected ({detail}).");
-                }
-            }
-
-            private void TryReportTooler() {
-                if (CharacterManager.PlayerCharacter == null) { return; }
-                reported = true;
-                Logger.LogWarning($"Reporting ValheimTooler detection to server for ban ({toolerDetail}).");
-                ReportCheatScanSummary(new CheatSummaryReport {
-                    PlayerName = CharacterManager.PlayerCharacter.Name,
-                    PlatformID = CharacterManager.PlayerCharacter.HostID,
-                    ValheimToolerStatus = true
-                });
+                if (!MatchAssembly(asm, signatures, out string tool, out string detail)) { return; }
+                if (tool == CheatToolCatalog.ToolerLabel) { toolerDetected = true; }
+                Add(pendingAssemblyDetections, tool, "assembly", detail);
+                Logger.LogWarning($"Injected cheat assembly detected: {tool} ({detail}).");
             }
 
             /// <summary>
@@ -630,13 +751,16 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             }
 
             private void RunPeriodicScan() {
-                // Fallback assembly sweep: covers the rare case a native injector loads an
-                // assembly without raising the managed AssemblyLoad event. Cached assemblies are
-                // skipped, so this is near-free in steady state.
-                if (ValConfig.DetectValheimTooler.Value && !toolerDetected) {
-                    foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies()) {
-                        InspectAssembly(asm);
-                        if (toolerDetected) { break; }
+                // Fallback assembly sweep: covers the case a native injector loads an assembly without
+                // raising the managed AssemblyLoad event, which is the shape of every proxy loader that
+                // boots before this detector exists. Assemblies already inspected are skipped by full
+                // name, so in steady state this is a few hundred hash lookups and no reflection at all.
+                if (ValConfig.DetectInjectedCheatAssemblies.Value) {
+                    List<CheatToolSignature> assemblySignatures = CheatToolCatalog.AssemblySignatures();
+                    if (assemblySignatures.Count > 0) {
+                        foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies()) {
+                            InspectAssembly(asm, assemblySignatures);
+                        }
                     }
                 }
 
@@ -662,6 +786,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 string policyKey = $"{CheatToolCatalog.PolicyKey()}|{sessionGeneration}";
                 int phase = scanPhase++ % 3;
                 bool scanModules = ValConfig.ScanLoadedModules.Value;
+                bool detectProxies = ValConfig.DetectProxyLoaders.Value;
                 bool scanElevated = ValConfig.ScanElevatedProcesses.Value;
                 bool scanWindows = ValConfig.ScanWindowTitles.Value
                     && (Application.platform == RuntimePlatform.WindowsPlayer
@@ -675,7 +800,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                         case 0:
                             return ScanProcesses(signatures, genericTrainers, scanElevated);
                         case 1:
-                            return scanModules ? ScanLoadedModules(signatures, policyKey) : new List<CheatToolDetection>();
+                            return scanModules ? ScanLoadedModules(signatures, policyKey, detectProxies) : new List<CheatToolDetection>();
                         default:
                             return scanWindows ? ScanWindows(signatures) : new List<CheatToolDetection>();
                     }
@@ -700,10 +825,17 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 }
                 if (fresh == null) { return; }
 
+                // Sent once. A server on this build reads the detection out of DetectedTools and resolves
+                // the ban from its own catalog; the flag is only here so an older one, which knows nothing
+                // about the assembly vector, still acts on the one tool it was written for.
+                bool tooler = toolerDetected && !toolerReported;
+                if (tooler) { toolerReported = true; }
+
                 ReportCheatScanSummary(new CheatSummaryReport {
                     PlayerName = CharacterManager.PlayerCharacter.Name,
                     PlatformID = CharacterManager.PlayerCharacter.HostID,
-                    DetectedTools = fresh
+                    DetectedTools = fresh,
+                    ValheimToolerStatus = tooler
                 });
             }
 

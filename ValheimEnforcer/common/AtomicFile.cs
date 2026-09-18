@@ -58,6 +58,27 @@ namespace ValheimEnforcer.common {
         }
 
         /// <summary>
+        /// Hands the caller a writer over the temporary file and publishes whatever it writes, with the same
+        /// crash safety and the same return value as <see cref="WriteYaml"/>.
+        ///
+        /// For a document the caller produces itself rather than through a serializer - CharacterYaml, which
+        /// writes a character field by field precisely so that nothing like a serializer's allocation happens
+        /// on the way to the file. Same stream and writer buffers as above, for the same large-object reason.
+        /// If <paramref name="emit"/> throws, nothing is published and the destination is untouched.
+        /// </summary>
+        /// <exception cref="IOException">When even the copy fallback fails; the caller decides what a failed write means.</exception>
+        internal static DateTime WriteWith(string path, Action<TextWriter> emit) {
+            if (string.IsNullOrEmpty(path)) { throw new ArgumentException("A path is required.", nameof(path)); }
+            if (emit == null) { throw new ArgumentNullException(nameof(emit)); }
+
+            return WriteThrough(path, stream => {
+                using (StreamWriter writer = new StreamWriter(stream, Utf8NoBom, WriterBufferBytes)) {
+                    emit(writer);
+                }
+            });
+        }
+
+        /// <summary>
         /// Writes opaque bytes to <paramref name="path"/> with the same crash safety, and returns the
         /// last-write time of the published file.
         ///

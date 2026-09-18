@@ -267,9 +267,17 @@ internal class DeltaChangeTracker : MonoBehaviour {
             Foods = currentFoods,
         };
 
-        ZPackage package = new ZPackage();
-        package.Write(DataObjects.yamlserializer.Serialize(payload));
-        ValConfig.ItemDeltaUpdateRPC.SendPackage(serverPeer.m_uid, package);
+        if (DeltaWire.ServerAcceptsBinary) {
+            // The server said at connect that it reads the compact form. Same content, written straight into
+            // the package instead of through the YAML serializer - which cost this flush, in the middle of
+            // whatever the player was doing, around 290 KB of garbage to produce two kilobytes.
+            ValConfig.ItemDeltaBinaryRPC.SendPackage(serverPeer.m_uid, DeltaWire.Write(payload));
+        } else {
+            // A server from before the binary form existed, or one with BinaryDeltaUpdates off.
+            ZPackage package = new ZPackage();
+            package.Write(DataObjects.yamlserializer.Serialize(payload));
+            ValConfig.ItemDeltaUpdateRPC.SendPackage(serverPeer.m_uid, package);
+        }
 
         Logger.LogDebug($"Delta flush: {itemDeltas.Count} items, {customDataModifications.Count} ({customDataRemovedKeys.Count} removed) custom data changes. Skill levels updated.");
     }

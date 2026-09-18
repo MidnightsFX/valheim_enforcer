@@ -20,7 +20,12 @@ namespace ValheimEnforcer.modules.character {
     /// writes to the same character, so a save/delta burst can never block the main thread.
     ///
     /// What it holds, and for how long: the file on disk is the authority, and every change reaches it
-    /// within a drain (about a second). So the store keeps only the parsed object for a character, only
+    /// within a drain (about a second) - or, for routine incremental updates only, within
+    /// <see cref="ValConfig.CharacterWriteIntervalSeconds"/> when an admin has set one, because rewriting a whole
+    /// character for every update from every player is the most expensive thing this store does. Anything
+    /// about to read a character's file asks for that character to be written first (FlushCharacter), and a
+    /// player leaving, a full save, a death and a shutdown all write at once, so the interval only ever delays
+    /// a write nobody is waiting on. So the store keeps only the parsed object for a character, only
     /// while that character is being played, and never a serialized copy. It used to keep the whole YAML
     /// string as well and rebuild it on every incremental update - a fresh copy of the entire save, hundreds
     /// of kilobytes, per player per update - and it kept every character it had ever seen until restart.
@@ -30,12 +35,15 @@ namespace ValheimEnforcer.modules.character {
     ///
     /// Threading contract:
     ///  - The main thread only ever calls the Submit*/Seed/IsCached/HasUnwrittenChanges/Snapshot/Flush/
-    ///    Shutdown API and hands the worker immutable strings (or objects it will not touch again after
-    ///    handoff). It never dereferences a cached <see cref="DataObjects.Character"/>.
+    ///    FlushCharacter/RequestWriteForSender/Shutdown API and hands the worker immutable strings (or objects
+    ///    it will not touch again after handoff). It never dereferences a cached
+    ///    <see cref="DataObjects.Character"/>.
     ///  - The worker thread is the SOLE owner and mutator of cached <see cref="DataObjects.Character"/>
-    ///    objects, and the only thread that reads or writes an entry's fields, with two exceptions that are
-    ///    each a single word: <see cref="Entry.Dirty"/> is volatile and the main thread reads it, and
-    ///    <see cref="Entry.LastTouchedTicks"/> is written with Interlocked from both sides.
+    ///    objects, and the only thread that writes an entry's fields, with the exceptions being a single word
+    ///    each: <see cref="Entry.Dirty"/> is volatile and the main thread reads it,
+    ///    <see cref="Entry.LastTouchedTicks"/> is written with Interlocked from both sides,
+    ///    <see cref="Entry.CanonKey"/> never changes after construction, and the main thread reads
+    ///    <see cref="Entry.LastSender"/> only to decide whose write to hurry, where a stale value costs nothing.
     ///  - Internal-storage (ZDO) writes are intentionally NOT handled here: ZDOs are main-thread only.
     ///    Callers use this store for disk mode and keep the existing synchronous path for internal mode.
     /// </summary>
@@ -59,9 +67,26 @@ namespace ValheimEnforcer.modules.character {
             // Peer uid of the last message applied. If an admin's out-of-band write replaces this entry before
             // the change is written, that client is asked for a full save so the change is not simply lost.
             public long LastSender;
+            // Which character this is, spelled so that every spelling of it agrees - see CanonicalKey. The cache
+            // key cannot serve: it is whatever spelling the message that created the entry happened to carry.
+            // Set at construction and never changed, so any thread may read it.
+            public string CanonKey;
+            // Worker-only. UTC ticks at which this entry last went from written to unwritten, which is what the
+            // write interval is measured from; 0 while it matches the file.
+            public long DirtySinceTicks;
+            // Worker-only. UTC ticks before which a write that just failed is not tried again, so a disk that
+            // is refusing writes produces a warning every half minute rather than every second.
+            public long RetryAfterTicks;
+            // Worker-only. Write this one on the next pass whatever the interval says: it was changed by
+            // something other than a routine delta.
+            public bool WriteNow;
         }
 
-        private abstract class Message { }
+        private abstract class Message {
+            // The character this message is for, as CanonicalKey spells it, or null when that is not known.
+            // Counted in `pending` from the moment it is queued until the worker has finished applying it.
+            public string PendingKey;
+        }
         private sealed class FullSaveMessage : Message {
             public string RawYaml;
             public long Sender;
@@ -172,6 +197,39 @@ namespace ValheimEnforcer.modules.character {
         private static volatile bool running;
         private static volatile bool workerBusy;
 
+        // ---- Write-behind ---------------------------------------------------------------------------------
+
+        // Snapshot of CharacterWriteIntervalSeconds, written only from the main thread and read by the worker,
+        // for the same reason idleEvictionMinutes is one. 0 = write after every change, as it always has.
+        private static volatile int writeIntervalSeconds;
+
+        /// <summary>How long a failed write waits before it is tried again.</summary>
+        private static readonly TimeSpan WriteRetryDelay = TimeSpan.FromSeconds(30);
+
+        // Worker-only. Entries whose Character is ahead of the file, by cache key. Lives across drains, which is
+        // the whole of write-behind: an entry can sit here through many passes before its write falls due.
+        private static readonly Dictionary<string, Entry> unwritten = new Dictionary<string, Entry>();
+        private static readonly List<string> writtenScratch = new List<string>();
+        // How many entries `unwritten` holds, for the threads that may not touch it.
+        private static volatile int unwrittenCount;
+
+        // Bumped by Flush to ask for everything to be written now; the worker compares it with the value it
+        // last honoured. A counter rather than a flag so a request that arrives in the middle of a pass is not
+        // cleared by the end of that pass.
+        private static volatile int flushRequests;
+        private static int flushHonoured;
+
+        // Characters somebody is waiting on - a login that arrived behind an unwritten change, a player who
+        // just left - by canonical key. Their writes fall due at once. Tiny, and emptied by the worker as each
+        // one is settled.
+        private static readonly ConcurrentDictionary<string, byte> urgent = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+
+        // Messages queued or being applied, per character, by canonical key. This is what lets a login ask
+        // "is anything outstanding for THIS character" instead of "is the store doing anything at all" - which
+        // on a busy server it nearly always is, and which used to cost that login up to three quarters of a
+        // second of main thread for somebody else's save.
+        private static readonly ConcurrentDictionary<string, int> pending = new ConcurrentDictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
         // ---- Idle eviction --------------------------------------------------------------------------------
 
         /// <summary>How often the worker looks for idle entries. Not configurable: the idle threshold is the
@@ -190,6 +248,38 @@ namespace ValheimEnforcer.modules.character {
 
         internal static string KeyFor(string id, string name) {
             return $"{id}/{name}";
+        }
+
+        /// <summary>
+        /// One spelling per character, whatever spelling it was asked about under. An account reaches the store
+        /// as both "Steam_7656..." and the bare "7656..." (see PlatformIds) and a name in whatever case the
+        /// caller had, so the platform prefix is dropped here and the tables keyed on this compare without case.
+        /// Null when either half is missing.
+        /// </summary>
+        private static string CanonicalKey(string id, string name) {
+            if (string.IsNullOrEmpty(id) || string.IsNullOrEmpty(name)) { return null; }
+            return PlatformIds.Normalize(id) + "/" + name;
+        }
+
+        private static void Enqueue(Message message, string id, string name) {
+            message.PendingKey = CanonicalKey(id, name);
+            if (message.PendingKey != null) { pending.AddOrUpdate(message.PendingKey, 1, (key, count) => count + 1); }
+            messages.Enqueue(message);
+            signal.Set();
+        }
+
+        // Compare-and-swap throughout, because the main thread is adding to the same count: removing the entry
+        // on a plain "it reached zero" would drop a message queued in the instant between the two steps.
+        private static void PendingDone(string key) {
+            if (key == null) { return; }
+            ICollection<KeyValuePair<string, int>> pairs = pending;
+            while (pending.TryGetValue(key, out int count)) {
+                if (count <= 1) {
+                    if (pairs.Remove(new KeyValuePair<string, int>(key, count))) { return; }
+                } else if (pending.TryUpdate(key, count - 1, count)) {
+                    return;
+                }
+            }
         }
 
         private static void EnsureWorker() {
@@ -211,15 +301,17 @@ namespace ValheimEnforcer.modules.character {
         internal static void SubmitFullSave(string rawYaml, long sender, string senderAccountId, string senderCharacterName,
                                             NewCharacterRules.Policy newCharacterPolicy, ReturningCharacterRules.Policy returningPolicy) {
             EnsureWorker();
-            messages.Enqueue(new FullSaveMessage {
+            // Counted under who the SERVER says this is. The payload's own spelling is not known until the
+            // worker parses it, and the identity check there refuses the save unless the two are the same
+            // character anyway.
+            Enqueue(new FullSaveMessage {
                 RawYaml = rawYaml,
                 Sender = sender,
                 SenderAccountId = senderAccountId,
                 SenderCharacterName = senderCharacterName,
                 NewCharacterPolicy = newCharacterPolicy,
                 ReturningPolicy = returningPolicy,
-            });
-            signal.Set();
+            }, senderAccountId, senderCharacterName);
         }
 
         /// <summary>Apply an incremental delta update (already parsed on the main thread — the delta
@@ -228,8 +320,7 @@ namespace ValheimEnforcer.modules.character {
         /// main thread picks it back up.</summary>
         internal static void SubmitDelta(DeltaSummaryUpdate delta, long sender) {
             EnsureWorker();
-            messages.Enqueue(new DeltaMessage { Delta = delta, Sender = sender });
-            signal.Set();
+            Enqueue(new DeltaMessage { Delta = delta, Sender = sender }, delta.HostID, delta.Name);
         }
 
         /// <summary>
@@ -244,8 +335,7 @@ namespace ValheimEnforcer.modules.character {
         internal static void SubmitMap(string hostId, string name, byte[] blob, string hash, long sender) {
             if (string.IsNullOrEmpty(hostId) || string.IsNullOrEmpty(name) || blob == null || blob.Length == 0) { return; }
             EnsureWorker();
-            messages.Enqueue(new MapMessage { HostID = hostId, Name = name, Blob = blob, Hash = hash, Sender = sender });
-            signal.Set();
+            Enqueue(new MapMessage { HostID = hostId, Name = name, Blob = blob, Hash = hash, Sender = sender }, hostId, name);
         }
 
         /// <summary>Record that a character died: clear its item list and mark it a dirty disconnect, so the
@@ -255,8 +345,7 @@ namespace ValheimEnforcer.modules.character {
         internal static void SubmitDeath(string hostId, string name) {
             if (string.IsNullOrEmpty(hostId) || string.IsNullOrEmpty(name)) { return; }
             EnsureWorker();
-            messages.Enqueue(new DeathMessage { HostID = hostId, Name = name });
-            signal.Set();
+            Enqueue(new DeathMessage { HostID = hostId, Name = name }, hostId, name);
         }
 
         /// <summary>Main thread: take the next queued drift-recovery request, or null when there are none.
@@ -287,8 +376,7 @@ namespace ValheimEnforcer.modules.character {
         internal static void SubmitSeal(string hostId, string name, long sender, recovery.RecoverySeal.Keys keys, long worldUid) {
             if (string.IsNullOrEmpty(hostId) || string.IsNullOrEmpty(name) || keys == null) { return; }
             EnsureWorker();
-            messages.Enqueue(new SealMessage { HostID = hostId, Name = name, Sender = sender, Keys = keys, WorldUid = worldUid });
-            signal.Set();
+            Enqueue(new SealMessage { HostID = hostId, Name = name, Sender = sender, Keys = keys, WorldUid = worldUid }, hostId, name);
         }
 
         /// <summary>Verify a snapshot a client handed back and adopt it when it is genuinely newer.</summary>
@@ -296,8 +384,7 @@ namespace ValheimEnforcer.modules.character {
                                                    recovery.RecoverySeal.Keys keys, long worldUid, long sender) {
             if (string.IsNullOrEmpty(hostId) || string.IsNullOrEmpty(name) || blob == null || keys == null) { return; }
             EnsureWorker();
-            messages.Enqueue(new RecoveryMessage { HostID = hostId, Name = name, Blob = blob, Keys = keys, WorldUid = worldUid, Sender = sender });
-            signal.Set();
+            Enqueue(new RecoveryMessage { HostID = hostId, Name = name, Blob = blob, Keys = keys, WorldUid = worldUid, Sender = sender }, hostId, name);
         }
 
         /// <summary>Main thread: take the next sealed snapshot to send, or null when there are none.</summary>
@@ -326,14 +413,68 @@ namespace ValheimEnforcer.modules.character {
         }
 
         /// <summary>
-        /// True when the file on disk may be behind what the store holds: a change applied and not yet
-        /// written, or anything still queued. The login path asks this before reading the file, and waits
-        /// (bounded) when the answer is yes. Coarse on purpose - it does not know which character a queued
-        /// message is for - because the cost of a false yes is a wait of a few milliseconds on one connect.
+        /// True when the file on disk may be behind what the store holds FOR THIS CHARACTER: a message for it
+        /// still queued or being applied, or a change applied and not yet written. The login path asks this
+        /// before reading the file, and waits (bounded) when the answer is yes.
+        ///
+        /// This used to be coarse - any queued message, or the worker being busy at all, was a yes - on the
+        /// reasoning that a false yes only cost a few milliseconds. That held on a quiet server. On a full one
+        /// the worker is busy with somebody's save most of the time, so most logins said yes, and each of them
+        /// then held the main thread until the whole queue drained. Asking about the one character costs a
+        /// walk of the entries being played, once per connect.
         /// </summary>
         internal static bool HasUnwrittenChanges(string id, string name) {
-            if (cache.TryGetValue(KeyFor(id, name), out Entry e) && e.Dirty) { return true; }
-            return !messages.IsEmpty || workerBusy;
+            string canon = CanonicalKey(id, name);
+            if (canon == null) { return false; }
+            if (pending.TryGetValue(canon, out int queued) && queued > 0) { return true; }
+            foreach (KeyValuePair<string, Entry> kv in cache) {
+                Entry entry = kv.Value;
+                if (entry.Dirty && string.Equals(entry.CanonKey, canon, StringComparison.OrdinalIgnoreCase)) { return true; }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Block until nothing is outstanding for one character, or the timeout passes, asking the worker to
+        /// write it now rather than when its interval comes round. For the login path, which is about to read
+        /// that character's file. Returns false when the timeout passed first.
+        /// </summary>
+        internal static bool FlushCharacter(string id, string name, TimeSpan timeout, int pollMs = 15) {
+            if (!running) { return true; }
+            string canon = CanonicalKey(id, name);
+            if (canon == null) { return true; }
+            urgent[canon] = 0;
+            signal.Set();
+            DateTime deadline = DateTime.UtcNow + timeout;
+            while (DateTime.UtcNow < deadline) {
+                if (!HasUnwrittenChanges(id, name)) { return true; }
+                Thread.Sleep(pollMs);
+            }
+            return !HasUnwrittenChanges(id, name);
+        }
+
+        /// <summary>
+        /// Main thread: a player has left, so whatever they last sent should reach the file now instead of
+        /// waiting out the write interval. Matched on the peer that sent the last update rather than on a name,
+        /// because that is the one thing about an entry that is certain to be this connection's. Does nothing
+        /// when nothing of theirs is unwritten, which is always the case with the interval at 0.
+        /// </summary>
+        internal static void RequestWriteForSender(long sender) {
+            if (!running || sender == 0L || unwrittenCount == 0) { return; }
+            bool any = false;
+            foreach (KeyValuePair<string, Entry> kv in cache) {
+                Entry entry = kv.Value;
+                if (!entry.Dirty || entry.LastSender != sender || entry.CanonKey == null) { continue; }
+                urgent[entry.CanonKey] = 0;
+                any = true;
+            }
+            if (any) { signal.Set(); }
+        }
+
+        /// <summary>Main thread only. Re-reads the write interval into the worker's snapshot; wired to the
+        /// setting's SettingChanged so a config reload takes effect on the next pass.</summary>
+        internal static void SetWriteIntervalSeconds(int seconds) {
+            writeIntervalSeconds = seconds < 0 ? 0 : seconds;
         }
 
         /// <summary>
@@ -347,7 +488,7 @@ namespace ValheimEnforcer.modules.character {
         internal static void Seed(string id, string name, DateTime sourceMtime) {
             string key = KeyFor(id, name);
             long now = DateTime.UtcNow.Ticks;
-            Entry fresh = new Entry { Character = null, SourceMtime = sourceMtime, LastTouchedTicks = now };
+            Entry fresh = new Entry { Character = null, SourceMtime = sourceMtime, LastTouchedTicks = now, CanonKey = CanonicalKey(id, name) };
             if (cache.TryAdd(key, fresh)) { return; }
             if (!cache.TryGetValue(key, out Entry existing)) {
                 cache.TryAdd(key, fresh); // removed between the two calls; either outcome is fine
@@ -385,18 +526,25 @@ namespace ValheimEnforcer.modules.character {
             idleEvictionMinutes = minutes < 0 ? 0 : minutes;
         }
 
-        /// <summary>Block until currently-queued work has been drained to disk, or the timeout passes. Intended
-        /// for shutdown / world-save / a login that arrived behind a pending write; do not call on a hot path.
-        /// Returns false when the timeout passed with work still pending.</summary>
+        /// <summary>Block until everything the store holds has reached disk, or the timeout passes. Intended
+        /// for shutdown; do not call on a hot path, and a login wants <see cref="FlushCharacter"/> instead.
+        /// Asks for every unwritten character to be written now, whatever the write interval says - "drained"
+        /// stopped meaning "written" when write-behind arrived. Returns false when the timeout passed with work
+        /// still outstanding.</summary>
         internal static bool Flush(TimeSpan timeout, int pollMs = 15) {
             if (!running) { return true; }
+            flushRequests++; // main thread only, so the unsynchronised increment has a single writer
             signal.Set();
             DateTime deadline = DateTime.UtcNow + timeout;
             while (DateTime.UtcNow < deadline) {
-                if (messages.IsEmpty && !workerBusy) { return true; }
+                if (Settled()) { return true; }
                 Thread.Sleep(pollMs);
             }
-            return messages.IsEmpty && !workerBusy;
+            return Settled();
+        }
+
+        private static bool Settled() {
+            return messages.IsEmpty && !workerBusy && unwrittenCount == 0;
         }
 
         /// <summary>Flush and stop the worker. Called from the server shutdown path.</summary>
@@ -412,6 +560,8 @@ namespace ValheimEnforcer.modules.character {
                 // Nothing will read these again on this server; a listen host that returns to the menu and hosts
                 // again should not start with the last world's characters in memory.
                 cache.Clear();
+                pending.Clear();
+                urgent.Clear();
             } else {
                 Logger.LogWarning("CharacterStore worker did not stop in time; its cached characters are kept until it does.");
             }
@@ -422,55 +572,126 @@ namespace ValheimEnforcer.modules.character {
         // ---------------------------------------------------------------------------------------------
 
         private static void WorkerLoop() {
+            // Off the main thread, and before the first save needs it: the fast writer checks itself against
+            // the serializer once, which costs a few megabytes and tens of milliseconds nobody should pay in
+            // the middle of a join.
+            try { CharacterYaml.WarmUp(); } catch (Exception) { /* it reports its own failures */ }
+
             while (running) {
                 signal.WaitOne(1000);
-                DrainOnce();
+                DrainOnce(writeEverything: false);
                 SweepIfDue();
             }
-            DrainOnce(); // final drain so nothing queued before Shutdown() is lost
+            DrainOnce(writeEverything: true); // final drain so nothing queued or held before Shutdown() is lost
         }
 
-        private static void DrainOnce() {
+        private static void DrainOnce(bool writeEverything) {
             workerBusy = true;
             try {
-                // Apply every message in order (updates must not be reordered), collecting the entries that
-                // changed. Writing per distinct key AFTER draining coalesces a burst of updates for the same
-                // character into a single serialize and a single disk write.
-                Dictionary<string, Entry> dirty = new Dictionary<string, Entry>();
+                int flushAsked = flushRequests;
+                long now = DateTime.UtcNow.Ticks;
+
+                // Apply every message in order (updates must not be reordered), noting the entries that changed.
+                // Writing per distinct key AFTER draining coalesces a burst of updates for the same character
+                // into a single write - and with a write interval set, so does leaving an entry in `unwritten`
+                // until its write falls due, across as many drains as that takes.
                 while (messages.TryDequeue(out Message msg)) {
                     try {
                         Entry changed = Apply(msg, out string key);
-                        if (changed != null) { dirty[key] = changed; }
+                        if (changed != null) {
+                            unwritten[key] = changed; // a full save replaces the entry object; this follows it
+                            if (changed.DirtySinceTicks == 0L) { changed.DirtySinceTicks = now; }
+                            // Only the routine delta waits for the interval. A full save, a death, an adopted
+                            // snapshot and a map hash are each either rare or something the file should agree
+                            // with straight away, and a death in particular is a security record.
+                            if (!(msg is DeltaMessage)) { changed.WriteNow = true; }
+                        }
                     } catch (Exception e) {
                         Logger.LogWarning($"CharacterStore failed to apply an update: {e.Message}");
+                    } finally {
+                        // After Apply, never before: Apply is what marks the entry Dirty, and a login asking
+                        // about this character must not find a moment where it is neither counted nor dirty.
+                        PendingDone(msg.PendingKey);
                     }
                 }
-                foreach (KeyValuePair<string, Entry> kv in dirty) {
-                    Entry entry = kv.Value;
-                    if (entry.Character == null) { continue; }
-                    if (!cache.TryGetValue(kv.Key, out Entry current) || !ReferenceEquals(current, entry)) {
-                        // Invalidate (an admin's own synchronous write) or a login that found the file newer took
-                        // the entry out from under this change. The file they wrote wins: writing ours would put
-                        // back whatever the admin just took out. The change itself is not lost - the client still
-                        // has it, so ask them for a full save, which lands on top of the admin's file.
-                        Logger.LogInfo($"Not writing {kv.Key}: its stored copy was replaced while an update was pending; asking the client for a full save instead.");
-                        if (entry.LastSender != 0L) {
-                            driftResyncs.Enqueue(new DriftResync { Sender = entry.LastSender, HostID = entry.Character.HostID, Name = entry.Character.Name });
-                        }
-                        continue;
-                    }
-                    try {
-                        // Record the mtime the OS reports for our own write so a later login can tell an
-                        // out-of-band edit apart from a file we wrote ourselves.
-                        entry.SourceMtime = WriteToDisk(entry.Character);
-                        entry.Dirty = false;
-                    } catch (Exception e) {
-                        // Stays dirty: never evicted, and written on the next attempt for this character.
-                        Logger.LogWarning($"CharacterStore failed to write {kv.Key} to disk: {e.Message}");
-                    }
-                }
+
+                WriteDue(writeEverything || flushAsked != flushHonoured, now);
+                flushHonoured = flushAsked;
             } finally {
+                unwrittenCount = unwritten.Count;
                 workerBusy = false;
+            }
+        }
+
+        /// <summary>
+        /// Writes the unwritten entries whose write has fallen due, and forgets the ones that no longer need
+        /// one. With the interval at 0 every entry is due the moment it changes, which is exactly what this
+        /// store did before it had an interval.
+        /// </summary>
+        private static void WriteDue(bool everything, long now) {
+            if (unwritten.Count == 0) {
+                if (!urgent.IsEmpty) { SettleUrgent(); }
+                return;
+            }
+            long interval = writeIntervalSeconds * TimeSpan.TicksPerSecond;
+            writtenScratch.Clear();
+
+            foreach (KeyValuePair<string, Entry> kv in unwritten) {
+                Entry entry = kv.Value;
+                if (entry.Character == null) { writtenScratch.Add(kv.Key); continue; }
+                if (!cache.TryGetValue(kv.Key, out Entry current) || !ReferenceEquals(current, entry)) {
+                    // Invalidate (an admin's own synchronous write) or a login that found the file newer took
+                    // the entry out from under this change. The file they wrote wins: writing ours would put
+                    // back whatever the admin just took out. The change itself is not lost - the client still
+                    // has it, so ask them for a full save, which lands on top of the admin's file.
+                    Logger.LogInfo($"Not writing {kv.Key}: its stored copy was replaced while an update was pending; asking the client for a full save instead.");
+                    if (entry.LastSender != 0L) {
+                        driftResyncs.Enqueue(new DriftResync { Sender = entry.LastSender, HostID = entry.Character.HostID, Name = entry.Character.Name });
+                    }
+                    entry.Dirty = false; // nobody will write this object; a login must not wait on it
+                    writtenScratch.Add(kv.Key);
+                    continue;
+                }
+
+                bool wanted = everything || entry.WriteNow || interval <= 0L
+                              || now - entry.DirtySinceTicks >= interval
+                              || (entry.CanonKey != null && urgent.ContainsKey(entry.CanonKey));
+                if (!wanted) { continue; }
+                // A write that just failed is left alone for a while, unless somebody is actually waiting.
+                if (!everything && now < entry.RetryAfterTicks) { continue; }
+
+                try {
+                    // Record the mtime the OS reports for our own write so a later login can tell an
+                    // out-of-band edit apart from a file we wrote ourselves.
+                    entry.SourceMtime = WriteToDisk(entry.Character);
+                    entry.Dirty = false;
+                    entry.WriteNow = false;
+                    entry.DirtySinceTicks = 0L;
+                    entry.RetryAfterTicks = 0L;
+                    writtenScratch.Add(kv.Key);
+                } catch (Exception e) {
+                    // Stays dirty and stays in `unwritten`: never evicted, and tried again after the delay.
+                    entry.RetryAfterTicks = now + WriteRetryDelay.Ticks;
+                    Logger.LogWarning($"CharacterStore failed to write {kv.Key} to disk, and will try again in {WriteRetryDelay.TotalSeconds:F0} seconds: {e.Message}");
+                }
+            }
+
+            for (int i = 0; i < writtenScratch.Count; i++) { unwritten.Remove(writtenScratch[i]); }
+            writtenScratch.Clear();
+            if (!urgent.IsEmpty) { SettleUrgent(); }
+        }
+
+        // Drops every "somebody is waiting on this character" request that has been met: nothing queued for
+        // it, and nothing unwritten. One still outstanding - its write failed, or another message for it arrived
+        // behind the first - stays for the next pass.
+        private static void SettleUrgent() {
+            foreach (KeyValuePair<string, byte> wanted in urgent) {
+                if (pending.ContainsKey(wanted.Key)) { continue; }
+                bool held = false;
+                foreach (KeyValuePair<string, Entry> kv in unwritten) {
+                    if (string.Equals(kv.Value.CanonKey, wanted.Key, StringComparison.OrdinalIgnoreCase)) { held = true; break; }
+                }
+                if (!held) { urgent.TryRemove(wanted.Key, out _); }
             }
         }
 
@@ -620,6 +841,7 @@ namespace ValheimEnforcer.modules.character {
                         LastSender = full.Sender,
                         SourceMtime = existingEntry?.SourceMtime ?? DateTime.MinValue,
                         LastTouchedTicks = DateTime.UtcNow.Ticks,
+                        CanonKey = CanonicalKey(c.HostID, c.Name),
                     };
                     cache[key] = fresh;
                     // Queued strictly AFTER the cache entry is published, and carrying its own copy of the
@@ -649,7 +871,9 @@ namespace ValheimEnforcer.modules.character {
                     cur.SaveSequence++;
                     entry.Dirty = true;
                     entry.LastSender = deltaMsg.Sender;
-                    Logger.LogInfo($"Saved delta update for {cur.Name}.");
+                    // Debug, and only built when debug is on: one of these per player per rate-limit window is
+                    // the mod running normally, not something an admin needs telling about at Info.
+                    if (Logger.DebugEnabled) { Logger.LogDebug($"Applied delta update for {cur.Name}."); }
                     return entry;
                 }
                 case DeathMessage death: {
@@ -690,7 +914,7 @@ namespace ValheimEnforcer.modules.character {
                             Sequence = c.SaveSequence,
                             SealedUtc = DateTime.UtcNow,
                         };
-                        byte[] blob = recovery.RecoverySeal.Seal(seal.Keys, header, yamlserializer.Serialize(c));
+                        byte[] blob = recovery.RecoverySeal.Seal(seal.Keys, header, CharacterYaml.ToYaml(c));
                         sealedPushes.Enqueue(new SealedPush { Sender = seal.Sender, Name = c.Name, Blob = blob });
                     } catch (Exception e) {
                         Logger.LogWarning($"Could not seal a recovery snapshot for {sealKey}: {e.Message}");
@@ -759,6 +983,7 @@ namespace ValheimEnforcer.modules.character {
                         LastSender = recovery_.Sender,
                         SourceMtime = existingEntry?.SourceMtime ?? DateTime.MinValue,
                         LastTouchedTicks = DateTime.UtcNow.Ticks,
+                        CanonKey = CanonicalKey(recovery_.HostID, recovery_.Name),
                     };
                     cache[key] = adopted;
                     Logger.LogWarning($"CRASH RECOVERY: adopted the snapshot {restored.Name} ({restored.HostID}) handed back - sequence {header.Sequence}, sealed {header.SealedUtc:u}, replacing the sequence {held} this server held. Items and progression in it are from before the rollback; if the WORLD also rolled back, anything they took out of it since may now exist twice.");
@@ -848,7 +1073,7 @@ namespace ValheimEnforcer.modules.character {
             try {
                 c.ConfiscatedItems = null;
                 c.SkillReductions = null;
-                return yamlserializer.Serialize(c);
+                return CharacterYaml.ToYaml(c);
             } finally {
                 c.ConfiscatedItems = held;
                 c.SkillReductions = heldReductions;
@@ -892,7 +1117,7 @@ namespace ValheimEnforcer.modules.character {
                     state = LoadState.Unreadable;
                     return null;
                 }
-                Entry loaded = new Entry { Character = c, SourceMtime = File.GetLastWriteTimeUtc(path), LastTouchedTicks = DateTime.UtcNow.Ticks };
+                Entry loaded = new Entry { Character = c, SourceMtime = File.GetLastWriteTimeUtc(path), LastTouchedTicks = DateTime.UtcNow.Ticks, CanonKey = CanonicalKey(id, name) };
                 cache[key] = loaded;
                 state = LoadState.Found;
                 return loaded;
@@ -909,10 +1134,19 @@ namespace ValheimEnforcer.modules.character {
         private static DateTime WriteToDisk(DataObjects.Character c) {
             Directory.CreateDirectory(ValConfig.CharacterFilePath);
             string dir = Path.Combine(ValConfig.CharacterFilePath, c.HostID);
-            Directory.CreateDirectory(dir);
+            if (!Directory.Exists(dir)) {
+                Directory.CreateDirectory(dir);
+                // A new account. CharacterSaves remembers the folder listing, and would otherwise have to
+                // notice this one by the folder's time stamp.
+                CharacterSaves.InvalidateFolderListing();
+            }
             string path = Path.Combine(dir, $"{c.Name}.yaml");
-            DateTime written = AtomicFile.WriteYaml(path, c, yamlserializer);
-            Logger.LogInfo($"Writing to {path}");
+            // CharacterYaml rather than the serializer: the same document for a small fraction of the
+            // allocation, which matters more here than anywhere - this is the call behind every update from
+            // every player.
+            DateTime written = CharacterYaml.WriteFile(path, c);
+            // Debug: one per write is the store working, and the saves worth an Info line already have one.
+            if (Logger.DebugEnabled) { Logger.LogDebug($"Wrote {path}"); }
             return written;
         }
     }

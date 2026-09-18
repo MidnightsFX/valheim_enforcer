@@ -36,8 +36,9 @@ namespace ValheimEnforcer.modules.network {
         internal static bool IsExempt(ZNetPeer peer) {
             if (peer == null) { return false; }
             if (ValConfig.RpcGuardExemptAdmins == null || !ValConfig.RpcGuardExemptAdmins.Value) { return false; }
-            string hostId = HostIdOf(peer);
-            return !string.IsNullOrEmpty(hostId) && ZNet.instance.IsAdmin(hostId);
+            // The remembered verdict, not ZNet.IsAdmin: this is asked twice per relayed hit with the damage
+            // guard on, and vanilla's check builds several strings every time it is called.
+            return modules.character.PeerIdentity.IsAdmin(peer);
         }
 
         /// <summary>
