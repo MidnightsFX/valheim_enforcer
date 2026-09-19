@@ -34,21 +34,28 @@ namespace ValheimEnforcer.modules.character {
             get { return ValConfig.NewCharacterClearKnownTexts != null && ValConfig.NewCharacterClearKnownTexts.Value; }
         }
 
-        /// <summary>Join, new character. Call alongside the other new-character progression resets.</summary>
-        internal static void ResetForNewCharacter(Player player, string characterName) {
-            if (!Enabled || player == null || player.m_knownTexts == null) { return; }
+        /// <summary>
+        /// Join, new character. Call alongside the other new-character progression resets.
+        ///
+        /// Returns whether anything was actually cleared, which is what tells the caller a mod that read
+        /// this dictionary at spawn is now holding a stale answer. CompatEpicMMO runs the reset ahead of
+        /// every spawn postfix when the server has already answered, so the ordinary case returns false
+        /// here - by then there is nothing left to clear and nothing to tell anybody about.
+        /// </summary>
+        internal static bool ResetForNewCharacter(Player player, string characterName) {
+            if (!Enabled || player == null || player.m_knownTexts == null) { return false; }
 
             // Joining a server only, exactly as in KnownRecipes: singleplayer and a listen host's own
             // character also read as new whenever this machine has no local save for them, which is every
             // character the first time it is loaded with the mod installed.
-            if (CharacterManager.ThisMachineIsAuthority()) { return; }
+            if (CharacterManager.ThisMachineIsAuthority()) { return false; }
 
             if (!CharacterManager.ConfirmedNewCharacter()) {
                 Logger.LogWarning($"Not clearing known texts for {characterName}: the server has not confirmed this is a new character, and a forgotten level cannot be given back.");
-                return;
+                return false;
             }
 
-            if (player.m_knownTexts.Count == 0) { return; }
+            if (player.m_knownTexts.Count == 0) { return false; }
 
             // Everything goes, pass-through prefixes included. CompatKnownTexts governs what is enforced
             // between joins; what a character may bring in with it on its very first one is this rule's
@@ -56,6 +63,7 @@ namespace ValheimEnforcer.modules.character {
             player.m_knownTexts.Clear();
 
             Logger.LogInfo($"New character {characterName}: cleared the runestone texts and mod-owned progression they arrived with.");
+            return true;
         }
     }
 }

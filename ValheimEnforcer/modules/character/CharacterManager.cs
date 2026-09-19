@@ -435,7 +435,15 @@ namespace ValheimEnforcer.modules.character {
                 // materials, stations and trophies and stops there. Mods park per-player progression in that
                 // dictionary (EpicMMO keeps a character's level and experience in it), so without this a
                 // first-time joiner kept the one thing every other rule here had already taken away.
-                KnownTexts.ResetForNewCharacter(player, PlayerName);
+                //
+                // Usually a no-op by the time it gets here: CompatEpicMMO does the same reset ahead of every
+                // spawn postfix whenever the server's answer arrived in time, precisely so that a mod reading
+                // the dictionary at spawn reads the reset state. It clears something only on the join that
+                // had to wait for that answer - and a mod that read the old value is then holding it, which
+                // is what the resync below is for.
+                if (KnownTexts.ResetForNewCharacter(player, PlayerName)) {
+                    compat.CompatEpicMMO.Resync(player, PlayerName);
+                }
                 // And the statistics, which are neither in the character record nor cleared by either of the
                 // two above. Same "only on a definite answer" rule - zeroed counters cannot be given back.
                 ProgressionSync.ResetForNewCharacter(PlayerName);

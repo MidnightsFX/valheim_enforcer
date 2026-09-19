@@ -1,3 +1,16 @@
+**0.30.0**
+---
+```
+- Adds NewCharacterClearKnownTexts (Player Sync, default on): a character joining a server for the first time
+  forgets its known texts.
+    - Vanilla's own reset did not cover this
+    - EpicMMO keeps its data in these KnownTexts, which 
+- Adds KnownTextPassthroughPrefixes (Player Sync, advanced, default EpicMMOSystem): comma separated key
+  prefixes in a character's known texts that are not touched.
+    - Fixes EpicMMO progression being rolled back on every join.
+- Adds EpicMMOKnownTextCompat (Player Sync, advanced, default on): does nothing unless EpicMMO is installed.
+```
+
 **0.29.0**
 ---
 ```
