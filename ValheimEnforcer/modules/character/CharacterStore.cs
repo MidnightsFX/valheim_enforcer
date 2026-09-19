@@ -533,6 +533,9 @@ namespace ValheimEnforcer.modules.character {
                     // pass-through handling still carry. Safe here: CompatCustomData reads a volatile
                     // snapshot rather than a ConfigEntry.
                     compat.CompatCustomData.StripPassthroughKeys(c.PlayerCustomData);
+                    // And the known-text keys a mod owns, for the same reasons and on the same terms -
+                    // including scrubbing the copies saves written before this rule existed still carry.
+                    compat.CompatKnownTexts.StripPassthroughKeys(c.Progress?.KnownTexts);
 
                     key = KeyFor(c.HostID, c.Name);
                     // The incoming save replaces everything EXCEPT the confiscated list, which the server owns:

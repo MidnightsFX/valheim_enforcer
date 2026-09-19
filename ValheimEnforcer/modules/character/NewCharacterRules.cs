@@ -41,6 +41,7 @@ namespace ValheimEnforcer.modules.character {
             internal bool ConfiscateUnidentifiable;
             internal bool RecordReductions;     // RecordSkillReductions
             internal bool ClearKnownItems;      // NewCharacterClearKnownRecipes, when SyncKnownItems is on
+            internal bool ClearKnownTexts;      // NewCharacterClearKnownTexts, when SyncKnownItems is on
             internal bool ClearStats;           // NewCharacterClearPlayerStats, when SyncPlayerStats is on
             internal bool ClearSpawn;           // always, when SyncSpawnPoint is on: a bed elsewhere is not one here
             /// <summary>The starting kit to hand over once the rules above have run, or null. Resolved on the
@@ -55,7 +56,7 @@ namespace ValheimEnforcer.modules.character {
             internal bool AnyEnabled {
                 get {
                     return ZeroSkills || StripItems || ClearCustomData || ClearGuardianPower || ClearFoods
-                           || ClearKnownItems || ClearStats || ClearSpawn || Loadout != null;
+                           || ClearKnownItems || ClearKnownTexts || ClearStats || ClearSpawn || Loadout != null;
                 }
             }
         }
@@ -78,6 +79,9 @@ namespace ValheimEnforcer.modules.character {
                 // with nothing stored there is nothing here to clear, and the client-side rules
                 // (KnownRecipes, ProgressionSync.ResetForNewCharacter) are what act on the live player.
                 ClearKnownItems = ProgressionSync.KnownItemsEnabled && ValConfig.NewCharacterClearKnownRecipes.Value,
+                // Its own flag rather than part of ClearKnownItems: the two are separate settings, and
+                // vanilla's known-items reset does not touch known texts, so neither should the record's.
+                ClearKnownTexts = ProgressionSync.KnownItemsEnabled && ValConfig.NewCharacterClearKnownTexts.Value,
                 ClearStats = ProgressionSync.StatsEnabled && ValConfig.NewCharacterClearPlayerStats.Value,
                 ClearSpawn = ProgressionSync.SpawnEnabled,
                 Loadout = StarterLoadouts.Current(),
@@ -110,6 +114,7 @@ namespace ValheimEnforcer.modules.character {
             internal bool FoodsCleared;
             internal bool EffectsCleared;
             internal bool KnownItemsCleared;
+            internal bool KnownTextsCleared;
             internal bool StatsCleared;
             internal bool SpawnCleared;
             internal StarterLoadouts.Result Loadout;
@@ -117,7 +122,7 @@ namespace ValheimEnforcer.modules.character {
             internal bool Changed {
                 get {
                     return ItemsRemoved > 0 || SkillsZeroed > 0 || CustomDataCleared || GuardianPowerCleared
-                           || FoodsCleared || EffectsCleared || KnownItemsCleared || StatsCleared || SpawnCleared
+                           || FoodsCleared || EffectsCleared || KnownItemsCleared || KnownTextsCleared || StatsCleared || SpawnCleared
                            || (Loadout != null && Loadout.Changed);
                 }
             }
@@ -131,6 +136,7 @@ namespace ValheimEnforcer.modules.character {
                 if (FoodsCleared) { parts.Add("foods cleared"); }
                 if (EffectsCleared) { parts.Add("status effects cleared"); }
                 if (KnownItemsCleared) { parts.Add("known recipes and materials cleared"); }
+                if (KnownTextsCleared) { parts.Add("known texts cleared"); }
                 if (StatsCleared) { parts.Add("statistics cleared"); }
                 if (SpawnCleared) { parts.Add("spawn point cleared"); }
                 if (Loadout != null && Loadout.Changed) { parts.Add($"starter loadout granted ({Loadout.Describe()})"); }
@@ -223,8 +229,7 @@ namespace ValheimEnforcer.modules.character {
                     // whatever the client turned up holding, which is exactly what this rule refuses.
                     if (NotEmpty(progress.KnownRecipes) || NotEmpty(progress.KnownMaterials) || NotEmpty(progress.KnownBiomes)
                         || NotEmpty(progress.Uniques) || NotEmpty(progress.ShownTutorials) || NotEmpty(progress.Trophies)
-                        || (progress.KnownStations != null && progress.KnownStations.Count > 0)
-                        || (progress.KnownTexts != null && progress.KnownTexts.Count > 0)) {
+                        || (progress.KnownStations != null && progress.KnownStations.Count > 0)) {
                         result.KnownItemsCleared = true;
                     }
                     progress.KnownRecipes = new List<string>();
@@ -234,6 +239,16 @@ namespace ValheimEnforcer.modules.character {
                     progress.ShownTutorials = new List<string>();
                     progress.Trophies = new List<string>();
                     progress.KnownStations = new Dictionary<string, int>();
+                }
+                // Known texts are answered separately because the settings are separate, and because the
+                // client-side half of each is a different piece of code: vanilla's ResetCharacterKnownItems
+                // never touches this dictionary, so KnownTexts.ResetForNewCharacter is what clears the live
+                // one. Emptied rather than nulled for the same reason as above - null would have their next
+                // join adopt whatever the client turned up holding.
+                if (policy.ClearKnownTexts) {
+                    if (progress.KnownTexts != null && progress.KnownTexts.Count > 0) {
+                        result.KnownTextsCleared = true;
+                    }
                     progress.KnownTexts = new Dictionary<string, string>();
                 }
                 if (policy.ClearStats && progress.Stats != null && progress.Stats.Count > 0) {

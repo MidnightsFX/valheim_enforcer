@@ -80,7 +80,9 @@ namespace ValheimEnforcer.modules.character {
                 record.KnownMaterials = new List<string>(player.m_knownMaterial);
                 record.KnownStations = new Dictionary<string, int>(player.m_knownStations);
                 record.KnownBiomes = new List<string>(player.m_knownBiome);
-                record.KnownTexts = new Dictionary<string, string>(player.m_knownTexts);
+                // Through CompatKnownTexts rather than a plain copy: keys a mod owns never enter the
+                // record, so nothing here can later hand a stale copy of them back. See that class.
+                record.KnownTexts = compat.CompatKnownTexts.SnapshotForTracking(player.m_knownTexts);
                 record.Uniques = new List<string>(player.m_uniques);
                 record.ShownTutorials = new List<string>(player.m_shownTutorials);
             }
@@ -187,10 +189,13 @@ namespace ValheimEnforcer.modules.character {
                     touchedKnownItems = true;
                 }
                 if (stored.KnownTexts != null) {
-                    player.m_knownTexts.Clear();
-                    foreach (KeyValuePair<string, string> text in stored.KnownTexts) {
-                        player.m_knownTexts[text.Key] = text.Value;
-                    }
+                    // Not a plain clear-and-repopulate. Known texts are where some mods keep per-player
+                    // progression (EpicMMO's level and experience), and progression rides FULL saves only -
+                    // CharacterDeltaTracker never carries it - so the stored copy is current only as of the
+                    // last full save. Replacing a mod's key from it rolled that mod's progress back to the
+                    // last full save on every single join. Compendium entries are still replaced outright;
+                    // pass-through keys keep the live player's own value. See CompatKnownTexts.
+                    compat.CompatKnownTexts.ApplyToPlayer(stored.KnownTexts, player.m_knownTexts);
                     touchedKnownItems = true;
                 }
                 // Recipes last, and then rebuilt below. Vanilla derives most of this list from the materials
