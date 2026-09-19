@@ -17,6 +17,7 @@ Full reference for every feature. If you just want the short version, the [proje
 | [Structure Validation](structure-validation.md) | off | Catching world-generation geometry spawned as if it were built, and indestructible pieces |
 | [Network Integrity](network-integrity.md) | off | Guards on the vanilla RPCs the server otherwise relays unchecked |
 | [Item Origins](item-origins.md) | off | Equipment that appears with no crafter and no route into this world |
+| [Ban Network](ban-network.md) | off | Sharing bans with other servers, and deciding which of theirs to act on |
 | [Save Archives](save-archives.md) | off | Rolling compressed archives of the world **and** the character saves together |
 | [Emergency Crash Recovery](crash-recovery.md) | off | Sealed character snapshots held by clients, adopted back after an unclean shutdown |
 | [Discord Notifications](discord.md) | off | Joins, bans, refusals and server status, with fully rewritable messages |
@@ -45,6 +46,7 @@ Settings are grouped into these sections in `BepInEx/config/ValheimEnforcer.cfg`
 | `Audit` | [Player Activity Audit](player-audit.md#settings) |
 | `World Integrity` | [Structure Validation](structure-validation.md#settings), [Item Origins](item-origins.md) |
 | `Network Integrity` | [Network Integrity](network-integrity.md) |
+| `Ban Network` | [Ban Network](ban-network.md#settings) |
 | `Backups` | [Save Archives](save-archives.md#settings) |
 | `Crash Recovery` | [Emergency Crash Recovery](crash-recovery.md#settings) |
 | `Discord` | [Discord Notifications](discord.md#settings) — **not** synced to clients, because a webhook URL is a password |
@@ -57,6 +59,8 @@ Files this mod writes live beside the config, in `BepInEx/config/ValheimEnforcer
 | `Mods.yaml` | The four mod lists. Regenerated at startup, re-read while running |
 | `ServerActiveMods.yaml` | Every plugin this machine loaded, written so entries can be copied out. Never read |
 | `Notifications.yaml` | The literal Discord message bodies |
+| `Bans.yaml` | Every ban this server issued or inherited. Yours to edit |
+| `BanNetwork/` | The shared ban list, your overrides, and your API key. Only `Overrides.yaml` and `api.key` are yours to edit |
 | `Loadouts.yaml` | Starter kits |
 | `Characters/<PlatformID>/` | One save per character, plus `.map` files when map sync is on |
 | `Audit/` | One file per UTC day, one event per line |

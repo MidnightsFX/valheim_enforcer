@@ -11,6 +11,10 @@ Type `enforcer-help` for the list, or `enforcer-help items` for one area of it. 
 | `enforcer-help` | Lists the commands, grouped by area |
 | `enforcer-whoami` | Says whether the server treats you as an admin, and what to fix if it does not |
 | `enforcer-player-list` | Every account with a save, and the characters under it |
+| `enforcer-ban` / `enforcer-unban` | Ban or unban an account, with a category and a reason ([details](ban-network.md#commands)) |
+| `enforcer-ban-list` | What this server bans, and what the ban network only advises |
+| `enforcer-ban-check` | Which rule decides for one account, and why |
+| `enforcer-ban-network-status` | Whether the ban network connection is healthy ([details](ban-network.md#when-it-is-not-working)) |
 | `enforcer-items-list` | What has been confiscated from one character |
 | `enforcer-items-return` | Gives confiscated items back |
 | `enforcer-items-clear` | Deletes confiscated items for good |

@@ -195,6 +195,20 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> DiscordNotifyClientContradiction;
         public static ConfigEntry<bool> DiscordNotifyItemOrigin;
 
+        public static ConfigEntry<bool> EnableBanNetwork;
+        public static ConfigEntry<string> BanNetworkEndpoint;
+        public static ConfigEntry<string> BanNetworkEnforceCategories;
+        public static ConfigEntry<int> BanNetworkMinReporters;
+        public static ConfigEntry<int> BanNetworkPullIntervalMinutes;
+        public static ConfigEntry<string> BanNetworkAction;
+        public static ConfigEntry<bool> BanNetworkLogAdvisory;
+        public static ConfigEntry<bool> BanNetworkReportBans;
+        public static ConfigEntry<bool> BanNetworkReportAutoCheatBans;
+        public static ConfigEntry<bool> BanNetworkSharePlayerName;
+        public static ConfigEntry<int> BanNetworkPushIntervalMinutes;
+        public static ConfigEntry<int> BanNetworkMaxReportsPerHour;
+        public static ConfigEntry<bool> BanNetworkNotifyEnforced;
+
         internal const string ModsFileName = "Mods.yaml";
         internal const string ServerActiveModsFileName = "ServerActiveMods.yaml";
         internal const string ValheimEnforcer = "ValheimEnforcer";
@@ -206,6 +220,8 @@ namespace ValheimEnforcer {
         internal static String CharacterFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder);
         internal static String KnownCheatersFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, KnownCheatersFileName);
         internal static String NotificationsFilePath = Path.Combine(Paths.ConfigPath, ValheimEnforcer, NotificationsFileName);
+        internal static String BansFilePath { get { return modules.bannetwork.BanStore.FilePath; } }
+        internal static String BanOverridesFilePath { get { return modules.bannetwork.BanOverrides.FilePath; } }
 
         internal static CustomRPC CharacterSaveRPC;
         internal static CustomRPC CheatDetectionRPC;
@@ -280,12 +296,14 @@ namespace ValheimEnforcer {
             ModManager.DeleteActiveModsFile();
             LoadYamlConfigs(new Dictionary<string, Action<string>>() {
                 { ModsConfigFilePath, CreateModsFile },
-                { KnownCheatersFilePath, CreateKnownCheatersFile },
+                { BansFilePath, CreateBansFile },
+                { BanOverridesFilePath, CreateBanOverridesFile },
                 { NotificationsFilePath, CreateNotificationsFile },
                 { modules.character.StarterLoadouts.FilePath, CreateLoadoutsFile }
             });
             modules.character.StarterLoadouts.Initialize();
-            KnownCheaterTracker.Initialize();
+            modules.bannetwork.BanStore.Initialize();
+            modules.bannetwork.BanOverrides.Initialize();
             modules.worldintegrity.KnownPlayerIds.Initialize();
             NotificationTemplates.Initialize();
         }
@@ -487,7 +505,88 @@ namespace ValheimEnforcer {
             DiscordNotifyCharacterRejected = BindLocalConfig("Discord", "NotifyCharacterRejected", true, "Post a message when a connection is refused by EnforceCharacterLimit, naming the character that was turned away.");
             DiscordNotifyItemOrigin = BindLocalConfig("Discord", "NotifyItemOrigin", true, "Post a message when a player gains equipment that has no crafter, or one no player here has ever reported. Inert unless DetectItemOrigins is on. One post per player per minute at most, however many items were involved - a cheat tool hands over a whole loadout at once, and a message per item would walk the webhook straight into Discord's rate limiter.");
             DiscordNotifyClientContradiction = BindLocalConfig("Discord", "NotifyClientContradiction", true, "Post to the moderation channel when a connected player trips a server-side guard, naming what they declared at join. Inert unless ReportClientContradictions is on. One post per player per guard - a repeat of the same guard is not posted again, so a player hammering one of them cannot walk the webhook into Discord's rate limiter.");
+            BindBanNetworkConfig();
             DiscordNotifyStructureFlagged = BindLocalConfig("Discord", "NotifyStructureFlagged", true, "Post a message when structure validation catches a player placing something no legitimate client can place, naming the prefab and where it landed. Inert unless EnableStructureValidation is on. One post per player per minute at most, however many objects were involved - a cheat tool drops a whole village at once, and a message per piece would walk the webhook straight into Discord's rate limiter.");
+        }
+
+        /// <summary>
+        /// The ban network's settings. Split out of CreateConfigValues only because the section is
+        /// self-contained; it is bound at the same point in startup as everything else.
+        /// </summary>
+        private void BindBanNetworkConfig() {
+            EnableBanNetwork = BindServerConfig("Ban Network", "EnableBanNetwork", false,
+                "If enabled, this server takes part in the ValheimEnforcer ban network: it pulls the combined ban list "
+                + "hourly and, if reporting is also enabled, publishes the bans it issues. Requires an API key at "
+                + "BepInEx/config/ValheimEnforcer/BanNetwork/api.key - registration is reviewed by a person, not granted "
+                + "automatically. Off by default because it makes outbound network requests. "
+                + "Note on privacy: account ids are hashed before they leave this server, which keeps the network's "
+                + "database from being a plaintext list of SteamIDs - but the hash is not anonymity. Anyone determined "
+                + "enough can reverse it, because the identifier space is small and the salt ships inside the mod. "
+                + "Treat reporting a player as publishing an accusation about them, because that is what it is. "
+                + "With this off, nothing is hashed, nothing is sent, and no ban network files are created.");
+
+            BanNetworkEndpoint = BindServerConfig("Ban Network", "BanNetworkEndpoint", "https://bans.valheimenforcer.net/",
+                "The ban network to talk to. Must be https, with no username, query or fragment - anything else is refused "
+                + "without a request being made. Only change this if you are running your own instance of the ban network service.", advanced: true);
+
+            BanNetworkEnforceCategories = BindServerConfig("Ban Network", "BanNetworkEnforceCategories", "cheating",
+                "Which categories of network ban this server actually acts on, comma separated. Valid: cheating, rulebreaking, "
+                + "griefing, toxic. Anything listed by the network under a category not named here is recorded and logged but "
+                + "the player is still let in. The default is deliberately just 'cheating': it is the one category with a "
+                + "machine test behind it, whereas 'toxic' is somebody else's judgement about someone you have never met. "
+                + "Widen it when you trust the servers you are federated with, not before.");
+
+            BanNetworkMinReporters = BindServerConfig("Ban Network", "BanNetworkMinReporters", 1,
+                "How many different servers must have independently reported a player before this server acts on it. "
+                + "1 acts on a single report. Raising it to 2 or 3 is the single most effective defence against one "
+                + "misconfigured or malicious server, at the cost of letting a genuinely new cheater through until a "
+                + "second server sees them too.", valmin: 1, valmax: 10);
+
+            BanNetworkPullIntervalMinutes = BindServerConfig("Ban Network", "BanNetworkPullIntervalMinutes", 60,
+                "How often to fetch new ban network entries, in minutes. Clamped to between 15 and 360 whatever is set here, "
+                + "and the service can ask for a longer interval, which is honoured. Each pull only asks for entries added "
+                + "since the last one, so a short interval buys very little.", advanced: true, valmin: 15, valmax: 360);
+
+            BanNetworkAction = BindServerConfig("Ban Network", "BanNetworkAction", "Ban",
+                "What to do about a player the ban network lists under a category this server enforces. Ban records the ban "
+                + "locally and refuses them like any other ban; Kick disconnects them but lets them return; Log only writes "
+                + "a line. Note that a network ban is never reported back to the network whichever of these is chosen.",
+                new AcceptableValueList<string>(new string[] { "Ban", "Kick", "Log" }));
+
+            BanNetworkLogAdvisory = BindServerConfig("Ban Network", "BanNetworkLogAdvisory", true,
+                "Write a log line when someone joins who the ban network lists under a category this server does not enforce. "
+                + "This is how you find out that widening BanNetworkEnforceCategories would have caught somebody.", advanced: true);
+
+            BanNetworkReportBans = BindServerConfig("Ban Network", "BanNetworkReportBans", false,
+                "Publish the bans this server issues to the ban network. Off by default, and separate from EnableBanNetwork "
+                + "on purpose: taking the list and contributing to it are different decisions, and only the second one "
+                + "involves publishing accusations about named accounts to other people's servers. A ban marked "
+                + "'share: false' in Bans.yaml is never published whatever this is set to.");
+
+            BanNetworkReportAutoCheatBans = BindServerConfig("Ban Network", "BanNetworkReportAutoCheatBans", false,
+                "Also publish bans the mod issued by itself - cheat detections, structure validation, RPC guards - rather "
+                + "than only the ones an admin typed. Requires BanNetworkReportBans. Off by default because these are "
+                + "unreviewed, by far the highest volume, and the most likely source of a false positive reaching other "
+                + "people's servers. Turn it on once you trust your own detection settings.");
+
+            BanNetworkSharePlayerName = BindServerConfig("Ban Network", "BanNetworkSharePlayerName", true,
+                "Include the player's last known character name when publishing a ban. The name is what lets another "
+                + "server's admin recognise who an entry is about, since account ids are hashed by the network. Turn it "
+                + "off to publish the ban without it.");
+
+            BanNetworkPushIntervalMinutes = BindServerConfig("Ban Network", "BanNetworkPushIntervalMinutes", 5,
+                "How often queued ban reports are sent, in minutes. Deliberately far shorter than the pull interval and "
+                + "on its own timer: a ban issued shortly before a pull should not wait an hour to be published.",
+                advanced: true, valmin: 1, valmax: 60);
+
+            BanNetworkMaxReportsPerHour = BindServerConfig("Ban Network", "BanNetworkMaxReportsPerHour", 60,
+                "A ceiling this server puts on itself, so a misconfiguration or a runaway detector cannot flood the "
+                + "network. Reports beyond it are logged and dropped rather than queued. The service enforces its own "
+                + "limits regardless of what is set here.", advanced: true, valmin: 1, valmax: 500);
+
+            BanNetworkNotifyEnforced = BindServerConfig("Ban Network", "BanNetworkNotifyEnforced", true,
+                "Post to the Discord moderation channel when a player is refused because of a ban network entry, and when "
+                + "the ban network becomes unreachable. Inert unless a Discord webhook is configured.");
         }
 
         // routine: set for the recurring background baseline write driven by CharacterDeltaTracker, which happens
@@ -607,9 +706,13 @@ namespace ValheimEnforcer {
                         modules.mods.ThunderstoreResolver.RequestPass("Mods.yaml changed");
                     }
                     break;
-                case KnownCheatersFileName:
-                    Logger.LogDebug("Triggering KnownCheaters list update.");
-                    KnownCheaterTracker.LoadFromText(filetext);
+                case modules.bannetwork.BanStore.FileName:
+                    Logger.LogDebug("Triggering ban list update.");
+                    modules.bannetwork.BanStore.LoadFromText(filetext);
+                    break;
+                case modules.bannetwork.BanOverrides.FileName:
+                    Logger.LogDebug("Triggering ban override update.");
+                    modules.bannetwork.BanOverrides.LoadFromText(filetext);
                     break;
                 case NotificationsFileName:
                     Logger.LogDebug("Triggering notification template update.");
@@ -718,18 +821,33 @@ loadouts: {}
             }
         }
 
-        private static void CreateKnownCheatersFile(string filepath) {
+        /// <summary>
+        /// Writes Bans.yaml the first time, folding in the embedded seed and anything already in the
+        /// pre-collapse KnownCheaters.yaml.
+        ///
+        /// "The file does not exist" is the whole once-only trigger the migration needs - no marker, no
+        /// version stamp to keep in sync - which is why the migration lives behind this callback rather than
+        /// in BanStore.Initialize. The File.Exists guard matters for the same reason it matters on every other
+        /// Create*File here: this opens a truncating writer, and reaching it with the file present would empty
+        /// an admin's entire ban list.
+        /// </summary>
+        private static void CreateBansFile(string filepath) {
             if (File.Exists(filepath)) { return; } // never overwrite a ban list that is already there
-            Logger.LogDebug("KnownCheaters file missing, recreating.");
-            // Seeded with the embedded internal list by KnownCheaterTracker.Initialize(), which
-            // runs immediately after this and rewrites the file with the merged entries.
-            using (StreamWriter writetext = new StreamWriter(filepath)) {
-                String header = @"#################################################
-# Valheim Enforcer - Known Cheaters (server side)
-# Auto-populated when cheaters are banned. Entries: { id, reason }
-#################################################
-";
-                writetext.WriteLine(header);
+            Logger.LogDebug("Bans file missing, creating.");
+            try {
+                File.WriteAllText(filepath, modules.bannetwork.BanStore.BuildInitialFile());
+            } catch (Exception e) {
+                Logger.LogError($"Failed to create {modules.bannetwork.BanStore.FileName}: {e.Message}");
+            }
+        }
+
+        private static void CreateBanOverridesFile(string filepath) {
+            if (File.Exists(filepath)) { return; } // never overwrite an admin's allow list
+            Logger.LogDebug("Ban overrides file missing, creating.");
+            try {
+                File.WriteAllText(filepath, modules.bannetwork.BanOverrides.EmptyFile());
+            } catch (Exception e) {
+                Logger.LogError($"Failed to create {modules.bannetwork.BanOverrides.FileName}: {e.Message}");
             }
         }
 
@@ -1497,15 +1615,63 @@ loadouts: {}
         /// left to the caller, since what gets posted depends on what triggered the ban.
         /// </summary>
         internal static void BanHost(string hostId, string reason) {
+            BanHost(hostId, reason, null, modules.bannetwork.BanSources.Auto, modules.bannetwork.BanSources.Auto);
+        }
+
+        /// <summary>
+        /// The full form, carrying what the ban is for and who issued it.
+        ///
+        /// <paramref name="categories"/> null means cheating - every caller of the two-argument overload is a
+        /// detector (the cheat report, the structure validator, the RPC guards), so that is the honest default
+        /// rather than a placeholder. <paramref name="source"/> decides whether the ban may ever be published
+        /// to the ban network; see BanSources.Reportable.
+        /// </summary>
+        internal static void BanHost(string hostId, string reason, List<modules.bannetwork.BanCategory> categories,
+                                     string source, string addedBy, string playerName = null) {
             if (string.IsNullOrEmpty(hostId)) { return; }
-            KnownCheaterTracker.AddCheater(hostId, reason);
+
+            if (categories == null || categories.Count == 0) {
+                categories = new List<modules.bannetwork.BanCategory> { modules.bannetwork.BanCategory.Cheating };
+            }
+
+            modules.bannetwork.BanRecord record = new modules.bannetwork.BanRecord {
+                Id = hostId,
+                Name = playerName,
+                Categories = categories,
+                Reason = reason,
+                AddedBy = addedBy,
+                Source = source,
+            };
+            modules.bannetwork.BanStore.Add(record);
             ZNet.instance.Ban(hostId);
+            modules.bannetwork.BanStore.OfferToNetwork(record);
+        }
+
+        /// <summary>
+        /// Lifts a ban: removes it from this server's list and from vanilla's. Returns how many entries went,
+        /// so a caller can tell "unbanned" from "was not banned" without a second lookup.
+        ///
+        /// There was no way to do this before the ban list gained categories - KnownCheaterTracker had no
+        /// remove at all - which made every ban permanent and un-appealable.
+        /// </summary>
+        internal static int UnbanHost(string hostId) {
+            if (string.IsNullOrEmpty(hostId)) { return 0; }
+            int removed = modules.bannetwork.BanStore.Remove(hostId);
+            ZNet.instance?.Unban(hostId);
+            if (removed > 0) {
+                // Retract what this server said, so the ban stops counting toward the network's reporter
+                // total. Lifting a ban locally while leaving the accusation published would be the worst of
+                // both: the player is welcome here and still banned everywhere else on this server's word.
+                modules.bannetwork.BanStore.RetractFromNetwork(hostId);
+            }
+            return removed;
         }
 
         private static void BanCheater(ZNetPeer peer, string playerName, DataObjects.CheatSummaryReport summary) {
             string hostId = peer.m_socket.GetHostName();
             string reason = BuildCheatReason(summary);
-            BanHost(hostId, reason);
+            BanHost(hostId, reason, new List<modules.bannetwork.BanCategory> { modules.bannetwork.BanCategory.Cheating },
+                    modules.bannetwork.BanSources.Auto, "cheat-detection", playerName);
 
             if (ValConfig.DiscordNotifyCheaterBanned.Value) {
                 DiscordNotifier.Notify(NotificationEvent.CheaterBanned, new Dictionary<string, string> {

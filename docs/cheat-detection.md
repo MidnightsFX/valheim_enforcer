@@ -60,6 +60,10 @@ Window *titles* are ignored on windows that display content rather than run it �
 
 `Discord.NotifyCheaterBanned` (on) posts a message whenever a player is banned for cheating. It names the account behind the ban, so it is worth routing to `WebhookUrlModeration` and a staff-only channel — see [Discord Notifications](discord.md).
 
+## Sharing what you catch
+
+A ban issued here is recorded in `Bans.yaml` with the category `cheating` and, if you opt in, published to the [Ban Network](ban-network.md) so other servers see it too. Publishing automatic detections is a separate switch from publishing the bans you type yourself, and it is off by default — these are unreviewed and by far the highest volume, which makes them the likeliest false positive to land on somebody else's server.
+
 ---
 
 [← All documentation](README.md)

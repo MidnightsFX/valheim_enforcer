@@ -40,6 +40,8 @@ namespace ValheimEnforcer.common {
             RegisterNotificationCommands();
             RegisterStructureCommands();
             RegisterNetworkCommands();
+            RegisterBanCommands();
+            RegisterBanNetworkCommands();
             RegisterItemOriginCommands();
             RegisterAuditCommands();
             RegisterBackupCommands();

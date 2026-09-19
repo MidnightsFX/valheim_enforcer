@@ -43,6 +43,8 @@
 #   playerLeft         {player} {playerId} {disconnect} {savedData} {deltaWindow} {statusColor}
 #   cheaterBanned      {player} {playerId} {reason} {detections} {action}
 #   characterRejected  {character} {playerId} {reason} {maxCharacters}
+#   banEnforced        {player} {playerId} {categories} {reason} {reporters} {source} {action}
+#   banNetworkUnavailable  {state} {detail} {queued} {held}
 #   modMismatch        {player} {playerId} {summary} {missingMods} {extraMods}
 #                      {versionMismatches} {adminOnlyMods} {hashMismatches} {unverifiedMods}
 #   structureFlagged   {player} {playerId} {prefab} {position} {reason} {creator} {health}
@@ -117,6 +119,37 @@ playerLeft: |
       ]
     }]
   }
+banEnforced: |
+  {
+    "embeds": [{
+      "title": "Ban Network Enforcement",
+      "color": {colorRed},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "Player", "value": "{player}", "inline": true},
+        {"name": "Categories", "value": "{categories}", "inline": true},
+        {"name": "Reporting servers", "value": "{reporters}", "inline": true},
+        {"name": "Reason", "value": "{reason}", "inline": false},
+        {"name": "Action", "value": "{action}", "inline": true}
+      ]
+    }]
+  }
+
+banNetworkUnavailable: |
+  {
+    "embeds": [{
+      "title": "Ban Network Unavailable",
+      "color": {colorAmber},
+      "timestamp": "{timestamp}",
+      "fields": [
+        {"name": "State", "value": "{state}", "inline": true},
+        {"name": "Detail", "value": "{detail}", "inline": false},
+        {"name": "Reports queued", "value": "{queued}", "inline": true},
+        {"name": "Entries held", "value": "{held}", "inline": true}
+      ]
+    }]
+  }
+
 cheaterBanned: |
   {
     "embeds": [{

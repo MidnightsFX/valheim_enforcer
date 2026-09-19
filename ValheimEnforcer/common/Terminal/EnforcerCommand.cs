@@ -5,7 +5,7 @@ using System.Linq;
 namespace ValheimEnforcer.common {
 
     /// <summary>Which family a command belongs to. Only used to group the enforcer-help listing.</summary>
-    internal enum CommandArea { Meta, Player, Items, Skills, Characters, Notifications, Structures, Network, Audit, Backups, Recovery, Diagnostics }
+    internal enum CommandArea { Meta, Player, Items, Skills, Characters, Notifications, Structures, Network, Bans, Audit, Backups, Recovery, Diagnostics }
 
     /// <summary>
     /// Severity of one line of command output. Deliberately separate from the text: colour is applied where

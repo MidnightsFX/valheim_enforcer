@@ -369,9 +369,187 @@ namespace ValheimEnforcer.common {
             }
         }
 
+        /// <summary>
+        /// One entry in the legacy KnownCheaters.yaml, and in the embedded seed that still ships with the mod.
+        ///
+        /// Read-only history as of the Bans.yaml collapse: BanStore imports these once on first run and the
+        /// file is never read again. Kept because the embedded seed is still written in this shape and because
+        /// an existing server's file has to be migratable.
+        /// </summary>
         public class KnownCheaterEntry {
             public string Id { get; set; }
             public string Reason { get; set; }
+        }
+
+        /// <summary>
+        /// One ban in Bans.yaml.
+        ///
+        /// Categories are strings rather than an enum on purpose. This file is hand-edited, and YamlDotNet
+        /// throws on an enum value it cannot parse - so a single typo would take the whole ban list down with
+        /// it. As strings, an unrecognised category is dropped with a warning and the rest of the entry still
+        /// enforces. BanCategories owns the parsing.
+        ///
+        /// Timestamps are ISO-8601 strings, not DateTime, for the same reason AuditEvent.T is: a DateTime
+        /// round-trips through YamlDotNet in whatever the host's calendar and offset happen to be, and these
+        /// values also have to survive a trip through JSON to the ban network unchanged.
+        /// </summary>
+        public class BanEntry {
+            public string Id { get; set; }
+            [DefaultValue(null)]
+            public string Name { get; set; }
+            [DefaultValue(null)]
+            public List<string> Categories { get; set; }
+            [DefaultValue(null)]
+            public string Reason { get; set; }
+            [DefaultValue(null)]
+            public string AddedUtc { get; set; }
+            /// <summary>Admin hostId, or one of: auto, builtin, legacy, command.</summary>
+            [DefaultValue(null)]
+            public string AddedBy { get; set; }
+            /// <summary>local | auto | builtin | legacy. Never "network" - see BanOutbox.</summary>
+            [DefaultValue(null)]
+            public string Source { get; set; }
+            /// <summary>null means permanent.</summary>
+            [DefaultValue(null)]
+            public string ExpiresUtc { get; set; }
+            /// <summary>Whether this ban may be reported to the ban network. Defaults on.</summary>
+            [DefaultValue(true)]
+            public bool Share { get; set; } = true;
+        }
+
+        /// <summary>The whole of Bans.yaml. A mapping rather than a bare list so it can carry a version.</summary>
+        public class BansFile {
+            public int Version { get; set; }
+            [DefaultValue(null)]
+            public List<BanEntry> Bans { get; set; }
+        }
+
+        /// <summary>
+        /// One owner decision that overrides what the ban network says. Identified by either a raw platform id
+        /// or the network subject hash, because a pulled entry the owner has never seen locally has no id.
+        /// </summary>
+        public class BanOverride {
+            [DefaultValue(null)]
+            public string Id { get; set; }
+            [DefaultValue(null)]
+            public string Hash { get; set; }
+            /// <summary>allow | deny.</summary>
+            public string Decision { get; set; }
+            /// <summary>Limit the override to these categories. Null or empty means all of them.</summary>
+            [DefaultValue(null)]
+            public List<string> Categories { get; set; }
+            [DefaultValue(null)]
+            public string Reason { get; set; }
+            [DefaultValue(null)]
+            public string AddedUtc { get; set; }
+            [DefaultValue(null)]
+            public string AddedBy { get; set; }
+        }
+
+        /// <summary>The whole of BanNetwork/Overrides.yaml.</summary>
+        public class OverridesFile {
+            public int Version { get; set; }
+            [DefaultValue(null)]
+            public List<BanOverride> Overrides { get; set; }
+        }
+
+        /// <summary>
+        /// One entry of the ban network feed, and one line of BanNetwork/NetworkBans.yaml.
+        ///
+        /// This is a wire type: it is deserialized from whatever the endpoint sends, so every field must
+        /// survive being absent, and nothing here may be an enum or a DateTime - a value the parser cannot
+        /// make sense of has to degrade to a default rather than throw out of the middle of a batch.
+        /// Categories and timestamps are resolved afterwards, by NetworkBanRecord.
+        /// </summary>
+        public class NetworkBanEntry {
+            /// <summary>The feed's change counter. Also the local cursor - the highest seq applied.</summary>
+            public long Seq { get; set; }
+            /// <summary>32 hex characters. Opaque here; BanSubjectCache resolves it to an id when it can.</summary>
+            public string Subject { get; set; }
+            [DefaultValue(null)]
+            public List<string> Categories { get; set; }
+            [DefaultValue(null)]
+            public string Reason { get; set; }
+            /// <summary>Last seen character name, advisory. Written by another server, so display only.</summary>
+            [DefaultValue(null)]
+            public string Name { get; set; }
+            /// <summary>Distinct servers with a live report. The knob BanNetworkMinReporters reads.</summary>
+            public int Reporters { get; set; }
+            [DefaultValue(null)]
+            public string FirstSeenUtc { get; set; }
+            [DefaultValue(null)]
+            public string UpdatedUtc { get; set; }
+            /// <summary>Null means permanent. The most permissive expiry across the reporting servers.</summary>
+            [DefaultValue(null)]
+            public string ExpiresUtc { get; set; }
+            /// <summary>A tombstone: the network retracted this entry and it must stop being enforced.</summary>
+            [DefaultValue(false)]
+            public bool Revoked { get; set; }
+        }
+
+        /// <summary>
+        /// One queued report, and one line of BanNetwork/outbox.yaml.
+        ///
+        /// Carries the RAW platform id: HTTPS is the encryption and the API key the authorisation, and the
+        /// network hashes on ingest. Nothing here is an enum or a DateTime - this is serialized as JSON for
+        /// the wire, and both would emit something a strict JSON parser rejects.
+        /// </summary>
+        public class BanReportLine {
+            /// <summary>Client-generated UUID. The idempotency key: a replayed report is not a second one.</summary>
+            public string ReportId { get; set; }
+            public string PlayerId { get; set; }
+            /// <summary>"ban" or "unban".</summary>
+            public string Op { get; set; }
+            [DefaultValue(null)]
+            public List<string> Categories { get; set; }
+            [DefaultValue(null)]
+            public string Reason { get; set; }
+            /// <summary>Last known character name. Omitted entirely when BanNetworkSharePlayerName is off.</summary>
+            [DefaultValue(null)]
+            public string Name { get; set; }
+            [DefaultValue(null)]
+            public string OccurredUtc { get; set; }
+            /// <summary>Null means permanent. Kept so a temporary ban stays temporary across the network.</summary>
+            [DefaultValue(null)]
+            public string ExpiresUtc { get; set; }
+        }
+
+        /// <summary>One line of the POST /v1/reports response: what became of one submitted line.</summary>
+        public class BanReportResult {
+            public string ReportId { get; set; }
+            public bool Accepted { get; set; }
+            [DefaultValue(null)]
+            public string Error { get; set; }
+        }
+
+        /// <summary>
+        /// BanNetwork/state.yaml: everything the scheduler needs to pick up where it left off.
+        ///
+        /// Machine-owned. The backoff is persisted deliberately - a server in a crash loop would otherwise
+        /// hammer a shared endpoint once per boot.
+        /// </summary>
+        public class BanNetworkStateFile {
+            public int Version { get; set; }
+            /// <summary>Highest seq applied. Pulls ask for everything above it.</summary>
+            public long Cursor { get; set; }
+            [DefaultValue(null)]
+            public string LastPullUtc { get; set; }
+            [DefaultValue(null)]
+            public string LastPushUtc { get; set; }
+            /// <summary>Last known verdict on the API key, so a terminal one survives a restart.</summary>
+            [DefaultValue(null)]
+            public string KeyState { get; set; }
+            [DefaultValue(null)]
+            public string KeyStateNote { get; set; }
+            [DefaultValue(0)]
+            public int ConsecutiveFailures { get; set; }
+            [DefaultValue(null)]
+            public string NextAttemptUtc { get; set; }
+            /// <summary>The id half of the key. Not secret, and the only half ever logged.</summary>
+            [DefaultValue(null)]
+            public string ServerId { get; set; }
+            [DefaultValue(null)]
+            public string LastError { get; set; }
         }
 
         /// <summary>
@@ -1369,6 +1547,10 @@ namespace ValheimEnforcer.common {
             public string CheaterBanned { get; set; }
             [YamlMember(ScalarStyle = ScalarStyle.Literal)]
             public string CharacterRejected { get; set; }
+            [YamlMember(ScalarStyle = ScalarStyle.Literal)]
+            public string BanEnforced { get; set; }
+            [YamlMember(ScalarStyle = ScalarStyle.Literal)]
+            public string BanNetworkUnavailable { get; set; }
             [YamlMember(ScalarStyle = ScalarStyle.Literal)]
             public string ModMismatch { get; set; }
             [YamlMember(ScalarStyle = ScalarStyle.Literal)]

@@ -22,6 +22,8 @@ namespace ValheimEnforcer.modules.notifications {
         StructureFlagged,
         ClientContradiction,
         ItemOriginFlagged,
+        BanEnforced,
+        BanNetworkUnavailable,
     }
 
     /// <summary>
@@ -161,7 +163,12 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.StructureFlagged:
                 case NotificationEvent.ClientContradiction:
                 case NotificationEvent.ItemOriginFlagged:
+                case NotificationEvent.BanEnforced:
                     return NotificationCategory.Moderation;
+                // Not moderation: nobody did anything wrong, the service is simply unreachable, and it
+                // belongs with the other "your server needs attention" messages.
+                case NotificationEvent.BanNetworkUnavailable:
+                    return NotificationCategory.ServerStatus;
                 case NotificationEvent.ModMismatch:
                     return NotificationCategory.ModMismatch;
                 case NotificationEvent.ServerStartup:
@@ -191,6 +198,8 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.StructureFlagged: return set.StructureFlagged;
                 case NotificationEvent.ClientContradiction: return set.ClientContradiction;
                 case NotificationEvent.ItemOriginFlagged: return set.ItemOriginFlagged;
+                case NotificationEvent.BanEnforced: return set.BanEnforced;
+                case NotificationEvent.BanNetworkUnavailable: return set.BanNetworkUnavailable;
                 default: return null;
             }
         }
@@ -203,6 +212,8 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.PlayerJoined: set.PlayerJoined = template; break;
                 case NotificationEvent.PlayerLeft: set.PlayerLeft = template; break;
                 case NotificationEvent.CheaterBanned: set.CheaterBanned = template; break;
+                case NotificationEvent.BanEnforced: set.BanEnforced = template; break;
+                case NotificationEvent.BanNetworkUnavailable: set.BanNetworkUnavailable = template; break;
                 case NotificationEvent.CharacterRejected: set.CharacterRejected = template; break;
                 case NotificationEvent.ModMismatch: set.ModMismatch = template; break;
                 case NotificationEvent.StructureFlagged: set.StructureFlagged = template; break;

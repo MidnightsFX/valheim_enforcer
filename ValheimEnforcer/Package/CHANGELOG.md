@@ -1,3 +1,28 @@
+**0.29.0**
+---
+```
+- Adds the Ban Network: an opt-in shared ban list. Servers publish the bans they issue and pull what everyone
+  else caught, and each owner decides which categories to act on. Off by default - it makes outbound requests
+  and publishing a ban means publishing an accusation. See docs/ban-network.md, which is honest about what the
+  hashing of account ids does and does not protect, and about there being no appeal process yet.
+- Bans now carry categories (cheating, rulebreaking, griefing, toxic), a reason, who issued them, when, and an
+  optional expiry. New commands: enforcer-ban, enforcer-unban, enforcer-ban-list, enforcer-ban-check,
+  enforcer-ban-allow, enforcer-ban-deny, enforcer-ban-override-clear, and the enforcer-ban-network-* family.
+- Adds an unban path. There was not one before: every ban this mod issued was permanent and could only be
+  undone by hand-editing a file, and the file was rewritten from an internal list whenever it changed.
+- A refused player is now told why. Previously a banned connection got Valheim's canned "banned" message with
+  no explanation, which is the single most common question a ban produces.
+
+BREAKING / BEHAVIOUR CHANGE
+- KnownCheaters.yaml is superseded by Bans.yaml. Existing entries are migrated automatically on first start,
+  as source: legacy. The old file is left on disk untouched so you can see what carried over - delete it when
+  you are satisfied. Nothing reads it any more.
+- Entries from the list shipped inside the mod can now be removed or overridden. Previously the embedded list
+  was re-applied after every edit specifically so an admin could not drop an entry. That is incompatible with a
+  shared list where the server owner has the final say, so a seeded ban is now an ordinary ban: removable with
+  enforcer-unban and overridable with enforcer-ban-allow.
+```
+
 **0.28.0**
 ---
 ```

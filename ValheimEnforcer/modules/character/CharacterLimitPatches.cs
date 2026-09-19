@@ -1,4 +1,4 @@
-using HarmonyLib;
+﻿using HarmonyLib;
 using System;
 using System.Collections.Generic;
 using TMPro;
@@ -31,6 +31,26 @@ namespace ValheimEnforcer.modules.character {
         // ---- Server ---------------------------------------------------------------------------------------
 
         /// <summary>
+        /// Refuses a connection with a reason the player can actually read.
+        ///
+        /// Vanilla can only send one of thirteen canned <see cref="ZNet.ConnectionStatus"/> values, so the
+        /// sentence travels separately over <see cref="RPC_NAME"/> and is written into the connection-failed
+        /// panel by the client half of this file. Shared rather than copied because the ordering matters and
+        /// is easy to get wrong: the reason has to be queued ahead of the error, and the socket has to be
+        /// flushed before anything tears the connection down - the same reason FinalSaveRpc flushes.
+        ///
+        /// The channel is still spelled VE_CHARLIMIT_MSG. It is a general rejection-reason channel now, but
+        /// renaming it would silently stop older clients - which registered the old name - from ever seeing a
+        /// reason, which is the one thing it exists to deliver.
+        /// </summary>
+        internal static void RefuseConnection(ZRpc rpc, string reason, ZNet.ConnectionStatus status) {
+            if (rpc == null) { return; }
+            if (!string.IsNullOrEmpty(reason)) { rpc.Invoke(RPC_NAME, reason); }
+            rpc.Invoke("Error", (int)status);
+            rpc.GetSocket()?.Flush();
+        }
+
+        /// <summary>
         /// Refuses a connection whose character name is not usable as a file name, before anything files a save
         /// under it. The name is read raw from the client's peer-info package by vanilla and used by this mod as
         /// a path segment (Characters/&lt;id&gt;/&lt;name&gt;.yaml); a name like "..\..\plugins\x" would otherwise write
@@ -53,9 +73,7 @@ namespace ValheimEnforcer.modules.character {
                 Logger.LogWarning($"Refusing '{playerName}' from {hostId ?? "unknown"}: the character name is not a safe file name.");
                 string reason = "This server cannot accept your character name: it contains characters that are not allowed "
                               + "(path separators, '..', a colon, or control characters). Rename the character and reconnect.";
-                rpc.Invoke(RPC_NAME, reason);
-                rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorKicked);
-                rpc.GetSocket()?.Flush();
+                RefuseConnection(rpc, reason, ZNet.ConnectionStatus.ErrorKicked);
                 return false; // skip vanilla peer-info handling, exactly as vanilla's own rejections do
             }
         }
@@ -82,11 +100,7 @@ namespace ValheimEnforcer.modules.character {
                 Logger.LogWarning($"Refusing '{playerName}' from {hostId}: account character limit reached.");
                 NotifyRejection(playerName, hostId, reason);
 
-                // Reason first so it is ahead of the error in the send queue, then flush before anything tears
-                // the connection down - same reason FinalSaveRpc flushes.
-                rpc.Invoke(RPC_NAME, reason);
-                rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorKicked);
-                rpc.GetSocket()?.Flush();
+                RefuseConnection(rpc, reason, ZNet.ConnectionStatus.ErrorKicked);
                 return false; // skip vanilla peer-info handling, exactly as vanilla's own rejections do
             }
         }
