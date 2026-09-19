@@ -39,7 +39,7 @@ Three things keep it current:
 - Every skill this mod lowers is written into the save with the level it came from, so it can be undone ([Restoring skills](#restoring-skills))
 - Optionally: the Forsaken Power and the eaten food they left with are put back, so neither can be changed in a solo world
 
-**A character joining this server for the first time** — one the server has no save for at all — is handled separately. By default it forgets the recipes and build pieces it discovered elsewhere and has its custom data cleared. Optionally it can also have its items stripped to an allowlist, its skills zeroed, its map of this world wiped, its Forsaken Power cleared, and its statistics reset. If [Starter Loadouts](#starter-loadouts) are on, the kit is handed over *after* all of that has run.
+**A character joining this server for the first time** — one the server has no save for at all — is handled separately. By default it forgets the recipes and build pieces it discovered elsewhere, forgets its known texts, and has its custom data cleared. Optionally it can also have its items stripped to an allowlist, its skills zeroed, its map of this world wiped, its Forsaken Power cleared, and its statistics reset. If [Starter Loadouts](#starter-loadouts) are on, the kit is handed over *after* all of that has run.
 
 Note that on a server that already has players, anyone joining for the first time since ValheimEnforcer was installed has no save yet and counts as new. Coming from ServerCharacters? [Import the saves first](migration.md).
 
@@ -74,7 +74,7 @@ All of these are server-side and synced to admins, so an admin can change them i
 | `newCharacterClearCustomData` | `true` | A character joining for the first time has its custom data cleared |
 | `PassthroughCompatModCustomData` | `true` | *(Advanced)* Leaves inventory-describing custom data owned by slot mods (ExtraSlots and its CustomSlots addon, EquipmentAndQuickSlots including its 2.x legacy keys, InventorySlots) to those mods. Those mods keep a serialized backup of every slot item and restore it whenever a character loads with empty slots; tracking it and re-applying a stale copy duplicated slot gear on every death. Disable only to restore the old behaviour |
 
-### Forsaken Power, food, map and recipes
+### Forsaken Power, food, map, recipes and known texts
 
 | Setting | Default | What it does |
 | --- | --- | --- |
@@ -83,10 +83,11 @@ All of these are server-side and synced to admins, so an admin can change them i
 | `PreventExternalFoodChanges` | `false` | Records the foods a character has eaten and how long each has left, and puts those exact foods back on join |
 | `NewCharacterResetMapExploration` | `false` | A character joining for the first time gets a blank map of this world — explored ground, cartography reveals and saved pins |
 | `NewCharacterClearKnownRecipes` | `true` | A character joining for the first time forgets the recipes, build pieces, materials, crafting stations and trophies it discovered elsewhere |
+| `NewCharacterClearKnownTexts` | `true` | A character joining for the first time forgets its known texts — the runestone and lore entries of the compendium, and any per-player progression a mod keeps in the same dictionary. EpicMMO keeps a character's level, experience and attribute points there, so with this on a first-time joiner starts at level 1. Vanilla's own recipe reset does not cover known texts, which is why this is a setting of its own |
 
 A character whose save predates one of these being switched on has nothing recorded for it: they keep what they arrive with on their next join and are tracked from then on. **Switching one on strips nobody.**
 
-The map and recipe wipes only happen once the server has confirmed it holds no save for that character, because unlike an item neither can be handed back. Both are carried out by the client, because neither ever reaches the server — unless [Server-Synced Progression](#server-synced-progression) is on, which is what gives the server somewhere to keep them.
+The map, recipe and known-text wipes only happen once the server has confirmed it holds no save for that character, because unlike an item none of them can be handed back. All three are carried out by the client, because none of them ever reaches the server — unless [Server-Synced Progression](#server-synced-progression) is on, which is what gives the server somewhere to keep them.
 
 ### New characters
 
@@ -150,6 +151,7 @@ Turning a `Sync*` setting on **strips nobody**. A character saved before it was 
 | `SyncSpawnPoint` | `false` | The claimed bed, and the point the game falls back to when it is gone |
 | `NewCharacterClearPlayerStats` | `false` | A character joining for the first time starts with zeroed statistics |
 | `MapSyncIntervalMinutes` | `15` | *(Advanced)* How often a client may upload its map |
+| `KnownTextPassthroughPrefixes` | `EpicMMOSystem` | *(Advanced)* Comma separated key prefixes in a character's known texts left to the mod that owns them instead of being tracked and enforced. Empty tracks known texts in full |
 
 ### Progression sync commands
 
@@ -170,6 +172,8 @@ Turning a `Sync*` setting on **strips nobody**. A character saved before it was 
 - **Uploads are paced.** Building the upload means rebuilding and compressing that 8.4 MB package on the player's own machine, so a client sends its map at most once every `MapSyncIntervalMinutes`, once more at logout, and not at all when nothing has been explored since the last one.
 - **Maps are not stored in `InternalStorageMode`.** That mode puts the character record in a ZDO string inside the world file, which is no place for a megabyte per player. The two together leave the map untracked and say so in the log; everything else in this group still works.
 - **A server that holds no map does not wipe yours.** The first time you switch `SyncMapExploration` on, the server holds nothing for anybody, and treating that as "you have explored nothing" would erase every connected player's map at once. Wiping a new character's map is a separate, narrower decision that `NewCharacterResetMapExploration` already owns.
+- **Mods that store progression in known texts are left to themselves.** Valheim's known texts are the compendium — the runestone and lore entries a character has read — but nothing namespaces the keys, so some mods park per-player progression there. EpicMMO is the case this ships for: a character's level, experience and attribute points are one entry each, all prefixed `EpicMMOSystem`. Progression is captured on full saves only, never on deltas, so the server's copy is current only as of the last one; enforcing such a key against it would roll the mod's progress back to that point on every join. Any key matching `KnownTextPassthroughPrefixes` is therefore never stored in a server save and never overwrites the live player's own value. This is the same bargain `PassthroughCompatModCustomData` strikes for slot mods, and it comes with the same caveat: what the server does not hold, it cannot restore or enforce.
+- **Pass-through does not exempt a new character.** `NewCharacterClearKnownTexts` clears the lot, prefixes included. Pass-through decides what is enforced between joins; what a character may bring in on its very first one is a separate question, and the answer there is the same as it is for items, skills and custom data.
 - **Known recipes are mostly derived.** Vanilla rediscovers a recipe the moment the player holds its materials and has seen its crafting station, so the materials and stations are what is really being held; the recipe list is rebuilt from them on arrival.
 - **`NewCharacterClearPlayerStats` cannot be undone**, and the counters it zeroes are per character rather than per world — so it discards a record of everything that character has done anywhere, not just here.
 

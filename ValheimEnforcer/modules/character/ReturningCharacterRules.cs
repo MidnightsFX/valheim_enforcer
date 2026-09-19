@@ -253,8 +253,17 @@ namespace ValheimEnforcer.modules.character {
                     incomingProgress.KnownStations = new Dictionary<string, int>(storedProgress.KnownStations);
                     changed = true;
                 }
-                if (NeedsReplaceTexts(incomingProgress.KnownTexts, storedProgress.KnownTexts)) {
-                    incomingProgress.KnownTexts = new Dictionary<string, string>(storedProgress.KnownTexts);
+                // Against a stripped copy of the stored side, the same way custom data is handled above.
+                // Ingestion sheds pass-through keys from every save it writes, but a save written before that
+                // rule existed still carries them - and replacing the incoming list from it wholesale would
+                // copy them straight back in and keep doing so on every join.
+                Dictionary<string, string> storedTexts = storedProgress.KnownTexts;
+                if (storedTexts != null) {
+                    storedTexts = PackedItem.SnapshotCustomData(storedTexts);
+                    compat.CompatKnownTexts.StripPassthroughKeys(storedTexts);
+                }
+                if (NeedsReplaceTexts(incomingProgress.KnownTexts, storedTexts)) {
+                    incomingProgress.KnownTexts = new Dictionary<string, string>(storedTexts);
                     changed = true;
                 }
                 result.KnownItemsReset = changed;

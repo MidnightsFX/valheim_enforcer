@@ -431,6 +431,11 @@ namespace ValheimEnforcer.modules.character {
                 MapExploration.ResetForNewCharacter(PlayerName);
                 // Same reasoning, and after BuildNewCharacter on purpose: rediscovery starts from the items it kept.
                 KnownRecipes.ResetForNewCharacter(player, PlayerName);
+                // And the known texts, which vanilla's reset above does not cover at all - it clears recipes,
+                // materials, stations and trophies and stops there. Mods park per-player progression in that
+                // dictionary (EpicMMO keeps a character's level and experience in it), so without this a
+                // first-time joiner kept the one thing every other rule here had already taken away.
+                KnownTexts.ResetForNewCharacter(player, PlayerName);
                 // And the statistics, which are neither in the character record nor cleared by either of the
                 // two above. Same "only on a definite answer" rule - zeroed counters cannot be given back.
                 ProgressionSync.ResetForNewCharacter(PlayerName);
