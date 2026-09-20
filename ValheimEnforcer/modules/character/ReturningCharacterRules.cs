@@ -158,7 +158,7 @@ namespace ValheimEnforcer.modules.character {
                         ceiling = pending;
                     }
                     float reported = incoming.SkillLevels[skill];
-                    if (reported > ceiling) {
+                    if (SkillReductions.IsAbove(reported, ceiling)) {
                         // The server's own record of the lowering. On an honest client the join clamp already ran
                         // and recorded it, and the reported level equals the stored one, so this never fires; it
                         // fires - and records - for the client that skipped the clamp.

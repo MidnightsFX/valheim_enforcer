@@ -1,3 +1,26 @@
+**0.31.0**
+---
+```
+- Gives DetectProxyLoaders a way to tell one proxy DLL from another. It convicted on the name and the
+  folder alone, which is also an exact description of a mod manager's own loader, of an older or
+  hand-assembled BepInEx pack, and of x360ce - with nothing an admin could do about a specific file
+  short of blinding the name everywhere.
+    - Adds AllowedProxyLoaderHashes (Anti-Cheat, empty): SHA256s to treat as legitimate. The hash of the
+      flagged file is printed in the server log line for the detection, and the log now says so.
+      Exempts one file rather than a name, so the check keeps working against anything else that turns
+      up under it later. This is the only thing that grants trust - there is no shipped list of builds
+      treated as good, and an injector nobody has vouched for is still enforced, legitimate or not.
+    - Proxy DLLs are now hashed before anything is decided, and a build known to be a cheat is matched
+      first - ahead of every exemption, and under any name including the low-confidence graphics ones.
+      IgnoredCheatProcesses no longer overrides that one check; DetectProxyLoaders is the only way past
+      it.
+    - IgnoredCheatProcesses entries containing a path separator now also match the folder a proxy DLL
+      was loaded from. Entries without one keep matching names only, so an existing entry like "steam"
+      cannot become an exemption for the whole game folder.
+- Fixes the server log flooding with "Delta removal ... found no match"
+- Fixes skill reductions being recorded for a rounding error (it wasn't causing a change, but was logging more than it should)
+```
+
 **0.30.0**
 ---
 ```

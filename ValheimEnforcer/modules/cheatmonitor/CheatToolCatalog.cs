@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace ValheimEnforcer.modules.cheatmonitor {
@@ -8,6 +9,9 @@ namespace ValheimEnforcer.modules.cheatmonitor {
     internal enum MatchMode { Exact, Prefix, Contains }
 
     internal enum WindowMatch { None, Weak, Strong }
+
+    /// <summary>What a proxy-family module turned out to be. Same three tiers as a window match.</summary>
+    internal enum ProxyVerdict { None, Weak, Strong }
 
     /// <summary>
     /// One cheat tool and the fingerprints that identify it. A tool may be detectable through any
@@ -101,7 +105,8 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             // plugin hashes never see it, it is not chainloaded so it is not in the declared mod list, it
             // has no process of its own, and it draws inside the game so it has no window. The two vectors
             // that do see it are the assembly it loads, by namespace, and the proxy DLL itself - caught not
-            // by its name, which is a real Windows DLL, but by where it is loaded from (ClassifyProxyModule).
+            // by its name, which is a real Windows DLL, but by where it is loaded from and by the hash of
+            // the file found there (JudgeProxyModule).
             //
             // Both spellings are carried because the tool answers to two names and we are working from its
             // release and from a server log rather than from the binary. "Valheaven" is what it calls itself
@@ -360,6 +365,11 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
         // Names with no reason to exist beside a game executable. A copy of one of these in the game
         // folder is a loader and nothing else, so a sighting is enforceable.
+        //
+        // A loader nobody has identified stays here even though legitimate ones install exactly this way -
+        // x360ce as xinput1_3, a mod manager's doorstop as version.dll. An unidentified injector is not
+        // owed the benefit of the doubt, and an admin who knows what theirs is puts its hash in
+        // AllowedProxyLoaderHashes, which is a statement about one file rather than about a name.
         private static readonly string[] StrongProxyNames = {
             "version.dll", "winmm.dll", "dinput8.dll", "xinput1_3.dll", "xinput1_4.dll",
             "xinput9_1_0.dll", "dsound.dll", "wininet.dll", "msacm32.dll"
@@ -391,6 +401,13 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             { "726066d7780ae8bd9f9e0e4e3604584a47df4bf85dedfc61b2495716bff42d85", "Valheaven" }
         };
 
+        // There is deliberately no shipped table of builds to treat as good. A hash is the only thing that
+        // separates a legitimate loader from a cheat one - both are a system DLL name in the game folder,
+        // both sit beside BepInEx - and pre-trusting a build ships the evasion with it: stock Doorstop is
+        // legitimate and loads whatever its ini names, so an exemption for its hash is an exemption for
+        // anything it is pointed at. Trust here is the admin's to grant, one file at a time, through
+        // AllowedProxyLoaderHashes.
+
         /// <summary>
         /// Whether this module name is one worth resolving a path for. Called once per newly loaded module,
         /// so it is a name comparison and nothing else; the path lookup only happens for a name that hits.
@@ -402,28 +419,56 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         }
 
         /// <summary>
-        /// Classifies a module that <see cref="IsProxyLoaderName"/> accepted, now that its path is known.
-        /// False means this is the genuine system DLL, or BepInEx, or that the path could not be read -
-        /// none of which is evidence of anything.
+        /// Whether a module that <see cref="IsProxyLoaderName"/> accepted is worth reading off disk, now
+        /// that its path is known. False for the genuine system DLL, and for a module whose path could not
+        /// be resolved - a failed lookup is not evidence of anything.
+        ///
+        /// Split out from the judgement below so that the several hundred genuine system DLLs the game
+        /// loads under these names are dismissed on their path, without anything being hashed.
         /// </summary>
-        internal static bool ClassifyProxyModule(string moduleName, string modulePath, out bool weak) {
-            weak = false;
-            if (string.IsNullOrEmpty(moduleName) || string.IsNullOrEmpty(modulePath)) { return false; }
+        internal static bool ProxyNeedsInspection(string modulePath) {
+            return !string.IsNullOrEmpty(modulePath) && !IsUnderWindows(modulePath);
+        }
 
-            // The genuine article. Everything the game legitimately loads under these names lives here.
-            if (IsUnderWindows(modulePath)) { return false; }
+        /// <summary>
+        /// The verdict on a proxy-family module whose file has been hashed. <paramref name="tool"/> comes
+        /// back non-null when the hash named a specific build, so the label carries the tool's own name and
+        /// the server resolves what to do about it from its own catalog, as it does for every other
+        /// detection.
+        ///
+        /// The order matters, and the known-cheat table is first on purpose. An allowlisted hash, an
+        /// ignored name and a doorstop marker beside the file are all statements about something nobody has
+        /// identified; none of them gets to speak for a build this mod has.
+        ///
+        /// A null hash - a file locked or deleted between enumeration and reading - falls through to the
+        /// name and path tests, which is what this did before it hashed anything. Fail closed on detection,
+        /// fail open on exemption.
+        /// </summary>
+        internal static ProxyVerdict JudgeProxyModule(string moduleName, string modulePath, string sha256, bool nameIgnored, out string tool) {
+            tool = null;
+            if (string.IsNullOrEmpty(moduleName) || string.IsNullOrEmpty(modulePath)) { return ProxyVerdict.None; }
 
+            // 1. A build known to be a cheat. Nothing below can reach past this.
+            tool = ProxyToolForHash(sha256);
+            if (tool != null) { return ProxyVerdict.Strong; }
+
+            // 2. Explicit admin intent about this exact file. The only thing that grants trust here.
+            if (IsAllowedProxyHash(sha256)) { return ProxyVerdict.None; }
+
+            // 3. The name, or the directory, is allowlisted.
+            if (nameIgnored || IsIgnoredPath(modulePath)) { return ProxyVerdict.None; }
+
+            // 4. BepInEx's own doorstop, recognised by the files Doorstop ships beside it. Only ever
+            //    winhttp.dll: every client on this server has BepInEx in the game root, so a marker there
+            //    says nothing whatsoever about a file under any other name - including the name Valheaven
+            //    uses, which is why this is not generalised.
             if (string.Equals(moduleName, DoorstopName, StringComparison.OrdinalIgnoreCase)) {
-                // Expected on every modded install, so it only counts when the files Doorstop ships beside
-                // it are absent - the case where something has taken the name. Weak even then: a broken or
-                // hand-assembled BepInEx install reaches the same state honestly.
-                if (HasDoorstopMarker(modulePath)) { return false; }
-                weak = true;
-                return true;
+                // Weak rather than strong when the markers are absent: a broken or hand-assembled BepInEx
+                // install reaches that state honestly.
+                return HasDoorstopMarker(modulePath) ? ProxyVerdict.None : ProxyVerdict.Weak;
             }
 
-            weak = !Matches(moduleName, StrongProxyNames, MatchMode.Exact);
-            return true;
+            return Matches(moduleName, StrongProxyNames, MatchMode.Exact) ? ProxyVerdict.Strong : ProxyVerdict.Weak;
         }
 
         /// <summary>The tool a proxy DLL's SHA256 identifies, or null when the build is not one we know.</summary>
@@ -474,6 +519,24 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             return false;
         }
 
+        /// <summary>
+        /// True if the admin has allowlisted a directory the module sits in, letting a proxy DLL be
+        /// exempted by where it lives rather than by blinding its name everywhere.
+        ///
+        /// Only entries that look like a path count. IsIgnored is a substring match, and the entries
+        /// admins already have in this setting are program names: matching "steam" against a full path
+        /// would exempt everything under the Steam folder, which is to say the game folder, which is to
+        /// say the entire vector. So an entry earns a path comparison by containing a separator.
+        /// </summary>
+        internal static bool IsIgnoredPath(string modulePath) {
+            if (string.IsNullOrEmpty(modulePath)) { return false; }
+            foreach (string entry in IgnoreList()) {
+                if (entry.IndexOf('\\') < 0 && entry.IndexOf('/') < 0) { continue; }
+                if (modulePath.IndexOf(entry, StringComparison.OrdinalIgnoreCase) >= 0) { return true; }
+            }
+            return false;
+        }
+
         // IsIgnored is called once per process, module and window, so the parsed allowlist is cached
         // and only rebuilt when the admin edits the setting.
         //
@@ -497,6 +560,64 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             return ignoreListParsed;
         }
 
+        // The proxy hash allowlist, in the same volatile-snapshot shape as the ignore list above and for
+        // the same reason: JudgeProxyModule runs on the scan worker, and a set rebuilt underneath it would
+        // be a data race against the main thread doing the rebuilding. Replaced wholesale, never mutated.
+        private static string allowedProxyHashesRaw;
+        private static volatile HashSet<string> allowedProxyHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Main thread only. Re-parses the proxy hash allowlist if the admin has edited it.</summary>
+        internal static void RefreshAllowedProxyHashes() {
+            string raw = ValConfig.AllowedProxyLoaderHashes.Value ?? "";
+            if (raw == allowedProxyHashesRaw) { return; }
+            HashSet<string> parsed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string entry in SplitList(raw)) {
+                string normalized = NormalizeHash(entry);
+                if (normalized == null) {
+                    // Said out loud rather than dropped. A hash pasted with a stray character does nothing
+                    // at all, and an admin watching the same player keep getting kicked has no other way
+                    // to find out why.
+                    Logger.LogWarning($"AllowedProxyLoaderHashes: '{entry}' is not a SHA256 (64 hex characters) and is ignored.");
+                    continue;
+                }
+                parsed.Add(normalized);
+            }
+            allowedProxyHashes = parsed;
+            allowedProxyHashesRaw = raw;
+        }
+
+        /// <summary>True if the admin has vouched for this exact file. Worker-thread safe.</summary>
+        internal static bool IsAllowedProxyHash(string sha256) {
+            return !string.IsNullOrEmpty(sha256) && allowedProxyHashes.Contains(sha256);
+        }
+
+        /// <summary>
+        /// A config entry reduced to 64 bare hex characters, or null if it is not a SHA256. Admins paste
+        /// these out of log lines, file manager dialogs and VirusTotal, so the punctuation those add -
+        /// a "sha256:" prefix, spaces, colons, hyphens - is stripped rather than rejected. Case is left
+        /// alone; the set that holds the result is case-insensitive.
+        /// </summary>
+        private static string NormalizeHash(string entry) {
+            if (string.IsNullOrEmpty(entry)) { return null; }
+            string value = entry.Trim();
+            // A "sha256:" / "sha-256:" prefix, not a separator inside the digits. The first colon is the
+            // one that ends the prefix; a value that is colon-separated all the way through does not start
+            // with "sha" and keeps every colon, which the loop below drops anyway.
+            if (value.StartsWith("sha", StringComparison.OrdinalIgnoreCase)) {
+                int colon = value.IndexOf(':');
+                if (colon >= 0 && colon < value.Length - 1) { value = value.Substring(colon + 1); }
+            }
+            StringBuilder digits = new StringBuilder(64);
+            foreach (char c in value) {
+                if (c == ' ' || c == '\t' || c == '-' || c == ':') { continue; }
+                bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+                if (!hex) { return null; }
+                if (digits.Length == 64) { return null; }
+                digits.Append(c);
+            }
+            return digits.Length == 64 ? digits.ToString() : null;
+        }
+
         /// <summary>
         /// A value that changes whenever anything about what counts as a detection changes.
         ///
@@ -504,7 +625,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// as long as the rules it examined them under are. Main thread only, alongside RefreshIgnoreList.
         /// </summary>
         internal static string PolicyKey() {
-            return $"{enabledCacheKey}|{ignoreListRaw}";
+            return $"{enabledCacheKey}|{ignoreListRaw}|{allowedProxyHashesRaw}";
         }
 
         // Window classes whose captions show content being VIEWED rather than software being RUN:

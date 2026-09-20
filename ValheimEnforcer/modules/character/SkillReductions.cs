@@ -49,6 +49,20 @@ namespace ValheimEnforcer.modules.character {
             get { return ValConfig.RecordSkillReductions != null && ValConfig.RecordSkillReductions.Value; }
         }
 
+        // How far above the stored level a skill has to sit before that counts as a gain. A level that has been
+        // through the general YAML serializer - a YAML delta, or any save written with FastCharacterWriter off -
+        // comes back rounded to seven significant digits, so the live value it was rounded from reads as "above
+        // the stored level" by a millionth on the next join. On one real server 35 of 39 recorded reductions were
+        // exactly that, the same four skills on the same character join after join. A level moves in whole steps
+        // (progress toward the next one is held separately), so nothing worth taking back is this small.
+        internal const float LevelTolerance = 0.001f;
+
+        /// <summary>Whether <paramref name="level"/> exceeds <paramref name="ceiling"/> by more than rounding.
+        /// NaN is never above anything, as with the plain comparison this replaces.</summary>
+        internal static bool IsAbove(float level, float ceiling) {
+            return level > ceiling + LevelTolerance;
+        }
+
         /// <summary>Client side (main thread): write down a reduction, if the setting says to. The server-side
         /// rules read the same setting through their Policy snapshot instead.</summary>
         internal static void Record(DataObjects.Character character, Skills.SkillType skill, float from, float to, string reason) {

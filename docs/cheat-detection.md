@@ -40,14 +40,26 @@ it *is* rather than what it is called:
   Windows DLLs the game legitimately loads. The path is the whole signal. The real one always resolves
   out of the Windows directory; a copy beside the game does not.
 
-BepInEx's own doorstop is a `winhttp.dll` proxy, so it is recognised by the files Doorstop ships
-alongside it and is not reported. The graphics names — `dxgi`, `d3d9`/`10`/`11`/`12`, `ddraw`,
-`opengl32` — are how ReShade, Special K and ENB install, so a sighting there is *low confidence*:
-reported and logged, never enforced on its own.
+The catch is that a mod manager's loader is the same shape. BepInEx's own doorstop is a proxy DLL in
+the game folder; so is the one Vortex installs, and so is x360ce. Past the names, *nothing about
+where a file sits tells a legitimate loader from a cheat one* — they live in the same folder, beside
+the same `BepInEx`. So the file itself is hashed, and the hash is asked first:
 
-A proxy DLL that is not recognised says a loader is installed, not which one, so it follows
-`ActionOnDetection`. Known builds are identified by SHA256 and reported under the tool's own name,
-which for a dedicated cheat means an auto-ban.
+1. **A build known to be a cheat** is reported under that tool's own name, which for a dedicated
+   cheat means an auto-ban. This is asked before every exemption below it, and cannot be waived by
+   any of them — `DetectProxyLoaders` is the only way past it.
+2. **A hash in `AllowedProxyLoaderHashes`** is the admin vouching for one specific file. Silent.
+   This is the only thing that grants trust: there is no shipped list of builds to treat as good,
+   deliberately. Pre-trusting a loader ships the evasion with it — stock Doorstop is legitimate and
+   loads whatever its ini names, so exempting its hash exempts anything it is pointed at.
+3. **An allowlisted name**, or a folder named in `IgnoredCheatProcesses`, is silent.
+4. **BepInEx's doorstop** — a `winhttp.dll` beside the files Doorstop ships — is silent. Only under
+   that name: every client here has BepInEx in the game root, so a doorstop file sitting next to a
+   `version.dll` says nothing at all about the `version.dll`, which is the name Valheaven uses.
+5. **Anything else** is judged on its name. The graphics names — `dxgi`, `d3d9`/`10`/`11`/`12`,
+   `ddraw`, `opengl32` — are how ReShade, Special K and ENB install, so those are *low confidence*:
+   reported and logged, never enforced on their own. The rest say a loader is installed, not which
+   one, and follow `ActionOnDetection` — a legitimate loader nobody has vouched for included.
 
 When Valheim's own runtime lists processes, it silently leaves out anything it is not allowed to open. That covers every program started as administrator and every background service, roughly a third of what runs on a typical desktop. On Windows the process scan therefore reads names from a system snapshot, which needs no access to the processes themselves. `ScanElevatedProcesses` (Advanced, on) switches back to the old list.
 
@@ -65,7 +77,26 @@ Window *titles* are ignored on windows that display content rather than run it �
 
 **Privacy:** only matched entries are sent to the server. A player's full process list never leaves their machine.
 
-**False positives:** generic framework window classes are logged but never enforced, and browser/Explorer/terminal titles are not matched at all (see above), so neither a Delphi utility in the tray nor a YouTube tab about a cheat tool can get anyone kicked. **ReShade, Special K and ENB** install as a graphics proxy DLL, which is the same mechanism a loader uses — they are reported as low confidence and never enforced on their own, and BepInEx's own `winhttp.dll` doorstop is recognised and not reported at all. Developer tools that also read game memory — x64dbg, Process Hacker / System Informer, HxD, ReClass.NET, Frida, Fiddler — are deliberately **not** detected by default, because modders and streamers use them routinely. Add them to `AdditionalCheatProcesses` if your server wants them treated as cheats. `Aurora`, `Process Lasso`, `AutoHotkey`, and overlay tools like MSI Afterburner and OBS are excluded on purpose and are not recommended additions; see the config file comments for the reasoning. If something legitimate trips a detection, add it to `IgnoredCheatProcesses`, which overrides everything else.
+**False positives:** generic framework window classes are logged but never enforced, and browser/Explorer/terminal titles are not matched at all (see above), so neither a Delphi utility in the tray nor a YouTube tab about a cheat tool can get anyone kicked. **ReShade, Special K and ENB** install as a graphics proxy DLL, which is the same mechanism a loader uses — they are reported as low confidence and never enforced on their own, and BepInEx's own `winhttp.dll` doorstop is recognised and not reported at all. Any **other injector**, legitimate or not, lands in the enforceable tier: a mod manager's loader under another name (Vortex and older or hand-assembled BepInEx packs use `version.dll`), x360ce as `xinput1_3.dll`, a profiler's bootstrap. That is on purpose — at that point only the hash distinguishes it from Valheaven, and an unidentified injector is not owed the benefit of the doubt. Vouch for the specific ones your server runs into; see the troubleshooting note below. Developer tools that also read game memory — x64dbg, Process Hacker / System Informer, HxD, ReClass.NET, Frida, Fiddler — are deliberately **not** detected by default, because modders and streamers use them routinely. Add them to `AdditionalCheatProcesses` if your server wants them treated as cheats. `Aurora`, `Process Lasso`, `AutoHotkey`, and overlay tools like MSI Afterburner and OBS are excluded on purpose and are not recommended additions; see the config file comments for the reasoning. If something legitimate trips a detection, add it to `IgnoredCheatProcesses` — with the one exception that a proxy DLL belongs in `AllowedProxyLoaderHashes` instead.
+
+### A proxy DLL got my player kicked
+
+The server log line for the detection carries the hash of the file that did it:
+
+```
+Cheat detection from Bjorn (…): tools: Proxy loader (version.dll) [proxy: version.dll sha256=a31f… at C:\…\Valheim]
+  ^ an unidentified proxy DLL - not a build known to be a cheat: …
+```
+
+Satisfy yourself about the file — a mod manager's loader and a cheat's loader are the same shape, so
+this is a judgement about *that* file, not about the name. Then put the `sha256=` value in
+`AllowedProxyLoaderHashes` and have the player rejoin.
+
+Use that rather than `IgnoredCheatProcesses`. A hash exempts the one file and leaves the check
+working against anything else that turns up under the same name later; the name exempts every
+`version.dll` on every client forever, which is a door Valheaven walks straight through. The setting
+takes effect on the client's next module scan, which is one tick in three (≈90 seconds at defaults),
+so rejoining is the reliable path.
 
 ## What this can and cannot do
 
@@ -104,7 +135,7 @@ One thing a menu advertises that is *not* a gap: Valheaven claims "anti-cheat sc
 | `ActionOnDetection` | `Kick` | What the server does: `Log`, `Kick` or `Ban`. Dedicated game-cheating tools are auto-banned regardless, and low-confidence sightings are logged only regardless |
 | `DetectInjectedCheatAssemblies` | `true` | Detects injected cheat menus — ValheimTooler, Valheaven — by the namespace of the types they load, which survives renaming, including assemblies injected mid-session. Always auto-banned |
 | `DetectValheimTooler` | `true` | Includes ValheimTooler in the assembly scan. Split out because it predates the catalog and some servers had already turned it off. Requires `DetectInjectedCheatAssemblies` |
-| `DetectProxyLoaders` | `true` | Detects a system DLL loaded from the game folder rather than from Windows — the shape of every proxy loader, including Valheaven's `version.dll`. BepInEx's doorstop is recognised; the graphics names (ReShade, Special K) are logged only. Requires `ScanLoadedModules` |
+| `DetectProxyLoaders` | `true` | Detects a system DLL loaded from the game folder rather than from Windows — the shape of every proxy loader, including Valheaven's `version.dll`. Every flagged file is hashed, and the hash decides first. BepInEx's doorstop is recognised; the graphics names (ReShade, Special K) are logged only. Anything else is enforced unless an admin has vouched for its hash. Requires `ScanLoadedModules` |
 | `DetectCheatTools` | `true` | The built-in catalog: WeMod/Wand, ArtMoney, PLITCH, Speed Gear, Squalr, WPE Pro, and the injectors and loaders used to deliver Valheim cheats |
 | `DetectCheatEngine` | `true` | Cheat Engine — process names, window titles, and injected speedhack/DBK modules |
 | `DetectGenericTrainers` | `true` | Any running process whose executable name contains "trainer". Catches FLiNG, MrAntiFun and Cheat Happens without listing each one |
@@ -112,7 +143,8 @@ One thing a menu advertises that is *not* a gap: Valheaven claims "anti-cheat sc
 | `ScanWindowTitles` | `true` | Scan open window classes and titles. Catches a tool renamed to dodge the process check |
 | `ScanElevatedProcesses` | `true` | *(Advanced)* Read process names from a system snapshot rather than the runtime's own list, so programs running as administrator and background services are not invisible |
 | `AdditionalCheatProcesses` | *(empty)* | Comma-separated process names to treat as cheats on top of the catalog |
-| `IgnoredCheatProcesses` | *(empty)* | Comma-separated process, module or window names never flagged. Overrides everything else, the proxy check included |
+| `IgnoredCheatProcesses` | *(empty)* | Comma-separated process, module or window names never flagged. Overrides everything else except a proxy DLL whose build is known to be a cheat. An entry containing `\` or `/` is also matched against the folder a proxy DLL was loaded from |
+| `AllowedProxyLoaderHashes` | *(empty)* | Comma-separated SHA256 hashes of proxy DLLs to treat as legitimate. The right escape hatch for a `DetectProxyLoaders` false positive: it exempts one file rather than blinding a name. The hash is printed in the detection's log line |
 | `ScanIntervalSeconds` | `30` | *(Advanced)* Seconds between scan ticks. The process, module and window scans are staggered across successive ticks so their cost never lands on the same frame, so each individual scan runs every three intervals. Injected-assembly detection is event-driven and not affected |
 
 `Discord.NotifyCheaterBanned` (on) posts a message whenever a player is banned for cheating. It names the account behind the ban, so it is worth routing to `WebhookUrlModeration` and a staff-only channel — see [Discord Notifications](discord.md).

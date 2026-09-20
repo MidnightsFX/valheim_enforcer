@@ -134,6 +134,7 @@ namespace ValheimEnforcer {
         // string and enums, so binding a List<string> throws at startup.
         public static ConfigEntry<string> AdditionalCheatProcesses;
         public static ConfigEntry<string> IgnoredCheatProcesses;
+        public static ConfigEntry<string> AllowedProxyLoaderHashes;
         //public static ConfigEntry<bool> DetectSpeedhack;
         public static ConfigEntry<string> CheatDetectionAction;
         public static ConfigEntry<int> CheatScanIntervalSeconds;
@@ -437,7 +438,7 @@ namespace ValheimEnforcer {
             EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Master switch for client-side cheat scanning. When enabled the client checks running processes, the DLLs loaded into the game, and open window titles against a catalog of known cheat tools. Only matched entries are reported to the server - the player's full process list is never transmitted.");
             DetectInjectedCheatAssemblies = BindServerConfig("Anti-Cheat", "DetectInjectedCheatAssemblies", true, "Detect injected cheat menus by the namespace of the types they load into the game, including assemblies that arrive mid-session. This is the vector that sees a cheat which is not a BepInEx plugin: it has no file in BepInEx/plugins to hash, it is not in the mod list the client declares at join, and a menu that draws inside the game has neither a process nor a window to find it by - but its own types are loaded in this process, and their namespace survives renaming the file. Currently covers ValheimTooler and Valheaven (a.k.a. ValheimAdminMenu). Both are auto-banned on a confirmed detection regardless of ActionOnDetection. High confidence, very low cost: an assembly is inspected once and the result cached for the session.");
             DetectValheimTooler = BindServerConfig("Anti-Cheat", "DetectValheimTooler", true, "Include ValheimTooler in the injected-assembly scan. Split out from the rest because it predates the catalog and servers may already have turned it off. Requires DetectInjectedCheatAssemblies.");
-            DetectProxyLoaders = BindServerConfig("Anti-Cheat", "DetectProxyLoaders", true, "Detect proxy-DLL loaders: a copy of a Windows system DLL sitting beside valheim.exe instead of in System32. Windows resolves a DLL from the game folder first, so dropping one there gets it loaded into the game ahead of the real one, which then does as it likes and forwards the genuine exports on. This is how Valheaven ships (as version.dll) and it is the standard way to load a cheat that is not a mod. The check is not the name - every name involved is a real Windows DLL the game legitimately loads - it is where the file was loaded FROM, so it survives renaming and rebuilding. BepInEx's own doorstop is a winhttp.dll proxy and is recognised as such. The graphics names (dxgi, d3d9/10/11/12, ddraw, opengl32) are reported as low confidence and never enforced on their own, because ReShade, Special K and ENB all install exactly this way. Requires ScanLoadedModules.");
+            DetectProxyLoaders = BindServerConfig("Anti-Cheat", "DetectProxyLoaders", true, "Detect proxy-DLL loaders: a copy of a Windows system DLL sitting beside valheim.exe instead of in System32. Windows resolves a DLL from the game folder first, so dropping one there gets it loaded into the game ahead of the real one, which then does as it likes and forwards the genuine exports on. This is how Valheaven ships (as version.dll) and it is the standard way to load a cheat that is not a mod. The check is not the name - every name involved is a real Windows DLL the game legitimately loads - it is where the file was loaded FROM, so it survives renaming and rebuilding. Every flagged file is hashed, and the hash decides first: a build known to be a cheat is reported under that tool's own name and cannot be allowlisted away. BepInEx's own doorstop is a winhttp.dll proxy and is recognised as such. The graphics names (dxgi, d3d9/10/11/12, ddraw, opengl32) are reported as low confidence and never enforced on their own, because ReShade, Special K and ENB all install exactly this way. Everything else is an injector nobody has identified and follows ActionOnDetection, legitimate ones included - nothing is trusted here that an admin has not vouched for. If you recognise one, put its hash in AllowedProxyLoaderHashes rather than its name in IgnoredCheatProcesses. Requires ScanLoadedModules.");
             DetectCheatTools = BindServerConfig("Anti-Cheat", "DetectCheatTools", true, "Scan for the built-in catalog of known cheat tools: WeMod/Wand, ArtMoney, PLITCH, Speed Gear, Squalr, WPE Pro, and the injectors/loaders used to deliver Valheim cheats (SharpMonoInjector, Xenos, Extreme Injector, ValheimTooler launcher, ValHack, Valheim Mod Menu). Tools with no legitimate purpose are auto-banned; the rest follow ActionOnDetection.");
             DetectCheatEngine = BindServerConfig("Anti-Cheat", "DetectCheatEngine", true, "Include Cheat Engine in the catalog scan (process names, window titles, and injected speedhack/DBK modules). Its TfrmMain/TfrmMemView window classes are generic Delphi names shared by legitimate software, so a class-only sighting is logged but never kicked or banned. Note: Cheat Engine has legitimate uses — prefer Log action over Kick/Ban. Requires DetectCheatTools.");
             DetectGenericTrainers = BindServerConfig("Anti-Cheat", "DetectGenericTrainers", true, "Flag any running process whose executable name contains the word 'trainer' (e.g. 'Valheim Trainer.exe', 'Hitman 3 Trainer - FLiNG.exe'). Catches FLiNG, MrAntiFun and Cheat Happens trainers without listing each one. Follows ActionOnDetection.");
@@ -445,9 +446,10 @@ namespace ValheimEnforcer {
             ScanWindowTitles = BindServerConfig("Anti-Cheat", "ScanWindowTitles", true, "Scan open window classes and titles. Catches tools that have been renamed to evade the process-name check, most notably Cheat Engine. Generic framework window classes (e.g. Delphi's TfrmMain) are treated as low confidence: the server logs the sighting but takes no action on it alone.");
             ScanElevatedProcesses = BindServerConfig("Anti-Cheat", "ScanElevatedProcesses", true, "Let the process scan see programs run as administrator and background services. Valheim's runtime silently leaves those out of its own process list - roughly a third of what runs on a typical desktop - so without this any cheat tool started elevated, WeMod/Wand included, is invisible to the process check. Names are read from a Windows process snapshot without opening any process, and as before only matched names are reported to the server. Turn off only to go back to the old process list if this causes a problem. Windows only.", advanced: true);
             AdditionalCheatProcesses = BindServerConfig("Anti-Cheat", "AdditionalCheatProcesses", "", "Comma-separated list of extra process names to treat as cheat tools, without the '.exe' suffix, matched exactly and case-insensitively. Empty by default. Suggested opt-in values for strict servers: x64dbg, x32dbg, x96dbg, ProcessHacker, SystemInformer, HxD, ReClass.NET, ollydbg, Scylla_x64, frida, Fiddler, Charles. WARNING: every one of those is a standard developer tool with heavy legitimate use by modders and streamers, which is why none of them ship enabled. Deliberately excluded from the built-in catalog and NOT recommended here: Aurora (collides with Aurora RGB lighting software), Process Lasso (a CPU priority optimiser, not a speedhack), AutoHotkey (compiled scripts take arbitrary names, so the check is worthless, and it is widely used for accessibility and key remapping), and MSI Afterburner/RivaTuner/OBS (their overlay DLLs look injector-shaped).");
-            IgnoredCheatProcesses = BindServerConfig("Anti-Cheat", "IgnoredCheatProcesses", "", "Comma-separated allowlist of process, module or window names to never flag, matched as a case-insensitive substring. Applied last, so it overrides the built-in catalog and AdditionalCheatProcesses. Use this to keep playing when a legitimate program trips a signature.");
+            IgnoredCheatProcesses = BindServerConfig("Anti-Cheat", "IgnoredCheatProcesses", "", "Comma-separated allowlist of process, module or window names to never flag, matched as a case-insensitive substring. Applied last, so it overrides the built-in catalog and AdditionalCheatProcesses. Use this to keep playing when a legitimate program trips a signature. An entry containing a path separator ('\\' or '/') is also matched against the folder a proxy DLL was loaded from, so a whole directory can be exempted - entries without one keep matching names only, so an existing entry like 'steam' cannot become an exemption for the entire game folder. One thing this no longer overrides: a proxy DLL whose build is known to be a cheat is matched before any allowlist, and DetectProxyLoaders is the only way past that.");
+            AllowedProxyLoaderHashes = BindServerConfig("Anti-Cheat", "AllowedProxyLoaderHashes", "", "Comma-separated SHA256 hashes of proxy DLLs to treat as legitimate, matched against the hash of the file itself, case-insensitively. Empty by default, and this is the right escape hatch to reach for when DetectProxyLoaders flags something it should not. A proxy DLL is judged by where it was loaded from, and the game folder is also where every mod manager puts its own loader - so past the names, a legitimate loader is not distinguishable from a cheat by name or by path, and the file's own content is all that is left. The hash of the flagged file is printed in the server log line for the detection; copy it from there. Two things this deliberately does not do. It does not exempt a build known to be a cheat: those are matched first and cannot be allowlisted. And it does not exempt a name - a hash is one specific file, so the check keeps working against every other DLL that later turns up under the same name, which is the whole difference between this and putting the name in IgnoredCheatProcesses. Set it on the server; connected clients pick it up on their next module scan, but a player already kicked has to rejoin.");
             //DetectSpeedhack = BindServerConfig("Anti-Cheat", "DetectSpeedhack", true, "Detect speedhack via Unity time vs. wall-clock drift.");
-            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a cheat tool is reported. Note that dedicated game-cheating tools (injectors, ValheimTooler, Valheaven, ValHack, Valheim Mod Menu) are always auto-banned regardless of this setting, and low-confidence sightings (generic window classes, graphics proxy DLLs) are always logged only, regardless of this setting. An unidentified proxy loader follows this setting: it says a loader is installed, not which one.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
+            CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a cheat tool is reported. Note that dedicated game-cheating tools (injectors, ValheimTooler, Valheaven, ValHack, Valheim Mod Menu) are always auto-banned regardless of this setting, and low-confidence sightings (generic window classes, graphics proxy DLLs) are always logged only, regardless of this setting. An unidentified proxy loader follows this setting: it says a loader is installed, not which one. See AllowedProxyLoaderHashes if one of those turns out to be legitimate.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
             CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 30, "Seconds between periodic client scan ticks. The process, module and window scans are staggered across successive ticks so their cost never lands on the same frame, so each individual scan runs every three intervals. Injected-assembly detection is event-driven and not affected by this interval.", false, 5, 300);
 
             EnableStructureValidation = BindServerConfig("World Integrity", "EnableStructureValidation", false, "Master switch for server-side validation of the structures clients place. When enabled, the server inspects the objects arriving from each client and reports the ones no legitimate client can produce: geometry that is not in any build menu, and pieces whose health is above what the prefab was designed to hold. This is the check for somebody spawning dungeon rooms, dvergr towns and ruins into a world - the structures that show a nameplate with no crafter on it, cannot be destroyed, and flatten the ground where they land. Off by default; every part of the feature is inert until this is on.");
@@ -1558,6 +1560,18 @@ loadouts: {}
                 yield break;
             }
 
+            // An unidentified proxy DLL is the one enforceable detection whose likeliest cause is a
+            // legitimate program this server has not been told about - a mod manager's loader, a controller
+            // shim - so the log says what to do about it rather than leaving an admin to work out why a
+            // player keeps getting kicked. The label is client-supplied and decides nothing but whether
+            // this line prints, so a crafted report earns an advisory and no enforcement.
+            foreach (DataObjects.CheatToolDetection detection in enforceable) {
+                if (detection.Tool == null
+                    || !detection.Tool.StartsWith(CheatToolCatalog.ProxyLoaderLabel, StringComparison.Ordinal)) { continue; }
+                Logger.LogWarning($"  ^ an unidentified proxy DLL - not a build known to be a cheat: {detection.Detail}");
+                Logger.LogWarning("    If you recognise it as legitimate, add that sha256 to AllowedProxyLoaderHashes and have the player rejoin. That exempts the one file and leaves the check working against anything else that turns up under the same name, unlike IgnoredCheatProcesses, which blinds the name.");
+            }
+
             // Everything else honors the configured action.
             string action = CheatDetectionAction.Value ?? "Log";
             switch (action) {
@@ -2047,7 +2061,7 @@ loadouts: {}
                     case ItemDeltaChangeType.Removed:
                         if (!character.RemoveFromPlayerItems(delta.Item)) {
                             drifted = true;
-                            Logger.LogWarning($"Delta removal for {character.Name} found no match for {delta.Item?.prefabName} x{delta.Item?.m_stack}; our copy has drifted from the client's baseline.");
+                            Logger.LogWarning($"Delta removal for {character.Name} found no match for {delta.Item?.prefabName} x{delta.Item?.m_stack}; our copy has drifted from the client's baseline. Asked for {DescribeForDrift(delta.Item)}; holding {DescribeHeldForDrift(character, delta.Item?.prefabName)}.");
                         }
                         break;
                 }
@@ -2091,6 +2105,33 @@ loadouts: {}
             character.LastDisconnect = deltaSummary.DisconnectionState;
 
             return drifted;
+        }
+
+        // Every field a removal is matched on, spelled so that the differences which are invisible in a save file
+        // are visible here: a null crafter and an empty one print differently, because that exact pair once made
+        // every uncrafted stack unmatchable and the log said only "found no match for IronScrap x5". Only ever
+        // built on the failure path.
+        private static string DescribeForDrift(PackedItem item) {
+            if (item == null) { return "<null item>"; }
+            string crafter = item.m_crafterName == null ? "null" : $"\"{item.m_crafterName}\"";
+            return $"{item.prefabName} x{item.m_stack} (quality {item.m_quality}, variant {item.m_variant}, world level {item.m_worldlevel}, crafter {crafter}/{item.m_crafterID}, {item.m_customdata?.Count ?? 0} custom data key(s))";
+        }
+
+        // What we hold under the same prefab name - the near misses, which are what explain a failed match.
+        // Capped, because a character can carry a dozen stacks of wood.
+        private static string DescribeHeldForDrift(DataObjects.Character character, string prefabName) {
+            const int MaxListed = 4;
+            List<string> held = new List<string>();
+            int total = 0;
+            if (character?.PlayerItems != null) {
+                foreach (PackedItem item in character.PlayerItems) {
+                    if (item == null || item.prefabName != prefabName) { continue; }
+                    total++;
+                    if (held.Count < MaxListed) { held.Add(DescribeForDrift(item)); }
+                }
+            }
+            if (total == 0) { return "nothing under that name"; }
+            return string.Join("; ", held.ToArray()) + (total > MaxListed ? $"; and {total - MaxListed} more" : "");
         }
 
         // Internal-storage delta persistence — runs on the main thread because it writes the registry ZDO.

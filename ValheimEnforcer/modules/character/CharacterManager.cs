@@ -502,7 +502,7 @@ namespace ValheimEnforcer.modules.character {
             if (ValConfig.PreventExternalSkillRaises.Value) {
                 player.GetSkills().GetSkillList().ForEach(skill => {
                     if (savableChar.SkillLevels.TryGetValue(skill.m_info.m_skill, out float savedLevel)) {
-                        if (skill.m_level > savedLevel) {
+                        if (SkillReductions.IsAbove(skill.m_level, savedLevel)) {
                             Logger.LogInfo($"Removing external skill gains for {skill.m_info.m_skill} from {savedLevel} to {skill.m_level} from player {savableChar.Name}");
                             // Written down here, on the side that actually lowers it. The server's own copy of this
                             // rule (ReturningCharacterRules) finds nothing left to lower on an honest client and

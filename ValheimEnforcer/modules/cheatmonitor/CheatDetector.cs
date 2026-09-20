@@ -240,18 +240,26 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
                 foreach (LoadedModule module in NewlyLoadedModules()) {
                     string name = module.Name;
-                    if (name.Length == 0 || CheatToolCatalog.IsIgnored(name)) { continue; }
+                    if (name.Length == 0) { continue; }
 
-                    foreach (CheatToolSignature sig in signatures) {
-                        if (CheatToolCatalog.Matches(name, sig.ModuleNames, MatchMode.Prefix)) {
-                            Add(found, sig.Tool, "module", name);
+                    // The allowlist is an input to the proxy check rather than a gate in front of it. It
+                    // used to skip the module outright, which meant an admin who had put "version.dll" in
+                    // the list to silence a false positive had also silenced the check against the builds
+                    // known to be cheats - the one thing in here that should not be waivable by config.
+                    bool ignored = CheatToolCatalog.IsIgnored(name);
+
+                    if (!ignored) {
+                        foreach (CheatToolSignature sig in signatures) {
+                            if (CheatToolCatalog.Matches(name, sig.ModuleNames, MatchMode.Prefix)) {
+                                Add(found, sig.Tool, "module", name);
+                            }
                         }
                     }
 
                     // Path resolution is deliberately behind the name test: it is a syscall per module, and
                     // only a handful of names can possibly be a proxy loader.
                     if (detectProxies && CheatToolCatalog.IsProxyLoaderName(name)) {
-                        InspectProxyModule(found, module);
+                        InspectProxyModule(found, module, ignored);
                     }
                 }
             } catch (Exception e) {
@@ -264,33 +272,37 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
         /// <summary>
         /// Judges one module whose name is in the proxy-loader family, now that resolving its path is worth
-        /// the syscall. A proxy loader is only visible in where it was loaded from, so a module we cannot get
-        /// a path for produces nothing - that is a failed lookup, not a finding.
+        /// the syscall. A module we cannot get a path for produces nothing - that is a failed lookup, not a
+        /// finding.
         ///
         /// A strong sighting says a loader is installed, not which one, so it rides ActionOnDetection like
-        /// any other general tool. Hashing the file is what turns it into a named tool, and a known build is
-        /// reported under that tool's own label so the server resolves the auto-ban from its own catalog,
-        /// exactly as it does for every other detection.
+        /// any other general tool. Hashing the file is what turns it into a named tool - a known cheat build
+        /// is reported under that tool's own label so the server resolves the auto-ban from its own catalog,
+        /// exactly as it does for every other detection, and a build known to be legitimate is how this
+        /// tells a mod manager's loader from a cheat one when nothing about the name or the folder can.
         /// </summary>
-        private static void InspectProxyModule(List<CheatToolDetection> found, LoadedModule module) {
+        private static void InspectProxyModule(List<CheatToolDetection> found, LoadedModule module, bool nameIgnored) {
             string path = ResolveModulePath(module);
-            if (!CheatToolCatalog.ClassifyProxyModule(module.Name, path, out bool weak)) { return; }
+            if (!CheatToolCatalog.ProxyNeedsInspection(path)) { return; }
 
-            string hash = null;
-            if (!weak) {
-                // Only the enforceable tier is worth hashing: a few milliseconds on a file that is almost
-                // always a megabyte or less, and only when something has already looked wrong.
-                hash = PluginHasher.HashFile(path, out string _);
-                string named = CheatToolCatalog.ProxyToolForHash(hash);
-                if (named != null) {
-                    Add(found, named, "proxy", $"{module.Name} at {DirectoryOf(path)} sha256={hash}");
-                    return;
-                }
-            }
+            // Hashed before anything is decided, and for both tiers rather than only the enforceable one.
+            // What it buys is that no exemption below it can speak for a build already known to be a cheat,
+            // and that such a build is named rather than merely logged even when it turns up under one of
+            // the low-confidence names. The cost is one read per module per session for the one or two
+            // files on a machine that get this far - PluginHasher caches by path, length and mtime.
+            string hash = PluginHasher.HashFile(path, out string _);
 
-            string detail = $"{module.Name} at {DirectoryOf(path)}";
-            if (hash != null) { detail += $" sha256={hash}"; }
-            Add(found, $"{CheatToolCatalog.ProxyLoaderLabel} ({module.Name})", "proxy", detail, weak);
+            ProxyVerdict verdict = CheatToolCatalog.JudgeProxyModule(module.Name, path, hash, nameIgnored, out string tool);
+            if (verdict == ProxyVerdict.None) { return; }
+
+            // The hash goes ahead of the directory: the server caps this field at 256 characters and
+            // truncates from the end, and the hash is the half an admin has to be able to copy out.
+            string detail = hash != null
+                ? $"{module.Name} sha256={hash} at {DirectoryOf(path)}"
+                : $"{module.Name} at {DirectoryOf(path)}";
+
+            Add(found, tool ?? $"{CheatToolCatalog.ProxyLoaderLabel} ({module.Name})", "proxy", detail,
+                verdict == ProxyVerdict.Weak);
         }
 
         // The directory rather than the full path: the file name is already in the detail, and the directory
@@ -780,6 +792,10 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 // list is an immutable published snapshot, and RefreshIgnoreList republishes the
                 // allowlist so IsIgnored only ever reads it.
                 CheatToolCatalog.RefreshIgnoreList();
+                // Before the policy key is built, not after: the key is what makes an already-examined
+                // module get looked at again, so refreshing after it would apply an edited allowlist a
+                // full phase rotation late.
+                CheatToolCatalog.RefreshAllowedProxyHashes();
                 // Captured here with the rest, so the worker never reads catalog state that the main thread
                 // could be rewriting underneath it. The module scan uses it to decide whether the modules it
                 // has already examined still need re-examining.

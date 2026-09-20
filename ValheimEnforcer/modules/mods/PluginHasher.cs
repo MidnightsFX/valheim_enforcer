@@ -195,7 +195,9 @@ namespace ValheimEnforcer.modules.mods {
                 fileCache[path] = new CacheEntry { Length = info.Length, MTimeUtc = info.LastWriteTimeUtc, Hash = hash };
                 return hash;
             } catch (Exception e) {
-                Logger.LogWarning($"Could not hash plugin file {path}: {e.Message}");
+                // Not "plugin file": the proxy-loader check hashes native DLLs through here too, and a
+                // module unloaded between enumeration and reading lands on this path.
+                Logger.LogWarning($"Could not hash {path}: {e.Message}");
                 status = StatusUnreadable;
                 return null;
             }

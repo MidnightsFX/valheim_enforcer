@@ -631,6 +631,18 @@ namespace ValheimEnforcer.common {
                 return quality == 0 ? 1 : quality;
             }
 
+            // "Nobody crafted this" has two spellings, and which one an item carries depends only on the road it
+            // took. A live item packs "" (vanilla initialises m_crafterName to it) and the binary delta wire
+            // carries that faithfully; a save omits an empty name, so the same item read back from YAML - every
+            // full save a client sends, and every file the server loads - holds null. Compared as different,
+            // the two made every uncrafted stack in a YAML-loaded copy unremovable by a binary delta: each full
+            // save re-armed the drift it had been requested to repair, and a returning player's stacks that had
+            // arrived by delta were confiscated as unaccounted for. Internal rather than private because
+            // Character.RemoveFromPlayerItems' fallback compares the name itself.
+            internal static string NormalizedCrafterName(string crafterName) {
+                return crafterName ?? "";
+            }
+
             private static bool CustomDataEquals(Dictionary<string, string> a, Dictionary<string, string> b) {
                 // Keys a compat mod stamps onto items at save time and prunes again during play
                 // (CompatCustomData.IsIgnoredItemKey) are not part of the item's identity: two honest
@@ -678,7 +690,7 @@ namespace ValheimEnforcer.common {
                     && m_variant == other.m_variant
                     && m_worldlevel == other.m_worldlevel
                     && m_crafterID == other.m_crafterID
-                    && m_crafterName == other.m_crafterName
+                    && NormalizedCrafterName(m_crafterName) == NormalizedCrafterName(other.m_crafterName)
                     && CustomDataEquals(m_customdata, other.m_customdata);
             }
 
@@ -695,7 +707,7 @@ namespace ValheimEnforcer.common {
                     hash = (hash * 31) + m_variant;
                     hash = (hash * 31) + m_worldlevel;
                     hash = (hash * 31) + m_crafterID.GetHashCode();
-                    hash = (hash * 31) + (m_crafterName?.GetHashCode() ?? 0);
+                    hash = (hash * 31) + NormalizedCrafterName(m_crafterName).GetHashCode(); // "" does not hash to 0
                     hash = (hash * 31) + CustomDataHash(m_customdata);
                     return hash;
                 }
@@ -1180,7 +1192,7 @@ namespace ValheimEnforcer.common {
                             packedItem.m_variant == item.m_variant &&
                             packedItem.m_worldlevel == item.m_worldlevel &&
                             packedItem.m_crafterID == item.m_crafterID &&
-                            packedItem.m_crafterName == item.m_crafterName) {
+                            PackedItem.NormalizedCrafterName(packedItem.m_crafterName) == PackedItem.NormalizedCrafterName(item.m_crafterName)) {
                             removed = PlayerItems.Remove(item);
                             if (removed) {
                                 Logger.LogDebug($"Removed item {item.prefabName} from player items based on a fuzzy match.");
