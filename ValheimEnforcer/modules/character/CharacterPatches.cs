@@ -119,6 +119,14 @@ namespace ValheimEnforcer.modules.character {
                 // kept turning up in server saves.
                 DataObjects.Character savableChar = CharacterManager.ResolveSessionCharacter(playerID, PlayerName, out bool isNewCharacter);
 
+                // The server's copy is stale (CatchupOverwriteOnJoin) and the live custom data is about to be
+                // adopted as the record - installing the stored copy here would put the stale one back first.
+                // Join only: once the catch-up has run, the tracked copy is the live one and respawns use it.
+                if (!isNewCharacter && CharacterManager.CatchUpThisSession && !CharacterManager.JoinValidationComplete) {
+                    Logger.LogDebug("Keeping this character's own custom data: the server is catching it up.");
+                    return;
+                }
+
                 if (isNewCharacter) {
                     if (ValConfig.newCharacterClearCustomData.Value && __instance.m_customData != null) {
                         Logger.LogInfo($"New character {PlayerName}: clearing custom data carried in from elsewhere.");

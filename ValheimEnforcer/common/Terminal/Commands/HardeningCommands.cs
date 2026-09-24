@@ -63,6 +63,11 @@ namespace ValheimEnforcer.common {
                 new HardeningCheck { Name = "ServerSideJoinEnforcement", Toggle = ValConfig.ServerSideJoinEnforcement,
                     Cost = "the join rules are applied by the client only, which is the thing being defended against" },
             });
+            // The inverse of every toggle above - on is the weaker setting - so it does not fit ReportGroup.
+            if (ValConfig.CatchupOverwriteOnJoin != null && ValConfig.CatchupOverwriteOnJoin.Value) {
+                args.Output.Warning("    [catch-up] CatchupOverwriteOnJoin", log: false);
+                args.Output.Detail("           every returning character is adopted as its client holds it; turn this off once everyone has rejoined", log: false);
+            }
 
             args.Output.Detail("", log: false);
             args.Output.Info("Evidence - these do not refuse anything; they are what you read afterwards.");

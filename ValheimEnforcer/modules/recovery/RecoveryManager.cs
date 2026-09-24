@@ -144,6 +144,12 @@ namespace ValheimEnforcer.modules.recovery {
                 Logger.LogInfo($"Ignoring a recovery snapshot offered by {sender}: CrashRecoveryAutoRestore is off.");
                 return;
             }
+            // A snapshot this player is still holding was sealed before the server stopped tracking them, which
+            // makes it exactly as stale as the save the catch-up is replacing - adopting it would undo the catch-up.
+            if (FirstSaveEnforcement.IsCatchUp(sender)) {
+                Logger.LogInfo($"Ignoring a recovery snapshot offered by {sender}: their character is being caught up under CatchupOverwriteOnJoin.");
+                return;
+            }
 
             ZNetPeer peer = ZNet.instance.GetPeer(sender);
             string account = PeerIdentity.AccountFor(peer);

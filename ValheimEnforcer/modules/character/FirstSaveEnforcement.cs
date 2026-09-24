@@ -24,6 +24,10 @@ namespace ValheimEnforcer.modules.character {
     ///  - characters brought in by the ServerCharacters migration: that import is a synchronous ZNet.Start
     ///    postfix, so it has finished writing before any peer can connect, and the connect-time lookup finds
     ///    the files it left.
+    ///
+    /// A third track exists for CatchupOverwriteOnJoin. A peer that connects with a stored character while an
+    /// admin has declared those stored copies stale is armed on neither of the other two, so its first save
+    /// replaces the stale copy outright, and is remembered here so nothing else puts that copy back this session.
     /// </summary>
     internal static class FirstSaveEnforcement {
 
@@ -42,6 +46,14 @@ namespace ValheimEnforcer.modules.character {
         // Peers that connected WITH a stored character - the first save each uploads is reconciled against it,
         // once per session (the entry is dropped after the first save reconciles it).
         private static readonly Dictionary<long, PendingPeer> returning = new Dictionary<long, PendingPeer>();
+        // Peers that connected WITH a stored character while CatchupOverwriteOnJoin was on - their saves are
+        // adopted as the client holds them. Kept for the whole session, like `pending`.
+        private static readonly HashSet<long> catchUp = new HashSet<long>();
+
+        /// <summary>Whether an admin has declared the stored characters stale (CatchupOverwriteOnJoin).</summary>
+        internal static bool CatchUpEnabled {
+            get { return ValConfig.CatchupOverwriteOnJoin != null && ValConfig.CatchupOverwriteOnJoin.Value; }
+        }
 
         /// <summary>Server, main thread. The connect-time lookup found nothing for this peer.</summary>
         internal static void MarkNoSaveOnConnect(ZNetPeer peer, string accountId, string characterName) {
@@ -49,6 +61,7 @@ namespace ValheimEnforcer.modules.character {
             lock (gate) {
                 pending[peer.m_uid] = new PendingPeer { AccountId = accountId, CharacterName = characterName };
                 returning.Remove(peer.m_uid);
+                catchUp.Remove(peer.m_uid);
             }
             Logger.LogDebug($"First-save enforcement armed for {characterName} ({accountId}).");
         }
@@ -60,16 +73,38 @@ namespace ValheimEnforcer.modules.character {
             lock (gate) {
                 returning[peer.m_uid] = new PendingPeer { AccountId = accountId, CharacterName = characterName };
                 pending.Remove(peer.m_uid);
+                catchUp.Remove(peer.m_uid);
             }
             Logger.LogDebug($"Returning-character enforcement armed for {characterName} ({accountId}).");
         }
 
-        /// <summary>The peer has gone away (disconnect). Drop it from both tracks.</summary>
+        /// <summary>Server, main thread. The connect-time lookup found a stored character for this peer, and
+        /// CatchupOverwriteOnJoin says that copy is stale: arm neither rule set, so the first save this session
+        /// replaces it as uploaded.</summary>
+        internal static void MarkCatchUpOnConnect(ZNetPeer peer, string accountId, string characterName) {
+            if (peer == null) { return; }
+            lock (gate) {
+                catchUp.Add(peer.m_uid);
+                pending.Remove(peer.m_uid);
+                returning.Remove(peer.m_uid);
+            }
+            Logger.LogDebug($"Catch-up overwrite armed for {characterName} ({accountId}).");
+        }
+
+        /// <summary>Whether this sender connected under CatchupOverwriteOnJoin this session.</summary>
+        internal static bool IsCatchUp(long sender) {
+            lock (gate) {
+                return catchUp.Contains(sender);
+            }
+        }
+
+        /// <summary>The peer has gone away (disconnect). Drop it from every track.</summary>
         internal static void ClearForPeer(ZNetPeer peer) {
             if (peer == null) { return; }
             lock (gate) {
                 pending.Remove(peer.m_uid);
                 returning.Remove(peer.m_uid);
+                catchUp.Remove(peer.m_uid);
             }
         }
 
@@ -83,6 +118,7 @@ namespace ValheimEnforcer.modules.character {
             lock (gate) {
                 pending.Clear();
                 returning.Clear();
+                catchUp.Clear();
             }
         }
 

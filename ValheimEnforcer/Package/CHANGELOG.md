@@ -1,3 +1,13 @@
+**0.32.0**
+---
+```
+- Adds CatchupOverwriteOnJoin (Player Sync, default off): for switching the mod back on after the server has
+  run without it. A returning character is adopted exactly as the joining client holds it and replaces the
+  stale stored save, instead of having the stale save enforced on it.
+    - Confiscated item and skill reduction records are kept; new characters still get the new-character rules.
+    - Turn it off again once everyone has rejoined. enforcer-harden warns while it is on.
+```
+
 **0.31.0**
 ---
 ```

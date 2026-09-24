@@ -56,6 +56,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> ItemRemovalForDirtyReconnection;
         public static ConfigEntry<bool> ItemReturnForDirtyReconnection;
         public static ConfigEntry<bool> ServerSideJoinEnforcement;
+        public static ConfigEntry<bool> CatchupOverwriteOnJoin;
         public static ConfigEntry<bool> PreventExternalForsakenPowerChanges;
         public static ConfigEntry<bool> NewCharacterClearForsakenPower;
         public static ConfigEntry<bool> NewCharacterResetMapExploration;
@@ -364,6 +365,7 @@ namespace ValheimEnforcer {
             ItemRemovalForDirtyReconnection = BindServerConfig("Player Sync", "ItemRemovalForDirtyReconnection", false, "Leniency for dirty reconnects (crash/timeout, where the server save may be up to one delta window stale). RemoveNontrackedItemsFromJoiningPlayers always runs otherwise; if this is enabled, untracked items are NOT confiscated when the player's last disconnect was dirty, so crash victims keep items gained in the unsaved window.");
             ItemReturnForDirtyReconnection = BindServerConfig("Player Sync", "ItemReturnForDirtyReconnection", false, "Leniency for dirty reconnects. AddMissingItemsFromPlayerServerSave always restores missing tracked items on a clean join, and RestoreSkillsFromPlayerServerSave raises lowered skills the same way; on a dirty reconnect both are skipped by default (to avoid duping items consumed, or handing back skill lost to a death, in the unsaved window) unless this is enabled.");
             ServerSideJoinEnforcement = BindServerConfig("Player Sync", "ServerSideJoinEnforcement", true, "If enabled, the server re-applies the join rules (item confiscation, skill clamping, custom-data, Forsaken Power and food reset) to the first full character save a RETURNING player uploads each session, instead of trusting the client to have done it. This is the returning-character counterpart to the first-save enforcement the server already runs for brand new characters: the client runs the same checks, but the client is what you are defending against, so this is the copy a modified client cannot skip. Honours RemoveNontrackedItemsFromJoiningPlayers, PreventExternalSkillRaises, PreventExternalCustomDataChanges, PreventExternalForsakenPowerChanges, PreventExternalFoodChanges and the dirty-reconnect leniency settings, so turning those off turns off the matching server-side check too. Inert if none of them are on.");
+            CatchupOverwriteOnJoin = BindServerConfig("Player Sync", "CatchupOverwriteOnJoin", false, "For switching this mod back on after the server has run without it for a while. The characters it already holds a save for still count as returning players, but those saves stopped being updated when the mod was turned off, so a normal join would enforce the stale copy - confiscating what a player gained in the meantime, lowering their skills and putting back their old progression, Forsaken Power, food, custom data and map. While this is enabled, a returning character is instead adopted exactly as the joining client holds it, and the stored save is replaced by it on that join; nothing is confiscated, lowered or restored, on the client or by ServerSideJoinEnforcement. The confiscated item and skill reduction records are kept, a pending admin skill restore still lands, and a character the server has no save for is still held to the new-character rules. Enforcement against returning players is effectively suspended while this is on, so turn it off again once everyone has rejoined. The replaced saves are not kept - enable EnableSaveArchives first if you want a copy of them. Off by default.");
 
             PreventExternalForsakenPowerChanges = BindServerConfig("Player Sync", "PreventExternalForsakenPowerChanges", false, "If enabled, each character's save records the Forsaken Power they have selected, and it is put back when they join - so a power picked up in a solo world or on another server, one this server may never have unlocked at its boss stones, cannot be brought in. Selecting a power at a boss stone while playing here is saved as normal. A character whose save was written before this was enabled has no power recorded yet: they keep the one they arrive with on their next join and are tracked from then on, so switching this on strips nobody. Also checked server side when ServerSideJoinEnforcement is on. Pair with NewCharacterClearForsakenPower, which covers a character's first join. Off by default.");
             NewCharacterClearForsakenPower = BindServerConfig("Player Sync", "NewCharacterClearForsakenPower", false, "If enabled, a character joining this server for the first time has their Forsaken Power cleared, so one selected in a solo world or on another server does not come with them. They can select one at a boss stone here as normal. Pair with PreventExternalForsakenPowerChanges, which stops a returning character bringing a different one in later. Off by default.");
@@ -846,7 +848,17 @@ loadouts: {}
             // This peer connected WITH a stored character: arm the returning-character reconciliation, so the
             // first full save it uploads this session is validated against that stored character server-side
             // rather than trusted. Keyed by peer uid from the server's own lookup, exactly like the no-save case.
-            modules.character.FirstSaveEnforcement.MarkHasSaveOnConnect(peer, saveId, saveName);
+            //
+            // Unless an admin has asked for a catch-up: the stored copy is known to be stale (the server ran
+            // without this mod for a while), so nothing is armed and the first save simply replaces it.
+            string payloadKind = CharPayloadCharacter;
+            if (modules.character.FirstSaveEnforcement.CatchUpEnabled) {
+                modules.character.FirstSaveEnforcement.MarkCatchUpOnConnect(peer, saveId, saveName);
+                payloadKind = CharPayloadCatchUp;
+                Logger.LogWarning($"CatchupOverwriteOnJoin is on: {saveName} ({saveId}) will be adopted exactly as their client holds it, replacing the stored save. Turn it off once everyone has rejoined.");
+            } else {
+                modules.character.FirstSaveEnforcement.MarkHasSaveOnConnect(peer, saveId, saveName);
+            }
 
             if (ValConfig.InternalStorageMode.Value) {
                 Logger.LogInfo("Using internal storage mode to send character data.");
@@ -857,7 +869,7 @@ loadouts: {}
                     Logger.LogWarning($"Internal storage listed a character '{saveName}' for {saveId} but could not load it; sending no character data.");
                     return CharacterPayload("", CharPayloadNone);
                 }
-                return SendCharacterToClientAsZpackage(chara);
+                return SendCharacterToClientAsZpackage(chara, payloadKind);
             }
 
             // Disk mode. The file is the authority: the async store holds parsed objects for the characters
@@ -894,7 +906,7 @@ loadouts: {}
             // Tell the store what is on disk, so a copy it parsed before an offline edit is re-read rather than
             // written back over the edit. Never replaces a copy with an unwritten change.
             modules.character.CharacterStore.Seed(saveId, saveName, diskMtime);
-            return CharacterPayload(StripServerOwnedFromYaml(filecontents), CharPayloadCharacter);
+            return CharacterPayload(StripServerOwnedFromYaml(filecontents), payloadKind);
         }
 
         // Coarse DoS guards on inbound client payloads. None of these are tight - they exist so a single
@@ -1427,6 +1439,12 @@ loadouts: {}
                     CharacterManager.ApplyServerSanitizedCharacter(incoming.Character);
                     yield break;
 
+                // The server holds this character but has been told its copy is stale (CatchupOverwriteOnJoin).
+                // The join adopts the live player instead of reconciling to it.
+                case CharacterPayloadOutcome.CatchUp:
+                    CharacterManager.SetPlayerCharacter(incoming.Character, catchUp: true);
+                    yield break;
+
                 default:
                     Logger.LogDebug("Recieved Player character data from server.");
                     CharacterManager.SetPlayerCharacter(incoming.Character);
@@ -1440,6 +1458,9 @@ loadouts: {}
             /// <summary>A stored character arrived that the server had just sanitized; the live player has to
             /// be reconciled to it, not merely told about it.</summary>
             Sanitized,
+            /// <summary>A stored character arrived that the server knows is stale; the live player is adopted in
+            /// its place rather than reconciled to it.</summary>
+            CatchUp,
             /// <summary>The server holds nothing for this account and character name.</summary>
             NoCharacter,
             /// <summary>The server holds something and we could not read it.</summary>
@@ -1488,10 +1509,13 @@ loadouts: {}
                     Logger.LogWarning("The server sent a character payload that deserialized to nothing.");
                     return new IncomingCharacter { Outcome = CharacterPayloadOutcome.Unreadable };
                 }
-                return new IncomingCharacter {
-                    Outcome = kind == CharPayloadSanitized ? CharacterPayloadOutcome.Sanitized : CharacterPayloadOutcome.Character,
-                    Character = chara,
-                };
+                CharacterPayloadOutcome outcome = CharacterPayloadOutcome.Character;
+                if (kind == CharPayloadSanitized) {
+                    outcome = CharacterPayloadOutcome.Sanitized;
+                } else if (kind == CharPayloadCatchUp) {
+                    outcome = CharacterPayloadOutcome.CatchUp;
+                }
+                return new IncomingCharacter { Outcome = outcome, Character = chara };
             } catch (Exception e) {
                 Logger.LogWarning($"Could not parse the character the server sent: {e.Message}");
                 return new IncomingCharacter { Outcome = CharacterPayloadOutcome.Unreadable };
@@ -2173,6 +2197,9 @@ loadouts: {}
         internal const string CharPayloadCharacter = "CHAR";
         internal const string CharPayloadNone = "NONE";
         internal const string CharPayloadSanitized = "SANITIZED";
+        // The stored character, sent while CatchupOverwriteOnJoin is on: adopt the live player rather than
+        // reconciling to it. An older client does not know the tag and reads it as CHAR, which is today's join.
+        internal const string CharPayloadCatchUp = "CATCHUP";
 
         /// <summary>
         /// Builds a tagged server -> client character payload.
@@ -2210,7 +2237,7 @@ loadouts: {}
         /// Deliberately NOT folded into SendCharacterAsZpackage: that one also serves client -> server pushes,
         /// which must keep carrying the new confiscations.
         /// </summary>
-        internal static ZPackage SendCharacterToClientAsZpackage(DataObjects.Character chara) {
+        internal static ZPackage SendCharacterToClientAsZpackage(DataObjects.Character chara, string kind = CharPayloadCharacter) {
             if (chara == null) { return new ZPackage(); }
             List<PackedItem> held = chara.ConfiscatedItems;
             List<SkillReduction> heldReductions = chara.SkillReductions;
@@ -2220,7 +2247,7 @@ loadouts: {}
                 // Tagged so every server -> client character payload carries its kind explicitly. Not tagging
                 // would still work (the client defaults an untagged payload to CHAR, for older servers), but
                 // leaving one path implicit is how the "silence means no character" ambiguity started.
-                return CharacterPayload(CharacterYaml.ToYaml(chara), CharPayloadCharacter);
+                return CharacterPayload(CharacterYaml.ToYaml(chara), kind);
             } finally {
                 // The caller's object is server-side authoritative state; never leave it stripped.
                 chara.ConfiscatedItems = held;

@@ -106,6 +106,25 @@ The map, recipe and known-text wipes only happen once the server has confirmed i
 | `ItemReturnForDirtyReconnection` | `false` | Restore missing items and lowered skills on a dirty reconnect too. Off by default, to avoid duping items consumed — or handing back skill lost to a death — in the unsaved window |
 | `SavePlayerStatusEffectsOnLogout` | `true` | Save active character effects on logout and reapply them on login |
 | `InitialCharacterSyncWaitSeconds` | `10` | How long a joining client waits for the server's answer about its stored character before giving up. The character is treated as **new** when no answer arrives — the local save on the joining machine is never used as the baseline. `0` never waits |
+| `CatchupOverwriteOnJoin` | `false` | A returning character is adopted exactly as the joining client holds it, and replaces the stored save, instead of being reconciled to it. For switching the mod back on after running without it — see below |
+
+#### Switching Enforcer back on after running without it
+
+While Enforcer is off, the server stops updating its character saves but players keep playing. When it comes back, every character still has a save, so each one joins as a returning player. That save is stale, and a normal join would enforce it: items gained in the meantime would be confiscated, skills lowered, and progression, Forsaken Power, food, custom data and the map rolled back.
+
+To avoid that:
+
+1. Optionally turn on `EnableSaveArchives` and let one archive be taken. The stale saves are replaced, not kept.
+2. Turn on `CatchupOverwriteOnJoin`.
+3. Have every player join once. Each join logs a warning on the server naming the character that was caught up.
+4. Turn `CatchupOverwriteOnJoin` off again.
+
+While it is on:
+
+- Nothing is confiscated, lowered or restored for a returning player, on the client or by `ServerSideJoinEnforcement`. Enforcement against returning players is effectively suspended, and `enforcer-harden` warns about it.
+- The confiscated-item and skill-reduction records are kept, and a pending `enforcer-skills-restore` still lands.
+- A character the server has no save for is still held to the new-character rules.
+- A client running an older build does not understand the catch-up and joins the old way.
 
 ### Storage and timing
 

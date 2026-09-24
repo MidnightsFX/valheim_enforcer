@@ -48,17 +48,27 @@ namespace ValheimEnforcer.modules.character {
         }
         internal static ServerCharacterState ServerCharacter = ServerCharacterState.Unknown;
 
-        internal static void SetPlayerCharacter(DataObjects.Character character) {
+        /// <summary>
+        /// The server sent its stored character tagged CATCHUP (CatchupOverwriteOnJoin): it knows that copy is
+        /// stale, so this join adopts the live player instead of reconciling to it. See CatchUpFromLivePlayer.
+        /// </summary>
+        internal static bool CatchUpThisSession = false;
+
+        internal static void SetPlayerCharacter(DataObjects.Character character, bool catchUp = false) {
             if (character == null) { return; }
             Logger.LogDebug("Set character from Saved server data");
             PlayerCharacter = character;
             ServerCharacter = ServerCharacterState.Received;
+            // Only the connect-time answer decides this. VENFORCE_CHAR also carries mid-session pushes (an admin
+            // returning confiscated items), which are plain CHAR and must not turn a catch-up session back off.
+            if (catchUp) { CatchUpThisSession = true; }
         }
 
         /// <summary>Back to knowing nothing. Called at both ends of a session so a previous connection's
         /// answer can never be mistaken for this one's.</summary>
         internal static void ResetServerCharacterState() {
             ServerCharacter = ServerCharacterState.Unknown;
+            CatchUpThisSession = false;
             JoinValidationPending = false;
             MapExploration.CancelPending();
             MapSync.CancelPending();
@@ -112,6 +122,7 @@ namespace ValheimEnforcer.modules.character {
             Logger.LogInfo("Server holds no stored character for this account and character name; this is a new character here.");
             PlayerCharacter = null;
             ServerCharacter = ServerCharacterState.ServerHasNone;
+            CatchUpThisSession = false;
         }
 
         /// <summary>
@@ -418,6 +429,13 @@ namespace ValheimEnforcer.modules.character {
             if (ServerCharacter == ServerCharacterState.Unreadable) {
                 Logger.LogError($"Not validating {PlayerName}: the server's stored character could not be read. Nothing will be confiscated, restored or tracked this session.");
                 JoinValidationComplete = true;
+                return;
+            }
+
+            // The server has said its copy is stale, so there is nothing trustworthy to validate against: every
+            // rule below would enforce what the character looked like before the server stopped tracking it.
+            if (CatchUpThisSession && PlayerCharacter != null) {
+                CatchUpFromLivePlayer(player);
                 return;
             }
 
@@ -787,6 +805,50 @@ namespace ValheimEnforcer.modules.character {
 
             PlayerCharacter = savableChar;
             PersistAndPushCharacter(savableChar.HostID, savableChar);
+        }
+
+        /// <summary>
+        /// Join under CatchupOverwriteOnJoin: the server holds a save for this character but has been told it is
+        /// stale - the server ran without this mod for a while and the character kept playing. Validating
+        /// against it would confiscate, lower and roll back everything done in that time, so the live player is
+        /// adopted as the record instead and pushed up to replace the server's copy.
+        ///
+        /// The record the server sent is kept for what the live player cannot supply: its identity, the
+        /// progression sections not being tracked (Capture merges into it), and any pending admin skill restore,
+        /// which only ever raises and still lands. The stored map is never asked for; this client's own is sent
+        /// up instead.
+        /// </summary>
+        internal static void CatchUpFromLivePlayer(Player player) {
+            DataObjects.Character savableChar = PlayerCharacter;
+            if (player == null || savableChar == null) { return; }
+            LogoutInProgress = false;
+
+            Logger.LogInfo($"The server is catching up {savableChar.Name}: adopting this character exactly as it is here instead of validating it against the server's stale copy.");
+            SkillReductions.ApplyPendingOnJoin(player, savableChar);
+
+            // Mid-session save, so it records the session as still active and potentially soon-to-be-stale.
+            savableChar.LastDisconnect = DisconnectionState.DirtyDisconnect;
+            savableChar.PlayerItems = new List<PackedItem>();
+            foreach (ItemDrop.ItemData item in player.GetInventory().GetAllItems().ToList()) {
+                savableChar.AddItemToPlayerItems(item);
+            }
+            savableChar.SkillLevels = player.GetSkills().GetSkillList().ToDictionary(skill => skill.m_info.m_skill, skill => skill.m_level);
+            savableChar.GuardianPower = ForsakenPower.Capture(player);
+            savableChar.Foods = FoodSync.Capture(player);
+            savableChar.Progress = ProgressionSync.Capture(player, savableChar.Progress);
+            if (ValConfig.PreventExternalCustomDataChanges.Value) {
+                savableChar.PlayerCustomData = CompatCustomData.SnapshotForTracking(player.m_customData);
+            }
+            // Saved at a logout from before the gap; putting them back would be as stale as everything else.
+            savableChar.ActiveCharacterEffects = new Dictionary<string, PackedStatusEffect>();
+
+            PlayerCharacter = savableChar;
+            // Before the push and the map upload, both of which refuse to send for a join not yet validated.
+            JoinValidationComplete = true;
+            PersistAndPushCharacter(savableChar.HostID, savableChar);
+            // A no-op until the minimap has loaded, in which case the next save sends it. Either way the
+            // server's stale map is replaced rather than adopted.
+            MapSync.SendToServer(force: true);
         }
 
         // Drop the tracked item list the moment the player dies. This is deliberately a clear rather than a
