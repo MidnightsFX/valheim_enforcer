@@ -1,3 +1,9 @@
+**0.32.1**
+---
+```
+- Fix RPC registration race condition issue
+```
+
 **0.32.0**
 ---
 ```

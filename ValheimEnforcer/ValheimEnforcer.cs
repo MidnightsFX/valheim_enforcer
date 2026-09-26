@@ -29,16 +29,19 @@ namespace ValheimEnforcer
     {
         public const string PluginGUID = "MidnightsFX.ValheimEnforcer";
         public const string PluginName = "ValheimEnforcer";
-        public const string PluginVersion = "0.32.0";
+        public const string PluginVersion = "0.32.1";
 
         internal static ManualLogSource Log;
         internal ValConfig cfg;
 
-        public static CustomLocalization Localization = LocalizationManager.Instance.GetLocalization();
+        // Set in Awake, not here: a static initialiser can run before BepInEx has registered this plugin, and Jotunn
+        // then attributes the whole mod - its RPC names included - to Jotunn itself for the rest of the session.
+        public static CustomLocalization Localization;
         public static AssetBundle EmbeddedResourceBundle;
 
         public void Awake()
         {
+            Localization = LocalizationManager.Instance.GetLocalization();
             Log = this.Logger;
             cfg = new ValConfig(Config);
             EmbeddedResourceBundle = AssetUtils.LoadAssetBundleFromResources("ValheimEnforcer.assets.vebundle", typeof(ValheimEnforcer).Assembly);

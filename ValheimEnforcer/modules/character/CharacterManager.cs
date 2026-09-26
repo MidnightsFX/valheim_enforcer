@@ -929,15 +929,20 @@ namespace ValheimEnforcer.modules.character {
 
                         // Check all of the custom data
                         ItemValidationSummary.CustomDataMatch = true;
-                        if (ValConfig.ValidateItemCustomData.Value) {
+                        // A saved item's custom data is null when it had none - ServerCharactersImport leaves it
+                        // that way on purpose, and a save omits a null map so it reads back null. Null and empty
+                        // are the same thing here, as in PackedItem.CustomDataEquals: dereferencing it threw out
+                        // of join validation the moment the live copy carried any key at all, which EpicLoot
+                        // guarantees by stamping one onto every magic-capable item as it loads.
+                        if (ValConfig.ValidateItemCustomData.Value && item.m_customData != null && savedItem.m_customdata != null) {
                             foreach (KeyValuePair<string, string> playerItemKVP in item.m_customData) {
                                 // Compat-owned slot memory is stamped and pruned outside the save cycle, so a
                                 // stale tracked value is expected, not evidence of tampering.
                                 if (CompatCustomData.IsIgnoredItemKey(playerItemKVP.Key)) { continue; }
-                                if (savedItem.m_customdata.ContainsKey(playerItemKVP.Key) && savedItem.m_customdata[playerItemKVP.Key] != playerItemKVP.Value) {
+                                if (savedItem.m_customdata.TryGetValue(playerItemKVP.Key, out string expected) && expected != playerItemKVP.Value) {
                                     ItemValidationSummary.CustomDataMatch = false;
-                                    validationReason += $"Custom data mismatch on key {playerItemKVP.Key}. Expected {savedItem.m_customdata[playerItemKVP.Key]} got {playerItemKVP.Value} ";
-                                    Logger.LogDebug($"Item {itemPrefab} custom data mismatch on key {playerItemKVP.Key}. Expected {savedItem.m_customdata[playerItemKVP.Key]} got {playerItemKVP.Value}");
+                                    validationReason += $"Custom data mismatch on key {playerItemKVP.Key}. Expected {expected} got {playerItemKVP.Value} ";
+                                    Logger.LogDebug($"Item {itemPrefab} custom data mismatch on key {playerItemKVP.Key}. Expected {expected} got {playerItemKVP.Value}");
                                 }
                             }
                         }
