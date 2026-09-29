@@ -41,7 +41,22 @@ namespace ValheimEnforcer.common {
                     Cost = "a loader dropped beside valheim.exe is not looked for; this is how Valheaven installs" },
                 new HardeningCheck { Name = "ScanLoadedModules", Toggle = ValConfig.ScanLoadedModules, Requires = ValConfig.EnableCheatDetection,
                     Cost = "nothing examines the DLLs loaded into the game, which also switches off the proxy check" },
+                new HardeningCheck { Name = "VerifyDoorstopTarget", Toggle = ValConfig.VerifyDoorstopTarget, Requires = ValConfig.DetectProxyLoaders,
+                    Cost = "BepInEx's own loader is recognised by the files beside it rather than by what it started" },
+                new HardeningCheck { Name = "DetectUnlistedGameFolderDlls", Toggle = ValConfig.DetectUnlistedGameFolderDlls, Requires = ValConfig.ScanLoadedModules,
+                    Cost = "only DLLs with a known proxy name are looked at; any other DLL dropped beside valheim.exe is not" },
+                new HardeningCheck { Name = "ReportUnaccountedCode", Toggle = ValConfig.ReportUnaccountedCode, Requires = ValConfig.EnableCheatDetection,
+                    Cost = "code loaded into the game that no mod accounts for is only caught when the catalog already knows its name" },
+                new HardeningCheck { Name = "DetectAntiCheatTampering", Toggle = ValConfig.DetectAntiCheatTampering, Requires = ValConfig.EnableCheatDetection,
+                    Cost = "nothing checks whether the cheat detector itself has been patched" },
+                new HardeningCheck { Name = "CheatScanHeartbeat", Toggle = ValConfig.CheatScanHeartbeat, Requires = ValConfig.EnableCheatDetection,
+                    Cost = "a client whose cheat scan has stopped looks exactly like a clean one" },
             });
+            // Heartbeat misses are only acted on through the contradiction tracker.
+            if (ValConfig.CheatScanHeartbeat != null && ValConfig.CheatScanHeartbeat.Value
+                && (ValConfig.ReportClientContradictions == null || !ValConfig.ReportClientContradictions.Value)) {
+                args.Output.Detail("           note: missed heartbeats are logged; they only count toward ContradictionAction when ReportClientContradictions is on", log: false);
+            }
 
             args.Output.Detail("", log: false);
             args.Output.Info("Server-authoritative - these read packets the server already holds. A patched client cannot get past them.");
@@ -58,8 +73,10 @@ namespace ValheimEnforcer.common {
                     Cost = "a client can hand itself every boss kill, free building and the world's damage rates" },
                 new HardeningCheck { Name = "EnableStructureValidation", Toggle = ValConfig.EnableStructureValidation,
                     Cost = "world-generation geometry and indestructible pieces are accepted from clients" },
-                new HardeningCheck { Name = "BlockSpawnObjectRPC", Toggle = ValConfig.BlockSpawnObjectRPC, Requires = ValConfig.EnableStructureValidation,
+                new HardeningCheck { Name = "BlockSpawnObjectRPC", Toggle = ValConfig.BlockSpawnObjectRPC,
                     Cost = "the item and creature spawner works; nothing in the game legitimately sends that message" },
+                new HardeningCheck { Name = "DetectCheatToolArtifacts", Toggle = ValConfig.DetectCheatToolArtifacts,
+                    Cost = "objects and items carrying a known cheat tool's own markers go unnoticed" },
                 new HardeningCheck { Name = "ServerSideJoinEnforcement", Toggle = ValConfig.ServerSideJoinEnforcement,
                     Cost = "the join rules are applied by the client only, which is the thing being defended against" },
             });
@@ -67,6 +84,14 @@ namespace ValheimEnforcer.common {
             if (ValConfig.CatchupOverwriteOnJoin != null && ValConfig.CatchupOverwriteOnJoin.Value) {
                 args.Output.Warning("    [catch-up] CatchupOverwriteOnJoin", log: false);
                 args.Output.Detail("           every returning character is adopted as its client holds it; turn this off once everyone has rejoined", log: false);
+            }
+            // A three-way setting rather than a toggle, so it does not fit ReportGroup either.
+            string attestation = ValConfig.AttestationPolicy?.Value ?? "Off";
+            if (string.Equals(attestation, "Off", System.StringComparison.OrdinalIgnoreCase)) {
+                args.Output.Warning("    [OFF] AttestationPolicy", log: false);
+                args.Output.Detail("           a client can replay one captured mod report every session instead of producing it", log: false);
+            } else {
+                args.Output.Detail($"    [ on] AttestationPolicy ({attestation})", log: false);
             }
 
             args.Output.Detail("", log: false);

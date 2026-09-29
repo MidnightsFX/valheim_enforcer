@@ -139,6 +139,19 @@ namespace ValheimEnforcer {
         //public static ConfigEntry<bool> DetectSpeedhack;
         public static ConfigEntry<string> CheatDetectionAction;
         public static ConfigEntry<int> CheatScanIntervalSeconds;
+        // Server-only (never synced): a ban list handed to every client would be handed to cheat authors too.
+        public static ConfigEntry<string> BannedProxyLoaderHashes;
+        public static ConfigEntry<string> BannedAssemblyNamespaces;
+        public static ConfigEntry<string> BannedAssemblyMvids;
+        public static ConfigEntry<bool> VerifyDoorstopTarget;
+        public static ConfigEntry<bool> DetectUnlistedGameFolderDlls;
+        public static ConfigEntry<bool> ReportUnaccountedCode;
+        public static ConfigEntry<bool> DetectAntiCheatTampering;
+        public static ConfigEntry<bool> DetectCheatToolArtifacts;
+        public static ConfigEntry<bool> CheatScanHeartbeat;
+        public static ConfigEntry<int> CheatHeartbeatIntervalMinutes;
+        public static ConfigEntry<int> CheatHeartbeatTimeoutSeconds;
+        public static ConfigEntry<int> CheatHeartbeatMissesAllowed;
 
         public static ConfigEntry<bool> EnableStructureValidation;
         public static ConfigEntry<bool> DetectNonBuildableStructures;
@@ -209,6 +222,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> DiscordNotifyStructureFlagged;
         public static ConfigEntry<bool> DiscordNotifyClientContradiction;
         public static ConfigEntry<bool> DiscordNotifyItemOrigin;
+        public static ConfigEntry<bool> DiscordNotifyCheatSuspected;
 
         internal const string ModsFileName = "Mods.yaml";
         internal const string ServerActiveModsFileName = "ServerActiveMods.yaml";
@@ -224,6 +238,8 @@ namespace ValheimEnforcer {
 
         internal static CustomRPC CharacterSaveRPC;
         internal static CustomRPC CheatDetectionRPC;
+        // Both directions: the server's challenge goes down, the client's answer comes back on the same RPC.
+        internal static CustomRPC CheatHeartbeatRPC;
         internal static CustomRPC ItemDeltaUpdateRPC;
         // The same update as plain package fields. A second RPC rather than a second format on the first one,
         // so a server that predates it simply has no handler - see DeltaWire for how a client finds that out.
@@ -274,6 +290,7 @@ namespace ValheimEnforcer {
             CharacterSaveRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHAR", OnServerRecieveCharacter, OnClientReceiveCharacter);
             ReturnConfiscatedItemsRPC = NetworkManager.Instance.AddRPC("VENFORCE_RETURN_CONFISCATED", NoServerHandler, OnClientReceiveConfiscatedItems);
             CheatDetectionRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHEAT", OnServerReceiveCheatReport, OnClientReceiveCheatReport);
+            CheatHeartbeatRPC = NetworkManager.Instance.AddRPC("VENFORCE_CHEAT_HB", CheatHeartbeat.OnServerReceive, CheatHeartbeat.OnClientReceive);
             ItemDeltaUpdateRPC = NetworkManager.Instance.AddRPC("VENFORCE_ITEMDELTA", OnServerRecieveDeltaItemUpdate, OnClientReceiveDeltaItemUpdate);
             ItemDeltaBinaryRPC = NetworkManager.Instance.AddRPC("VENFORCE_ITEMDELTA_BIN", OnServerReceiveBinaryDelta, NoClientHandler);
             ClearConfiscatedRPC = NetworkManager.Instance.AddRPC("VENFORCE_CLEAR_CONFISCATED", NoServerHandler, OnClientReceiveClearConfiscated);
@@ -331,7 +348,7 @@ namespace ValheimEnforcer {
             RemoveUnloadedModsFromRequired = BindServerConfig("Mods", "RemoveUnloadedModsFromRequired", true, "If enabled, any mod in requiredMods that this server does not have loaded is removed from the list at startup, so a mod taken off the server stops being demanded of every client without anyone editing Mods.yaml. Only requiredMods is touched: optionalMods, adminOnlyMods and serverOnlyMods routinely hold mods the server never runs, and are left alone. This also removes a mod you required by hand that the server does not run itself, including one pinned with a thunderstorePackage - put 'keepWhenUnloaded: true' on those entries and they are left alone without having to turn this off for every other mod. Needs UpdateLoadedModsOnStartup for the removal to reach disk. On by default.");
             ModValidationExemptAdmins = BindServerConfig("Mods", "ModValidationExemptAdmins", false, "If enabled, anyone on the server's adminlist may connect with any mods at all - missing required mods, mods this server does not allow, mismatched versions, modified mod files, unlisted BepInEx patchers, and a missing or wrong attestation. It also covers an admin running no ValheimEnforcer at all, who is otherwise refused for never sending a mod list. The check still runs and its result is still written to the server log, so you can see what your admin was carrying; only the rejection is skipped, and the Discord mod-mismatch notification is not sent for them. This exists so you can test a mod against the live server without editing Mods.yaml first. OFF by default, and be deliberate about turning it on: it makes a place on adminlist.txt the only thing between an account and the entire mod gate, so every admin id in that file needs to be somebody you would trust with an arbitrary client. Admin status is read from the server's own admin list against the connection the request arrived on, so no client can claim it.");
             HashEnforcement = BindServerConfig("Mods", "HashEnforcement", "WhenKnown", "Controls SHA256 file verification of client plugin DLLs during the connect handshake, which catches a mod somebody recompiled with different numbers in it even though its version string is unchanged. 'Off' never checks. 'WhenKnown' (the default) enforces only the mods this server has a recorded hash for, so verification is opt-in per mod and enabling it breaks nothing. 'Strict' additionally rejects any client carrying a Required or AdminOnly mod the server has NO recorded hash for - a deliberately loud signal that the mod list is not fully pinned. Individual mods override this with a 'hashEnforcement' field in Mods.yaml. Note this raises the bar from 'edit one file and rebuild' to 'reverse engineer and patch the enforcer'; it is not a wall.", new AcceptableValueList<string>("Off", "WhenKnown", "Strict"));
-            AttestationPolicy = BindServerConfig("Mods", "AttestationPolicy", "Off", "Make each client prove its mod report was generated for THIS connection. The server hands every connection a random value during the handshake and the client returns a digest over that value and the exact mod and patcher list it is sending; the server recomputes it and compares. Without this, a client reports the same list and the same file hashes every session forever, so a client patched to skip the work can replay one captured answer indefinitely. Be clear on what a pass means: it proves the report was produced now, by code that actually ran - it does NOT prove the report is true, because a client that keeps the original DLLs and hashes those still passes. What it costs an attacker is the difference between returning a constant and keeping a working hashing path alive. Off does nothing at all. Report logs a failure and lets the player in. Require rejects them - and note that a player on an older ValheimEnforcer sends no attestation at all and is therefore rejected too, so only set Require once your pack has rolled out.", new AcceptableValueList<string>("Off", "Report", "Require"));
+            AttestationPolicy = BindServerConfig("Mods", "AttestationPolicy", "Report", "Make each client prove its mod report was generated for THIS connection. The server hands every connection a random value during the handshake and the client returns a digest over that value and the exact mod and patcher list it is sending; the server recomputes it and compares. Without this, a client reports the same list and the same file hashes every session forever, so a client patched to skip the work can replay one captured answer indefinitely. Be clear on what a pass means: it proves the report was produced now, by code that actually ran - it does NOT prove the report is true, because a client that keeps the original DLLs and hashes those still passes. What it costs an attacker is the difference between returning a constant and keeping a working hashing path alive. Off does nothing at all. Report (the default) logs a failure and lets the player in. Require rejects them - and note that a player on an older ValheimEnforcer sends no attestation at all and is therefore rejected too, so only set Require once your pack has rolled out.", new AcceptableValueList<string>("Off", "Report", "Require"));
             ValidatePatchers = BindServerConfig("Mods", "ValidatePatchers", false, "Hold clients to a list of allowed BepInEx patchers, the same way they are held to a list of allowed mods. Patchers are the DLLs in BepInEx/patchers - not plugins. BepInEx loads them before any plugin exists and hands each one the game assemblies to rewrite on the way in, which is a more powerful position than any plugin has, and until now nothing here looked at that folder at all. The list is an allowlist, not a required list: a client with no patchers always passes, and only a patcher the server has not allowed is refused. Off by default. Patchers are enumerated and logged either way, so leave this off for a while first and read the log to see what your players actually carry.");
             AutoAddPatchersToAllowed = BindServerConfig("Mods", "AutoAddPatchersToAllowed", true, "Adds the patchers this server itself has to the allowedPatchers list in Mods.yaml at startup, with their file hashes, so a server running patchers of its own does not have to write them out by hand. Mirrors AutoAddModsToRequired. Hashes are only ever added, never replaced, so an entry an admin pinned by hand survives. Turn it off to curate the list yourself - patchers the server runs are then refused for clients like any other.");
             RecordHashesForLoadedMods = BindServerConfig("Mods", "RecordHashesForLoadedMods", true, "If enabled, the SHA256 of every plugin DLL loaded on this machine is recorded into Mods.yaml at startup, so the mods the server itself runs get pinned with no manual work. Hashes an admin pinned by hand, or that came from a thunderstorePackage, are never overwritten. Requires UpdateLoadedModsOnStartup for the result to reach disk.");
@@ -453,10 +470,22 @@ namespace ValheimEnforcer {
             //DetectSpeedhack = BindServerConfig("Anti-Cheat", "DetectSpeedhack", true, "Detect speedhack via Unity time vs. wall-clock drift.");
             CheatDetectionAction = BindServerConfig("Anti-Cheat", "ActionOnDetection", "Kick", "Server-side action taken when a cheat tool is reported. Note that dedicated game-cheating tools (injectors, ValheimTooler, Valheaven, ValHack, Valheim Mod Menu) are always auto-banned regardless of this setting, and low-confidence sightings (generic window classes, graphics proxy DLLs) are always logged only, regardless of this setting. An unidentified proxy loader follows this setting: it says a loader is installed, not which one. See AllowedProxyLoaderHashes if one of those turns out to be legitimate.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
             CheatScanIntervalSeconds = BindServerConfig("Anti-Cheat", "ScanIntervalSeconds", 30, "Seconds between periodic client scan ticks. The process, module and window scans are staggered across successive ticks so their cost never lands on the same frame, so each individual scan runs every three intervals. Injected-assembly detection is event-driven and not affected by this interval.", false, 5, 300);
+            BannedProxyLoaderHashes = BindLocalConfig("Anti-Cheat", "BannedProxyLoaderHashes", "", "Comma-separated SHA256 hashes of proxy DLLs to ban on sight, in addition to the builds this mod already knows. Matched on the server against the hashes a client reports for a DLL loaded from the game folder - both the whole file and its code - so a build you have identified is banned from the next report on, without waiting for a release. Server-only: never sent to clients. The hash to paste is in the server log line for the detection. Same format as AllowedProxyLoaderHashes; a hash in both lists is banned.");
+            BannedAssemblyNamespaces = BindLocalConfig("Anti-Cheat", "BannedAssemblyNamespaces", "", "Comma-separated namespaces to ban on sight when a client reports unaccounted code carrying them (see ReportUnaccountedCode). Matched exactly or as a dotted prefix, so 'Foo' covers 'Foo.UI' and not 'FooBar'. Server-only: never sent to clients.");
+            BannedAssemblyMvids = BindLocalConfig("Anti-Cheat", "BannedAssemblyMvids", "", "Comma-separated module version ids (MVIDs, the GUID printed in the server log for an unaccounted assembly) to ban on sight. An MVID names one exact build of an assembly, whatever it is called. Server-only: never sent to clients.");
+            VerifyDoorstopTarget = BindServerConfig("Anti-Cheat", "VerifyDoorstopTarget", true, "Only treat the winhttp.dll in the game folder as BepInEx's own loader when the assembly it started is the BepInEx preloader this game is actually running. Anything else is reported as a low-confidence sighting: logged, never acted on. Turn off to go back to recognising it by the files installed beside it. Requires DetectProxyLoaders.", advanced: true);
+            DetectUnlistedGameFolderDlls = BindServerConfig("Anti-Cheat", "DetectUnlistedGameFolderDlls", true, "Report any DLL loaded into the game from the game folder itself that the game does not ship there, whatever its name. The game folder is where Windows looks first, so a DLL placed there is loaded ahead of the real one. Reported as a low-confidence sighting with the file's hashes: logged, never acted on, unless the hash is a known cheat build or listed in BannedProxyLoaderHashes. Requires ScanLoadedModules.");
+            ReportUnaccountedCode = BindServerConfig("Anti-Cheat", "ReportUnaccountedCode", true, "Have clients report managed code loaded into the game that no installed mod, patcher, BepInEx or the game itself accounts for - for example an assembly loaded straight from memory. Each report names the assembly, its build id (MVID), up to eight namespaces, its file name without the folder, what it patches and whether it draws on screen. The server logs each one once per session and bans only on a match against the cheat catalog, BannedAssemblyNamespaces or BannedAssemblyMvids.");
+            DetectAntiCheatTampering = BindServerConfig("Anti-Cheat", "DetectAntiCheatTampering", true, "Have the client check that nothing has patched the cheat detector's own methods or detached it from the game's assembly loading. A finding is a medium-confidence sighting: written to the server log and posted to the moderation channel (Discord.NotifyCheatSuspected), never kicked or banned on by itself. Requires EnableCheatDetection.");
+            DetectCheatToolArtifacts = BindServerConfig("Anti-Cheat", "DetectCheatToolArtifacts", true, "Watch for data that known cheat tools write into the world and onto items: an object created with a cheat tool's marker is handled like any other structure detection (StructureValidationAction, Discord.NotifyStructureFlagged), and an item carrying one is logged and posted to the moderation channel (Discord.NotifyItemOrigin) without any action, because items change hands. Read on the server from data it already receives, so it works whether or not the client's own scan is running.", advanced: true);
+            CheatScanHeartbeat = BindServerConfig("Anti-Cheat", "CheatScanHeartbeat", true, "The server asks each connected client for the state of its cheat scan every CheatHeartbeatIntervalMinutes, and the client must answer even when it has found nothing. A client that stops answering is logged, and fed to ReportClientContradictions as the cheat-heartbeat guard. An answer that shows the scan stopped, reports that never arrived, or anti-cheat tampering is a medium-confidence sighting: logged and posted to the moderation channel, never acted on by itself. Requires EnableCheatDetection.");
+            CheatHeartbeatIntervalMinutes = BindServerConfig("Anti-Cheat", "CheatHeartbeatIntervalMinutes", 5, "Minutes between heartbeat checks for each client. Each client is checked on its own schedule, so the server never asks everybody at once.", false, 1, 60);
+            CheatHeartbeatTimeoutSeconds = BindServerConfig("Anti-Cheat", "CheatHeartbeatTimeoutSeconds", 60, "How long a client has to answer a heartbeat check before it counts as missed.", true, 15, 600);
+            CheatHeartbeatMissesAllowed = BindServerConfig("Anti-Cheat", "CheatHeartbeatMissesAllowed", 2, "Consecutive missed heartbeat checks before the client is reported. One missed answer is usually a hitch; several in a row is not.", true, 1, 10);
 
             EnableStructureValidation = BindServerConfig("World Integrity", "EnableStructureValidation", false, "Master switch for server-side validation of the structures clients place. When enabled, the server inspects the objects arriving from each client and reports the ones no legitimate client can produce: geometry that is not in any build menu, and pieces whose health is above what the prefab was designed to hold. This is the check for somebody spawning dungeon rooms, dvergr towns and ruins into a world - the structures that show a nameplate with no crafter on it, cannot be destroyed, and flatten the ground where they land. Off by default; every part of the feature is inert until this is on.");
             DetectNonBuildableStructures = BindServerConfig("World Integrity", "DetectNonBuildableStructures", true, "Flag a client that creates a structure which is in no build menu. Membership of a piece table is what makes a prefab placeable at all - by the hammer, the hoe, the cultivator, and by every blueprint or bulk-building mod, which all place out of those same tables - so a mod's own pieces are covered automatically and a large blueprint cannot trip this.");
-            BlockSpawnObjectRPC = BindServerConfig("World Integrity", "BlockSpawnObjectRPC", true, "Block ZNetScene's SpawnObject RPC, an unused routed call that nothing in the game legitimately sends but which lets any client have the server instantiate any prefab by hash - creatures and items, not just structures. When on (the default), every client-originated SpawnObject is refused, reported to the moderation Discord channel (the structureFlagged notification, controlled by Discord.NotifyStructureFlagged) and follows StructureValidationAction for what happens to the player - which defaults to Log, so the default is 'block it and post to Discord' without kicking or banning. A structure spawned this way is reported as a structure detection either way. Requires EnableStructureValidation. Turn this off to fall back to blocking only non-buildable structures via SpawnObject, in case a mod on your server legitimately uses this RPC.");
+            BlockSpawnObjectRPC = BindServerConfig("World Integrity", "BlockSpawnObjectRPC", true, "Block ZNetScene's SpawnObject RPC, an unused routed call that nothing in the game legitimately sends but which lets any client have the server instantiate any prefab by hash - creatures and items, not just structures. When on (the default), every client-originated SpawnObject is refused, reported to the moderation Discord channel (the structureFlagged notification, controlled by Discord.NotifyStructureFlagged) and follows StructureValidationAction for what happens to the player - which defaults to Log, so the default is 'block it and post to Discord' without kicking or banning. A structure spawned this way is reported as a structure detection either way. The call is refused before the server relays it, so no other client receives it either. Works on its own; EnableStructureValidation is not required. Calls the server makes itself are never blocked, and admins are exempt while StructureValidationExemptAdmins is on. Turn this off in case a mod on your server legitimately has clients send this RPC; non-buildable structures sent through it are still refused while structure validation is on.");
             DetectExcessiveStructureHealth = BindServerConfig("World Integrity", "DetectExcessiveStructureHealth", true, "Flag a client that writes a piece's health above the maximum its prefab allows, which is how an indestructible structure is actually made - there is no separate invulnerability flag in Valheim, just an absurd number in the health field. The ceiling accounts for world modifiers that raise building health, and repairing a piece to full is never flagged. Health that was already too high before the client touched it is attributed to nobody, so walking past a cheated structure cannot get an innocent player reported; use Enforcer-Scan-Structures to find those. This is the one check that needs a hook on every ZDO the server deserializes - it compares against the health the object held before the client's write, which no longer exists once the packet is done - so the hook is only installed when this and EnableStructureValidation are both on at startup, and turning either on in a running server takes a restart before this check begins working. The other checks, and the server-side death handling under ServerSideJoinEnforcement, are unaffected either way.");
             StructureHealthAllowedMultiplier = BindServerConfig("World Integrity", "StructureHealthAllowedMultiplier", 1f, "Headroom on the health ceiling, for servers running a mod that raises piece health at runtime rather than on the prefab (a building-strength skill, for example). 1 means the prefab's own maximum, which is correct for vanilla and for mods that edit the prefab. Raise it only if legitimate pieces are being flagged, and prefer IgnoredStructurePrefabs if only a few prefabs are affected.", advanced: true, valmin: 1f, valmax: 1000f);
             StructureValidationAction = BindServerConfig("World Integrity", "StructureValidationAction", "Log", "Server-side action taken against a player caught placing invalid structures. Detections are always written to the server log and posted to Discord regardless of this setting; this only controls what happens to the player. Defaults to Log so a server can watch the detector for a while before letting it remove anybody.", new AcceptableValueList<string>("Log", "Kick", "Ban"));
@@ -529,6 +558,7 @@ namespace ValheimEnforcer {
             DiscordNotifyCheaterBanned = BindLocalConfig("Discord", "NotifyCheaterBanned", true, "Post a message when a player is banned for cheat usage, including the detected cheat(s).");
             DiscordNotifyCharacterRejected = BindLocalConfig("Discord", "NotifyCharacterRejected", true, "Post a message when a connection is refused by EnforceCharacterLimit, naming the character that was turned away.");
             DiscordNotifyItemOrigin = BindLocalConfig("Discord", "NotifyItemOrigin", true, "Post a message when a player gains equipment that has no crafter, or one no player here has ever reported. Inert unless DetectItemOrigins is on. One post per player per minute at most, however many items were involved - a cheat tool hands over a whole loadout at once, and a message per item would walk the webhook straight into Discord's rate limiter.");
+            DiscordNotifyCheatSuspected = BindLocalConfig("Discord", "NotifyCheatSuspected", true, "Post to the moderation channel when a client shows signs of anti-cheat tampering: a patched or detached cheat detector, a scan that stopped, or reports that never arrived. Medium confidence - nobody is kicked or banned for these alone. Inert unless DetectAntiCheatTampering or CheatScanHeartbeat is on.");
             DiscordNotifyClientContradiction = BindLocalConfig("Discord", "NotifyClientContradiction", true, "Post to the moderation channel when a connected player trips a server-side guard, naming what they declared at join. Inert unless ReportClientContradictions is on. One post per player per guard - a repeat of the same guard is not posted again, so a player hammering one of them cannot walk the webhook into Discord's rate limiter.");
             DiscordNotifyStructureFlagged = BindLocalConfig("Discord", "NotifyStructureFlagged", true, "Post a message when structure validation catches a player placing something no legitimate client can place, naming the prefab and where it landed. Inert unless EnableStructureValidation is on. One post per player per minute at most, however many objects were involved - a cheat tool drops a whole village at once, and a message per piece would walk the webhook straight into Discord's rate limiter.");
         }
@@ -1365,7 +1395,7 @@ loadouts: {}
         /// the server-side RoutedRpcGuard corrects it before the packet leaves the server; a client cannot
         /// forge the server's own uid past that.
         /// </summary>
-        private static bool FromServer(long sender) {
+        internal static bool FromServer(long sender) {
             if (ZNet.instance == null) { return false; }
             if (ZNet.instance.IsServer()) { return true; } // integrated host: a local send is from us
             ZNetPeer server = ZNet.instance.GetServerPeer();
@@ -1533,6 +1563,12 @@ loadouts: {}
                 yield break;
             }
 
+            if (summary == null) { yield break; }
+
+            // Before anything else is done with it: the heartbeat compares the highest number received against
+            // the number the client says it has sent, so a report that is refused below still counts as arrived.
+            CheatHeartbeat.NoteReportSeq(sender, summary.Seq);
+
             ZNetPeer peer = ZNet.instance.GetPeer(sender);
             if (peer == null) {
                 Logger.LogWarning($"Received a cheat report from {sender} but could not find the corresponding peer. No action will be taken.");
@@ -1549,6 +1585,14 @@ loadouts: {}
             // crafted report could otherwise kick or ban a different online player.
             string hostId = peer.m_socket.GetHostName();
             string endpoint = peer.m_socket.GetEndPointString();
+
+            // Unaccounted code travels in reports of its own and is judged quietly: one log line per build per
+            // session, and a ban only on a match against the server's own catalog or ban lists.
+            if (summary.UnaccountedCode != null && summary.UnaccountedCode.Count > 0) {
+                if (JudgeUnaccountedCode(peer, playerName, endpoint, summary)) { yield break; }
+            }
+            if (!summary.cheatsDetected()) { yield break; }
+
             Logger.LogWarning($"Cheat detection from {playerName} ({endpoint}): valheim-tooler: {summary.ValheimToolerStatus} tools: {DescribeDetectedTools(summary)}");
 
             // ValheimTooler is unambiguous cheat software; always ban regardless of ActionOnDetection.
@@ -1558,12 +1602,30 @@ loadouts: {}
                 yield break;
             }
 
+            // Proxy DLLs are judged by their hashes against the server's own tables, whatever confidence the
+            // client gave them: a build this server knows is banned even when the client did not know it.
+            if (JudgeProxyDetections(peer, playerName, summary)) { yield break; }
+            if (!summary.cheatsDetected()) {
+                Logger.LogDebug($"Every proxy detection from {playerName} was an allowed build; nothing left to act on.");
+                yield break;
+            }
+
             // Weak sightings (generic window classes shared by legitimate software) are visibility
-            // only. The flag is only ever trusted downward: a tampered client marking a tool weak
-            // gains nothing over not reporting it at all.
+            // only, and medium ones are logged and posted to the moderation channel. Both flags are only
+            // ever trusted downward: a tampered client marking a tool weak or medium gains nothing over not
+            // reporting it at all.
             List<DataObjects.CheatToolDetection> enforceable = new List<DataObjects.CheatToolDetection>();
             if (summary.DetectedTools != null) {
                 foreach (DataObjects.CheatToolDetection detection in summary.DetectedTools) {
+                    if (detection == null) { continue; }
+                    if (detection.Medium && !detection.Weak) {
+                        CheatHeartbeat.NoteFindingReported(sender, detection.Detail);
+                        string reason = detection.Tool == CheatSelfCheck.TamperLabel
+                            ? "reported by the client's anti-cheat self-check"
+                            : "reported by the client at medium confidence";
+                        CheatSuspicion.Report(peer, detection.Tool, detection.Detail, reason);
+                        continue;
+                    }
                     if (!detection.Weak) { enforceable.Add(detection); }
                 }
             }
@@ -1580,7 +1642,10 @@ loadouts: {}
             }
 
             if (enforceable.Count == 0) {
-                Logger.LogWarning($"Low-confidence sighting from {playerName} ({endpoint}), logged without action: {DescribeDetectedTools(summary)}");
+                bool anyWeak = summary.DetectedTools != null && summary.DetectedTools.Exists(d => d != null && d.Weak);
+                if (anyWeak) {
+                    Logger.LogWarning($"Low-confidence sighting from {playerName} ({endpoint}), logged without action: {DescribeDetectedTools(summary)}");
+                }
                 yield break;
             }
 
@@ -1593,7 +1658,7 @@ loadouts: {}
                 if (detection.Tool == null
                     || !detection.Tool.StartsWith(CheatToolCatalog.ProxyLoaderLabel, StringComparison.Ordinal)) { continue; }
                 Logger.LogWarning($"  ^ an unidentified proxy DLL - not a build known to be a cheat: {detection.Detail}");
-                Logger.LogWarning("    If you recognise it as legitimate, add that sha256 to AllowedProxyLoaderHashes and have the player rejoin. That exempts the one file and leaves the check working against anything else that turns up under the same name, unlike IgnoredCheatProcesses, which blinds the name.");
+                Logger.LogWarning("    If you recognise it as legitimate, add that sha256 to AllowedProxyLoaderHashes and have the player rejoin. That exempts the one file and leaves the check working against anything else that turns up under the same name, unlike IgnoredCheatProcesses, which blinds the name. If it is a cheat, add either hash to BannedProxyLoaderHashes and every later report of that build is a ban.");
             }
 
             // Everything else honors the configured action.
@@ -1650,7 +1715,8 @@ loadouts: {}
             if (summary.ValheimToolerStatus) { detections.Add("ValheimTooler"); }
             if (summary.DetectedTools != null) {
                 foreach (CheatToolDetection detection in summary.DetectedTools) {
-                    detections.Add($"{detection.Tool} ({detection.Vector}: {detection.Detail}){(detection.Weak ? " (weak)" : "")}");
+                    if (detection == null) { continue; }
+                    detections.Add($"{detection.Tool} ({detection.Vector}: {detection.Detail}){ConfidenceTag(detection)}");
                 }
             }
             string detail = detections.Count > 0 ? string.Join(", ", detections) : "cheat detected";
@@ -1662,8 +1728,24 @@ loadouts: {}
         // the server's own catalog for any enforcement decision, so truncating it here only affects display.
         private const int MaxCheatDetections = 32;
         private const int MaxCheatFieldLength = 256;
+        private const int MaxUnaccountedEntries = 16;
         private static void CapDetections(DataObjects.CheatSummaryReport summary) {
-            if (summary?.DetectedTools == null) { return; }
+            if (summary == null) { return; }
+            if (summary.UnaccountedCode != null) {
+                if (summary.UnaccountedCode.Count > MaxUnaccountedEntries) {
+                    summary.UnaccountedCode = summary.UnaccountedCode.GetRange(0, MaxUnaccountedEntries);
+                }
+                foreach (DataObjects.UnaccountedAssembly code in summary.UnaccountedCode) {
+                    if (code == null) { continue; }
+                    code.Name = Truncate(code.Name);
+                    code.Mvid = Truncate(code.Mvid);
+                    code.FileName = Truncate(code.FileName);
+                    code.Namespaces = CapList(code.Namespaces, CodeProvenance.MaxNamespaces);
+                    code.PatchOwners = CapList(code.PatchOwners, CodeProvenance.MaxNamespaces);
+                    code.PatchedTargets = CapList(code.PatchedTargets, CodeProvenance.MaxNamespaces);
+                }
+            }
+            if (summary.DetectedTools == null) { return; }
             if (summary.DetectedTools.Count > MaxCheatDetections) {
                 summary.DetectedTools = summary.DetectedTools.GetRange(0, MaxCheatDetections);
             }
@@ -1675,6 +1757,103 @@ loadouts: {}
             }
         }
 
+        private static List<string> CapList(List<string> values, int max) {
+            if (values == null) { return null; }
+            List<string> capped = new List<string>(Math.Min(values.Count, max));
+            foreach (string value in values) {
+                if (capped.Count >= max) { break; }
+                capped.Add(Truncate(value));
+            }
+            return capped;
+        }
+
+        private static string ConfidenceTag(DataObjects.CheatToolDetection d) {
+            if (d.Weak) { return " (weak)"; }
+            return d.Medium ? " (medium)" : "";
+        }
+
+        /// <summary>
+        /// Judges every proxy detection in a report by its hashes, against the server's own tables. Bans and
+        /// returns true on a build the server knows; drops detections of builds the admin has allowed.
+        /// </summary>
+        private static bool JudgeProxyDetections(ZNetPeer peer, string playerName, DataObjects.CheatSummaryReport summary) {
+            if (summary.DetectedTools == null) { return false; }
+            for (int i = summary.DetectedTools.Count - 1; i >= 0; i--) {
+                DataObjects.CheatToolDetection d = summary.DetectedTools[i];
+                if (d == null) {
+                    summary.DetectedTools.RemoveAt(i);
+                    continue;
+                }
+                if (!string.Equals(d.Vector, "proxy", StringComparison.Ordinal)) { continue; }
+                CheatToolCatalog.ServerProxyOutcome outcome = CheatToolCatalog.ServerProxyVerdict(d.Detail, out string tool, out string hash);
+                if (outcome == CheatToolCatalog.ServerProxyOutcome.Banned) {
+                    // The server's own label, so the ban reason and the Discord post name what it is.
+                    d.Tool = tool;
+                    d.Weak = false;
+                    d.Medium = false;
+                    Logger.LogWarning($"Banning {playerName} for {tool}: a proxy DLL this server knows by its hash ({hash}).");
+                    BanCheater(peer, playerName, summary);
+                    return true;
+                }
+                if (outcome == CheatToolCatalog.ServerProxyOutcome.Allowed) {
+                    Logger.LogDebug($"Proxy DLL reported by {playerName} is allowed by AllowedProxyLoaderHashes ({hash}).");
+                    summary.DetectedTools.RemoveAt(i);
+                }
+            }
+            return false;
+        }
+
+        // Unaccounted builds already written to the log this session, by what was said about them, so a
+        // build shared by many players is logged once and again only when something new is learned about it.
+        private static readonly HashSet<string> loggedUnaccounted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private const int MaxLoggedUnaccounted = 4096;
+
+        /// <summary>
+        /// Judges the unaccounted code in a report. Bans and returns true on a match the server's own catalog
+        /// or ban lists say to ban on; otherwise logs each build once.
+        /// </summary>
+        private static bool JudgeUnaccountedCode(ZNetPeer peer, string playerName, string endpoint, DataObjects.CheatSummaryReport summary) {
+            foreach (DataObjects.UnaccountedAssembly code in summary.UnaccountedCode) {
+                if (code == null) { continue; }
+                string tool = CheatToolCatalog.ServerCodeVerdict(code, out bool ban);
+                string described = DescribeUnaccounted(code);
+                if (tool != null && ban) {
+                    Logger.LogWarning($"Banning {playerName} for {tool}: unaccounted code {described}.");
+                    // Stated as a detection so the ban reason and the Discord post say what it was.
+                    summary.DetectedTools = new List<DataObjects.CheatToolDetection> {
+                        new DataObjects.CheatToolDetection { Tool = tool, Vector = "code", Detail = Truncate(described) }
+                    };
+                    BanCheater(peer, playerName, summary);
+                    return true;
+                }
+                if (loggedUnaccounted.Count >= MaxLoggedUnaccounted) { loggedUnaccounted.Clear(); }
+                if (!loggedUnaccounted.Add(described)) { continue; }
+                Logger.LogWarning($"Unaccounted code on {playerName} ({endpoint}), logged without action: {described}{(tool != null ? $" - resembles {tool}" : "")}. " +
+                                  "If it is a cheat, put its MVID in BannedAssemblyMvids or a namespace in BannedAssemblyNamespaces.");
+            }
+            return false;
+        }
+
+        private static string DescribeUnaccounted(DataObjects.UnaccountedAssembly code) {
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            sb.Append(code.Name ?? "?").Append(" mvid=").Append(code.Mvid ?? "?");
+            sb.Append(code.FromBytes ? " loaded from memory" : $" file={code.FileName ?? "?"}");
+            if (code.Namespaces != null && code.Namespaces.Count > 0) { sb.Append(" namespaces=").Append(string.Join(",", code.Namespaces)); }
+            if (code.PatchOwners != null && code.PatchOwners.Count > 0) { sb.Append(" harmony=").Append(string.Join(",", code.PatchOwners)); }
+            if (code.PatchedTargets != null && code.PatchedTargets.Count > 0) { sb.Append(" patches=").Append(string.Join(",", code.PatchedTargets)); }
+            if (code.DrawsGui) { sb.Append(" draws-gui"); }
+            return sb.ToString();
+        }
+
+        /// <summary>Drops the per-session cheat report state. Called when the server shuts down.</summary>
+        internal static void ResetCheatReportState() {
+            loggedUnaccounted.Clear();
+        }
+
+        internal static string TruncateCheatField(string s) {
+            return Truncate(s);
+        }
+
         private static string Truncate(string s) {
             if (string.IsNullOrEmpty(s) || s.Length <= MaxCheatFieldLength) { return s; }
             return s.Substring(0, MaxCheatFieldLength);
@@ -1683,7 +1862,7 @@ loadouts: {}
         // Compact one-line rendering of the reported tools for the server log.
         private static string DescribeDetectedTools(DataObjects.CheatSummaryReport summary) {
             if (summary.DetectedTools == null || summary.DetectedTools.Count == 0) { return "none"; }
-            return string.Join(", ", summary.DetectedTools.Select(d => $"{d.Tool} [{d.Vector}: {d.Detail}]{(d.Weak ? " (weak)" : "")}"));
+            return string.Join(", ", summary.DetectedTools.Where(d => d != null).Select(d => $"{d.Tool} [{d.Vector}: {d.Detail}]{ConfidenceTag(d)}"));
         }
 
         public static IEnumerator OnClientReceiveCheatReport(long sender, ZPackage package) {
@@ -1919,6 +2098,10 @@ loadouts: {}
             // Both detectors below want the same two answers, and both are expensive enough to be worth not
             // asking for twice: ZNet.IsAdmin builds several strings per call, and this runs for every delta
             // from every player. Resolved once, and only when something will use the result.
+            // Cheat tool markers on the items this delta adds. Its own switch rather than the origin check's: it
+            // reads a different thing, and only ever logs.
+            CheatArtifacts.InspectDelta(deltaUpdate, deltaUpdate.HostID, deltaUpdate.Name);
+
             bool inspectOrigins = modules.worldintegrity.ItemOriginValidator.Enabled();
             bool inspectGrid = modules.worldintegrity.InventoryBoundsValidator.Enabled();
             if (inspectOrigins || inspectGrid) {

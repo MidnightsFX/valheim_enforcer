@@ -57,6 +57,9 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             // holding that set. Bumping the generation makes the NEXT scan's captured policy key differ, so the
             // worker clears it itself - keeping every write to that set on the one thread that owns it.
             sessionGeneration++;
+            // Per-session, like the report latch: the next server starts counting from 1.
+            reportSeq = 0;
+            latestSelfCheckFindings = null;
             Logger.LogDebug("CheatDetector torn down.");
         }
 
@@ -226,7 +229,8 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// a cheat which has already injected and then closed its launcher, and it is unaffected by
         /// renaming the tool's executable.
         /// </summary>
-        internal static List<CheatToolDetection> ScanLoadedModules(List<CheatToolSignature> signatures, string policyKey, bool detectProxies) {
+        internal static List<CheatToolDetection> ScanLoadedModules(List<CheatToolSignature> signatures, string policyKey, bool detectProxies,
+                                                                    bool detectGameFolder, string gameRoot, CheatToolCatalog.DoorstopContext doorstop) {
             List<CheatToolDetection> found = new List<CheatToolDetection>();
             StallWatch timer = StallWatch.StartBackground("Cheat scan: loaded module enumeration");
             try {
@@ -237,6 +241,10 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                     seenModules.Clear();
                     moduleScanPolicy = policyKey;
                 }
+
+                // Listed on every module pass, not once: a DLL copied into the folder mid-session and then loaded
+                // has to be recognised on the pass that first sees its handle, because it is never looked at again.
+                HashSet<string> gameFolderDlls = detectGameFolder ? UnlistedGameFolderDlls(gameRoot) : null;
 
                 foreach (LoadedModule module in NewlyLoadedModules()) {
                     string name = module.Name;
@@ -257,9 +265,14 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                     }
 
                     // Path resolution is deliberately behind the name test: it is a syscall per module, and
-                    // only a handful of names can possibly be a proxy loader.
-                    if (detectProxies && CheatToolCatalog.IsProxyLoaderName(name)) {
-                        InspectProxyModule(found, module, ignored);
+                    // only a handful of names can possibly be a proxy loader - those in the proxy family, and
+                    // those of the DLLs actually sitting in the game folder.
+                    bool proxyName = detectProxies && CheatToolCatalog.IsProxyLoaderName(name);
+                    bool gameFolderName = gameFolderDlls != null && gameFolderDlls.Contains(name);
+                    if (proxyName || gameFolderName) {
+                        // A name known only from the folder listing counts only when that is where it came from:
+                        // the same name loaded from anywhere else is a different file.
+                        InspectProxyModule(found, module, ignored, doorstop, proxyName ? null : gameRoot);
                     }
                 }
             } catch (Exception e) {
@@ -268,6 +281,27 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 timer.Stop();
             }
             return found;
+        }
+
+        // DLLs the game itself ships in its own folder. Everything else found there was put there by something
+        // else - BepInEx's doorstop among them, which the doorstop check judges on its own terms.
+        private static readonly HashSet<string> ShippedGameFolderDlls = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            "UnityPlayer.dll"
+        };
+
+        /// <summary>The DLL file names in the game folder that the game does not ship there. Worker-thread safe.</summary>
+        private static HashSet<string> UnlistedGameFolderDlls(string gameRoot) {
+            HashSet<string> names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(gameRoot)) { return names; }
+            try {
+                foreach (string file in System.IO.Directory.GetFiles(gameRoot, "*.dll", System.IO.SearchOption.TopDirectoryOnly)) {
+                    string fileName = System.IO.Path.GetFileName(file);
+                    if (!ShippedGameFolderDlls.Contains(fileName)) { names.Add(fileName); }
+                }
+            } catch (Exception e) {
+                Logger.LogDebug($"CheatDetector could not list the game folder: {e.Message}");
+            }
+            return names;
         }
 
         /// <summary>
@@ -281,28 +315,49 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// exactly as it does for every other detection, and a build known to be legitimate is how this
         /// tells a mod manager's loader from a cheat one when nothing about the name or the folder can.
         /// </summary>
-        private static void InspectProxyModule(List<CheatToolDetection> found, LoadedModule module, bool nameIgnored) {
+        private static void InspectProxyModule(List<CheatToolDetection> found, LoadedModule module, bool nameIgnored,
+                                               CheatToolCatalog.DoorstopContext doorstop, string requiredDirectory) {
             string path = ResolveModulePath(module);
             if (!CheatToolCatalog.ProxyNeedsInspection(path)) { return; }
+            if (requiredDirectory != null && !SameDirectory(DirectoryOf(path), requiredDirectory)) { return; }
 
             // Hashed before anything is decided, and for both tiers rather than only the enforceable one.
             // What it buys is that no exemption below it can speak for a build already known to be a cheat,
             // and that such a build is named rather than merely logged even when it turns up under one of
             // the low-confidence names. The cost is one read per module per session for the one or two
-            // files on a machine that get this far - PluginHasher caches by path, length and mtime.
+            // files on a machine that get this far - both hashes cache by path, length and mtime.
             string hash = PluginHasher.HashFile(path, out string _);
+            string code = PeCodeHash.HashFile(path);
 
-            ProxyVerdict verdict = CheatToolCatalog.JudgeProxyModule(module.Name, path, hash, nameIgnored, out string tool);
+            ProxyVerdict verdict = CheatToolCatalog.JudgeProxyModule(module.Name, path, hash, code, nameIgnored, doorstop,
+                out string tool, out string note);
             if (verdict == ProxyVerdict.None) { return; }
 
-            // The hash goes ahead of the directory: the server caps this field at 256 characters and
-            // truncates from the end, and the hash is the half an admin has to be able to copy out.
-            string detail = hash != null
-                ? $"{module.Name} sha256={hash} at {DirectoryOf(path)}"
-                : $"{module.Name} at {DirectoryOf(path)}";
+            // The hashes go first: the server caps this field at 256 characters and truncates from the end,
+            // and the hashes are what the server judges and what an admin has to be able to copy out. The
+            // name is capped for the same reason, so no file name can push them past the cut.
+            string name = module.Name.Length > MaxModuleNameInDetail ? module.Name.Substring(0, MaxModuleNameInDetail) : module.Name;
+            StringBuilder detail = new StringBuilder(256);
+            if (hash != null) { detail.Append("sha256=").Append(hash).Append(' '); }
+            if (code != null) { detail.Append("code=").Append(code).Append(' '); }
+            detail.Append(name);
+            if (note != null) { detail.Append(' ').Append(note); }
+            detail.Append(" at ").Append(DirectoryOf(path));
 
-            Add(found, tool ?? $"{CheatToolCatalog.ProxyLoaderLabel} ({module.Name})", "proxy", detail,
+            Add(found, tool ?? $"{CheatToolCatalog.ProxyLoaderLabel} ({name})", "proxy", detail.ToString(),
                 verdict == ProxyVerdict.Weak);
+        }
+
+        private const int MaxModuleNameInDetail = 64;
+
+        private static bool SameDirectory(string a, string b) {
+            try {
+                string fa = System.IO.Path.GetFullPath(a).TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+                string fb = System.IO.Path.GetFullPath(b).TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
+                return string.Equals(fa, fb, StringComparison.OrdinalIgnoreCase);
+            } catch (Exception) {
+                return false;
+            }
         }
 
         // The directory rather than the full path: the file name is already in the detail, and the directory
@@ -495,20 +550,26 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             return found;
         }
 
-        // One entry per tool per scan; the first sighting carries the detail, except that a strong
-        // sighting replaces a weak one so enumeration order cannot hide enforceable evidence.
-        private static void Add(List<CheatToolDetection> found, string tool, string vector, string detail, bool weak = false) {
+        // One entry per tool per scan; the first sighting carries the detail, except that a higher-confidence
+        // sighting replaces a lower one so enumeration order cannot hide enforceable evidence.
+        private static void Add(List<CheatToolDetection> found, string tool, string vector, string detail, bool weak = false, bool medium = false) {
+            CheatToolDetection incoming = new CheatToolDetection { Tool = tool, Vector = vector, Detail = detail, Weak = weak, Medium = medium && !weak };
             foreach (CheatToolDetection existing in found) {
                 if (existing.Tool == tool) {
-                    if (existing.Weak && !weak) {
-                        existing.Weak = false;
+                    if (Rank(existing) < Rank(incoming)) {
+                        existing.Weak = incoming.Weak;
+                        existing.Medium = incoming.Medium;
                         existing.Vector = vector;
                         existing.Detail = detail;
                     }
                     return;
                 }
             }
-            found.Add(new CheatToolDetection { Tool = tool, Vector = vector, Detail = detail, Weak = weak });
+            found.Add(incoming);
+        }
+
+        private static int Rank(CheatToolDetection d) {
+            return d.Weak ? 0 : d.Medium ? 1 : 2;
         }
 
         //internal static bool DebuggerAttached(out string detail) {
@@ -547,6 +608,99 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 }
             } catch (Exception e) {
                 Logger.LogDebug($"CheatDetector.ReportCheatScanSummary failed: {e.Message}");
+            }
+        }
+
+        // ---- Heartbeat support ------------------------------------------------------------------------------
+
+        // Numbers this session's reports, from 1. Taken before a report is handed to the network, so the number
+        // the heartbeat answer carries is the number of reports this client meant to send. Reset per session.
+        private static int reportSeq;
+
+        // What the latest self-check found, for the heartbeat answer. Replaced wholesale, never mutated.
+        private static List<string> latestSelfCheckFindings;
+
+        private static int NextReportSeq() {
+            return ++reportSeq;
+        }
+
+        /// <summary>The detector's state as the heartbeat answer reports it. Main thread.</summary>
+        internal static void HeartbeatSnapshot(out CheatHeartbeat.DetectorState state, out float sinceUpdate, out int lastSeq, out List<string> findings) {
+            lastSeq = reportSeq;
+            findings = latestSelfCheckFindings;
+            sinceUpdate = -1f;
+            if (ValConfig.EnableCheatDetection != null && !ValConfig.EnableCheatDetection.Value) {
+                state = CheatHeartbeat.DetectorState.Disabled;
+                return;
+            }
+            CheatDetectorBehaviour live = instance;
+            if (live == null || !live.EverRan) {
+                state = CheatHeartbeat.DetectorState.NotStarted;
+                return;
+            }
+            state = CheatHeartbeat.DetectorState.Running;
+            sinceUpdate = Mathf.Max(0f, Time.unscaledTime - live.LastUpdateTime);
+        }
+
+        // ---- Harmony walk -----------------------------------------------------------------------------------
+
+        /// <summary>What one walk over every Harmony-patched method found.</summary>
+        internal sealed class HarmonyWalk {
+            internal readonly HashSet<string> Owners = new HashSet<string>(StringComparer.Ordinal);
+            internal readonly Dictionary<Assembly, HarmonyAttribution> ByAssembly = new Dictionary<Assembly, HarmonyAttribution>();
+        }
+
+        internal sealed class HarmonyAttribution {
+            internal readonly SortedSet<string> Owners = new SortedSet<string>(StringComparer.Ordinal);
+            internal readonly List<string> Targets = new List<string>();
+        }
+
+        private const int MaxAttributedTargets = 5;
+
+        /// <summary>
+        /// Walks every patched method once, collecting every owner id and, for the assemblies in
+        /// <paramref name="watched"/>, which owners and targets their patches belong to. Runs on a worker:
+        /// it touches no Unity object, and <paramref name="watched"/> is a copy nothing else holds.
+        /// </summary>
+        internal static HarmonyWalk WalkHarmony(HashSet<Assembly> watched) {
+            HarmonyWalk walk = new HarmonyWalk();
+            StallWatch timer = StallWatch.StartBackground("Cheat scan: Harmony patch walk");
+            try {
+                foreach (MethodBase original in HarmonyLib.Harmony.GetAllPatchedMethods()) {
+                    HarmonyLib.Patches info;
+                    try { info = HarmonyLib.Harmony.GetPatchInfo(original); } catch (Exception) { continue; }
+                    if (info == null) { continue; }
+                    foreach (string owner in info.Owners) { if (owner != null) { walk.Owners.Add(owner); } }
+                    if (watched == null || watched.Count == 0) { continue; }
+                    Attribute(walk, watched, original, info.Prefixes);
+                    Attribute(walk, watched, original, info.Postfixes);
+                    Attribute(walk, watched, original, info.Transpilers);
+                    Attribute(walk, watched, original, info.Finalizers);
+                    Attribute(walk, watched, original, info.ILManipulators);
+                }
+            } catch (Exception e) {
+                Logger.LogDebug($"CheatDetector could not walk the Harmony patches: {e.Message}");
+            } finally {
+                timer.Stop();
+            }
+            return walk;
+        }
+
+        private static void Attribute(HarmonyWalk walk, HashSet<Assembly> watched, MethodBase original, IEnumerable<HarmonyLib.Patch> patches) {
+            if (patches == null) { return; }
+            foreach (HarmonyLib.Patch patch in patches) {
+                Assembly source;
+                try { source = patch?.PatchMethod?.DeclaringType?.Assembly; } catch (Exception) { continue; }
+                if (source == null || !watched.Contains(source)) { continue; }
+                if (!walk.ByAssembly.TryGetValue(source, out HarmonyAttribution attribution)) {
+                    attribution = new HarmonyAttribution();
+                    walk.ByAssembly[source] = attribution;
+                }
+                if (!string.IsNullOrEmpty(patch.owner)) { attribution.Owners.Add(CodeProvenance.Cap(patch.owner)); }
+                if (attribution.Targets.Count < MaxAttributedTargets) {
+                    string target = CodeProvenance.Cap($"{original.DeclaringType?.Name}.{original.Name}");
+                    if (!attribution.Targets.Contains(target)) { attribution.Targets.Add(target); }
+                }
             }
         }
 
@@ -621,14 +775,29 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         internal class CheatDetectorBehaviour : MonoBehaviour {
             private float nextScan;
 
-            // Assemblies (by full name) already type-inspected. Ensures GetTypes() runs at most
-            // once per assembly for the lifetime of the behaviour. Main-thread only.
-            private readonly HashSet<string> inspected = new HashSet<string>();
+            // Assemblies already type-inspected, by reference. Ensures GetTypes() runs at most once per
+            // assembly for the lifetime of the behaviour. A name is not an identity - two assemblies can carry
+            // the same full name - so this is keyed by the loaded assembly itself; nothing is ever unloaded
+            // from the default domain, so holding the reference keeps nothing alive that was not already.
+            // Main-thread only.
+            private readonly HashSet<Assembly> inspected = new HashSet<Assembly>();
+
+            // Assemblies already judged for provenance (ReportUnaccountedCode), by reference. Separate from the
+            // set above so that switching that setting on mid-session still judges everything loaded so far.
+            private readonly HashSet<Assembly> classified = new HashSet<Assembly>();
+
+            // Assemblies a catalog signature matched. Already reported as the tool itself, so not again as
+            // unaccounted code.
+            private readonly HashSet<Assembly> matched = new HashSet<Assembly>();
 
             // Newly-loaded assemblies queued by the AssemblyLoad event. The event can fire on a
             // non-Unity thread while the assembly is still loading, so we only enqueue here and
             // inspect on the main thread in Update() where types are fully available.
             private readonly ConcurrentQueue<Assembly> pending = new ConcurrentQueue<Assembly>();
+
+            // The delegate this behaviour subscribed with, kept so the self-check can ask whether it is still
+            // subscribed and OnDisable removes the very same one.
+            private AssemblyLoadEventHandler loadHandler;
 
             // Assembly matches found but not yet sent, because a report is addressed with the local
             // character identity and that is not available until the world has loaded. Injection typically
@@ -650,17 +819,46 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             // the same frame. Process enumeration in particular is a blocking syscall.
             private int scanPhase;
 
+            // Counts periodic ticks, for the checks that run on every SlowCheckEvery-th one.
+            private int scanTick;
+            private const int SlowCheckEvery = 10;
+
             // The scan in flight, or null. Process and module enumeration are blocking Windows
             // syscalls that take hundreds of milliseconds on a modded install, so they run off the
             // main thread; Update collects the result and does the reporting back on the main thread.
             private Task<List<CheatToolDetection>> scanTask;
 
+            // The Harmony walk in flight, or null. Same arrangement as scanTask, on its own slot so it never
+            // delays the rotation above.
+            private Task<HarmonyWalk> harmonyTask;
+            private List<CheatToolSignature> harmonyTaskSignatures;
+
+            // Unaccounted assemblies, what has been learned about each, and what the server was last told.
+            private sealed class UnaccountedEntry {
+                internal DataObjects.UnaccountedAssembly Report;
+                internal List<Type> GuiTypes;
+                internal string SentSignature;
+            }
+            private readonly Dictionary<Assembly, UnaccountedEntry> unaccounted = new Dictionary<Assembly, UnaccountedEntry>();
+            private const int MaxUnaccountedPerReport = 16;
+            // Set whenever an entry is added or learns something, so the per-frame send check costs nothing
+            // in the steady state.
+            private bool unaccountedDirty;
+
+            // The self-check findings already queued for a report.
+            private readonly HashSet<string> reportedFindings = new HashSet<string>(StringComparer.Ordinal);
+
+            // Read by the heartbeat answer.
+            internal float LastUpdateTime { get; private set; }
+            internal bool EverRan { get; private set; }
+
             private void OnEnable() {
-                AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoaded;
+                loadHandler = OnAssemblyLoaded;
+                AppDomain.CurrentDomain.AssemblyLoad += loadHandler;
             }
 
             private void OnDisable() {
-                AppDomain.CurrentDomain.AssemblyLoad -= OnAssemblyLoaded;
+                if (loadHandler != null) { AppDomain.CurrentDomain.AssemblyLoad -= loadHandler; }
             }
 
             private void Start() {
@@ -677,6 +875,9 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             }
 
             private void Update() {
+                LastUpdateTime = Time.unscaledTime;
+                EverRan = true;
+
                 // Always drain the queue so it cannot grow unbounded, even while disabled.
                 bool enabled = ValConfig.EnableCheatDetection.Value;
                 DrainPending(enabled);
@@ -690,6 +891,11 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 }
 
                 CollectFinishedScan();
+                CollectHarmonyWalk();
+
+                if (unaccountedDirty && CharacterManager.PlayerCharacter != null) {
+                    ReportUnaccounted();
+                }
 
                 if (Time.unscaledTime < nextScan) { return; }
                 nextScan = Time.unscaledTime + Mathf.Max(5, ValConfig.CheatScanIntervalSeconds.Value);
@@ -723,17 +929,35 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 }
             }
 
-            // Inspects an assembly exactly once (deduped by full name). Queues the detection; the actual
+            // Inspects an assembly exactly once (deduped by reference). Queues the detection; the actual
             // report goes out from Update once the player identity is known.
             private void InspectAssembly(Assembly asm, List<CheatToolSignature> signatures) {
                 if (asm == null) { return; }
-                string id = asm.FullName;
-                if (id != null && !inspected.Add(id)) { return; }
+                if (!inspected.Add(asm)) { return; }
 
                 if (!MatchAssembly(asm, signatures, out string tool, out string detail)) { return; }
+                matched.Add(asm);
                 if (tool == CheatToolCatalog.ToolerLabel) { toolerDetected = true; }
                 Add(pendingAssemblyDetections, tool, "assembly", detail);
                 Logger.LogWarning($"Injected cheat assembly detected: {tool} ({detail}).");
+            }
+
+            /// <summary>
+            /// Judges one assembly's provenance, once. An unaccounted one is described and queued for the
+            /// server; see CodeProvenance for what accounts for an assembly.
+            /// </summary>
+            private void Classify(Assembly asm) {
+                if (asm == null || !classified.Add(asm)) { return; }
+                if (matched.Contains(asm)) { return; }
+                try {
+                    if (CodeProvenance.IsAccounted(asm)) { return; }
+                    DataObjects.UnaccountedAssembly report = CodeProvenance.Describe(asm, out List<Type> guiTypes);
+                    unaccounted[asm] = new UnaccountedEntry { Report = report, GuiTypes = guiTypes };
+                    unaccountedDirty = true;
+                    Logger.LogDebug($"Unaccounted code loaded: {report.Name} ({report.Mvid}){(report.FromBytes ? " from memory" : $" from {report.FileName}")}.");
+                } catch (Exception e) {
+                    Logger.LogDebug($"CheatDetector could not judge an assembly's provenance: {e.Message}");
+                }
             }
 
             /// <summary>
@@ -762,19 +986,63 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 }
             }
 
-            private void RunPeriodicScan() {
-                // Fallback assembly sweep: covers the case a native injector loads an assembly without
-                // raising the managed AssemblyLoad event, which is the shape of every proxy loader that
-                // boots before this detector exists. Assemblies already inspected are skipped by full
-                // name, so in steady state this is a few hundred hash lookups and no reflection at all.
-                if (ValConfig.DetectInjectedCheatAssemblies.Value) {
-                    List<CheatToolSignature> assemblySignatures = CheatToolCatalog.AssemblySignatures();
-                    if (assemblySignatures.Count > 0) {
-                        foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies()) {
-                            InspectAssembly(asm, assemblySignatures);
+            /// <summary>
+            /// Takes a finished Harmony walk back onto the main thread: catalogued owner ids become detections,
+            /// and what the unaccounted assemblies patch is attached to their entries.
+            /// </summary>
+            private void CollectHarmonyWalk() {
+                if (harmonyTask == null || !harmonyTask.IsCompleted) { return; }
+                Task<HarmonyWalk> finished = harmonyTask;
+                List<CheatToolSignature> signatures = harmonyTaskSignatures;
+                harmonyTask = null;
+                harmonyTaskSignatures = null;
+                if (finished.Status != TaskStatus.RanToCompletion) {
+                    if (finished.Exception != null) {
+                        Logger.LogDebug($"CheatDetector Harmony walk failed: {finished.Exception.GetBaseException().Message}");
+                    }
+                    return;
+                }
+                HarmonyWalk walk = finished.Result;
+                if (walk == null) { return; }
+
+                if (signatures != null) {
+                    foreach (CheatToolSignature sig in signatures) {
+                        foreach (string id in sig.HarmonyIds) {
+                            if (string.IsNullOrEmpty(id) || !walk.Owners.Contains(id)) { continue; }
+                            Add(pendingAssemblyDetections, sig.Tool, "harmony", $"owner={id}");
+                            Logger.LogWarning($"Injected cheat detected by its Harmony id: {sig.Tool} (owner={id}).");
                         }
                     }
                 }
+
+                foreach (KeyValuePair<Assembly, HarmonyAttribution> entry in walk.ByAssembly) {
+                    if (!unaccounted.TryGetValue(entry.Key, out UnaccountedEntry known)) { continue; }
+                    known.Report.PatchOwners = new List<string>(entry.Value.Owners);
+                    known.Report.PatchedTargets = new List<string>(entry.Value.Targets);
+                    unaccountedDirty = true;
+                }
+            }
+
+            private void RunPeriodicScan() {
+                bool slowTick = scanTick++ % SlowCheckEvery == 0;
+
+                // Fallback assembly sweep: covers the case a native injector loads an assembly without
+                // raising the managed AssemblyLoad event, which is the shape of every proxy loader that
+                // boots before this detector exists. Assemblies already inspected are skipped by reference,
+                // so in steady state this is a few hundred hash lookups and no reflection at all. The
+                // provenance judgement rides the same walk for the same reason.
+                List<CheatToolSignature> assemblySignatures = ValConfig.DetectInjectedCheatAssemblies.Value
+                    ? CheatToolCatalog.AssemblySignatures() : null;
+                bool matchAssemblies = assemblySignatures != null && assemblySignatures.Count > 0;
+                bool classifyCode = ValConfig.ReportUnaccountedCode.Value;
+                if (matchAssemblies || classifyCode) {
+                    foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies()) {
+                        if (matchAssemblies) { InspectAssembly(asm, assemblySignatures); }
+                        if (classifyCode) { Classify(asm); }
+                    }
+                }
+
+                if (slowTick) { RunSlowChecks(assemblySignatures, classifyCode); }
 
                 // Identity comes from the character save, and the report is useless without it.
                 if (CharacterManager.PlayerCharacter == null) { return; }
@@ -803,6 +1071,9 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 int phase = scanPhase++ % 3;
                 bool scanModules = ValConfig.ScanLoadedModules.Value;
                 bool detectProxies = ValConfig.DetectProxyLoaders.Value;
+                bool detectGameFolder = ValConfig.DetectUnlistedGameFolderDlls.Value;
+                CheatToolCatalog.DoorstopContext doorstop = CheatToolCatalog.DoorstopContext.Current(ValConfig.VerifyDoorstopTarget.Value);
+                string gameRoot = doorstop.GameRoot;
                 bool scanElevated = ValConfig.ScanElevatedProcesses.Value;
                 bool scanWindows = ValConfig.ScanWindowTitles.Value
                     && (Application.platform == RuntimePlatform.WindowsPlayer
@@ -816,25 +1087,107 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                         case 0:
                             return ScanProcesses(signatures, genericTrainers, scanElevated);
                         case 1:
-                            return scanModules ? ScanLoadedModules(signatures, policyKey, detectProxies) : new List<CheatToolDetection>();
+                            return scanModules
+                                ? ScanLoadedModules(signatures, policyKey, detectProxies, detectGameFolder, gameRoot, doorstop)
+                                : new List<CheatToolDetection>();
                         default:
                             return scanWindows ? ScanWindows(signatures) : new List<CheatToolDetection>();
                     }
                 });
             }
 
-            // Sends only tools not already reported this session, in a single report. Weak and
-            // strong sightings latch under separate keys so an early weak sighting (a generic
-            // window class) cannot suppress a later enforceable detection of the same tool.
+            /// <summary>
+            /// The checks that do not need to run every tick: the self-check, the Harmony walk and the check for
+            /// unaccounted code that draws on screen. Main thread; the walk itself is handed to a worker.
+            /// </summary>
+            private void RunSlowChecks(List<CheatToolSignature> assemblySignatures, bool classifyCode) {
+                if (ValConfig.DetectAntiCheatTampering.Value) {
+                    List<string> findings = CheatSelfCheck.Run(loadHandler);
+                    latestSelfCheckFindings = findings;
+                    foreach (string finding in findings) {
+                        if (!reportedFindings.Add(finding)) { continue; }
+                        string vector = finding.IndexOf(" subscription ", StringComparison.Ordinal) >= 0 ? "event" : "harmony";
+                        Add(pendingAssemblyDetections, CheatSelfCheck.TamperLabel, vector, finding, medium: true);
+                    }
+                } else {
+                    latestSelfCheckFindings = null;
+                }
+
+                if (classifyCode) {
+                    foreach (UnaccountedEntry entry in unaccounted.Values) {
+                        if (entry.Report.DrawsGui || entry.GuiTypes == null || entry.GuiTypes.Count == 0) { continue; }
+                        if (CodeProvenance.AnyLive(entry.GuiTypes)) {
+                            entry.Report.DrawsGui = true;
+                            unaccountedDirty = true;
+                        }
+                    }
+                }
+
+                // One walk answers both questions. Only worth it when something will read the answer.
+                if (harmonyTask != null) { return; }
+                List<CheatToolSignature> withIds = null;
+                if (assemblySignatures != null) {
+                    foreach (CheatToolSignature sig in assemblySignatures) {
+                        if (sig.HarmonyIds.Length == 0) { continue; }
+                        if (withIds == null) { withIds = new List<CheatToolSignature>(); }
+                        withIds.Add(sig);
+                    }
+                }
+                HashSet<Assembly> watched = classifyCode && unaccounted.Count > 0 ? new HashSet<Assembly>(unaccounted.Keys) : null;
+                if (withIds == null && watched == null) { return; }
+                harmonyTaskSignatures = withIds;
+                harmonyTask = Task.Run(() => WalkHarmony(watched));
+            }
+
+            /// <summary>
+            /// Sends what is new or changed about unaccounted assemblies, in a report of its own so it can never
+            /// push a detection report past the server's size limit.
+            /// </summary>
+            private void ReportUnaccounted() {
+                if (!ValConfig.ReportUnaccountedCode.Value) { return; }
+                List<DataObjects.UnaccountedAssembly> batch = null;
+                bool more = false;
+                foreach (UnaccountedEntry entry in unaccounted.Values) {
+                    string signature = Signature(entry.Report);
+                    if (signature == entry.SentSignature) { continue; }
+                    if (batch == null) { batch = new List<DataObjects.UnaccountedAssembly>(); }
+                    if (batch.Count >= MaxUnaccountedPerReport) { more = true; break; } // the rest go on the next frame
+                    batch.Add(entry.Report);
+                    entry.SentSignature = signature;
+                }
+                unaccountedDirty = more;
+                if (batch == null) { return; }
+
+                ReportCheatScanSummary(new CheatSummaryReport {
+                    PlayerName = CharacterManager.PlayerCharacter.Name,
+                    PlatformID = CharacterManager.PlayerCharacter.HostID,
+                    UnaccountedCode = batch,
+                    Seq = NextReportSeq()
+                });
+            }
+
+            private static string Signature(DataObjects.UnaccountedAssembly report) {
+                string owners = report.PatchOwners == null ? "" : string.Join(",", report.PatchOwners);
+                string targets = report.PatchedTargets == null ? "" : string.Join(",", report.PatchedTargets);
+                return $"{report.Mvid}|{owners}|{targets}|{report.DrawsGui}";
+            }
+
+            // Sends only tools not already reported this session, in a single report. Weak, medium and
+            // strong sightings latch under separate keys so an early low-confidence sighting cannot suppress
+            // a later enforceable detection of the same tool.
             private void ReportNewDetections(List<CheatToolDetection> detections) {
                 List<CheatToolDetection> fresh = null;
                 foreach (CheatToolDetection d in detections) {
-                    if (d.Weak && reportedTools.Contains(d.Tool)) { continue; }
-                    if (!reportedTools.Add(d.Weak ? d.Tool + "|weak" : d.Tool)) { continue; }
+                    string key = d.Weak ? d.Tool + "|weak" : d.Medium ? d.Tool + "|medium" : d.Tool;
+                    if (d.Weak && (reportedTools.Contains(d.Tool) || reportedTools.Contains(d.Tool + "|medium"))) { continue; }
+                    if (d.Medium && reportedTools.Contains(d.Tool)) { continue; }
+                    if (!reportedTools.Add(key)) { continue; }
                     if (fresh == null) { fresh = new List<CheatToolDetection>(); }
                     fresh.Add(d);
                     if (d.Weak) {
                         Logger.LogWarning($"Possible cheat tool, low confidence (server will log only): {d.Tool} ({d.Vector}: {d.Detail}).");
+                    } else if (d.Medium) {
+                        Logger.LogWarning($"Possible anti-cheat tampering, medium confidence (server will log and notify only): {d.Tool} ({d.Vector}: {d.Detail}).");
                     } else {
                         Logger.LogWarning($"Cheat tool detected: {d.Tool} ({d.Vector}: {d.Detail}).");
                     }
@@ -847,11 +1200,15 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 bool tooler = toolerDetected && !toolerReported;
                 if (tooler) { toolerReported = true; }
 
+                // Numbered before it is handed over, so the heartbeat answer counts what this client meant to
+                // send whatever happens to the report after this point.
+                int seq = NextReportSeq();
                 ReportCheatScanSummary(new CheatSummaryReport {
                     PlayerName = CharacterManager.PlayerCharacter.Name,
                     PlatformID = CharacterManager.PlayerCharacter.HostID,
                     DetectedTools = fresh,
-                    ValheimToolerStatus = tooler
+                    ValheimToolerStatus = tooler,
+                    Seq = seq
                 });
             }
 

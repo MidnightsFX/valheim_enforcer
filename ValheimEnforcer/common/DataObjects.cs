@@ -388,14 +388,49 @@ namespace ValheimEnforcer.common {
             /// <summary>Low-confidence sighting (generic window class); the server logs it but never enforces on it.</summary>
             [DefaultValue(false)]
             public bool Weak { get; set; }
+            /// <summary>
+            /// Medium-confidence sighting: the server logs it and posts it to the moderation channel, but never
+            /// kicks or bans on it. Like Weak, only ever trusted downward.
+            /// </summary>
+            [DefaultValue(false)]
+            public bool Medium { get; set; }
+        }
+
+        /// <summary>
+        /// Managed code loaded into the game that no installed mod, patcher, BepInEx or the game itself
+        /// accounts for. Identifies the assembly and nothing about the machine: the file name is sent without
+        /// its folder, because a folder path carries the Windows user name.
+        /// </summary>
+        public class UnaccountedAssembly {
+            public string Name { get; set; }
+            public string Mvid { get; set; }
+            public List<string> Namespaces { get; set; }
+            [DefaultValue(false)]
+            public bool FromBytes { get; set; }
+            public string FileName { get; set; }
+            /// <summary>Harmony owner ids this assembly's patches were registered under.</summary>
+            public List<string> PatchOwners { get; set; }
+            /// <summary>A sample of the methods this assembly's patches target.</summary>
+            public List<string> PatchedTargets { get; set; }
+            [DefaultValue(false)]
+            public bool DrawsGui { get; set; }
         }
 
         public class CheatSummaryReport {
             public string PlayerName { get; set; }
             public string PlatformID { get; set; }
-            // Only matched entries are ever sent - never the player's full process list.
+            // Matched catalog entries. The player's process list, window titles and folder paths are never sent.
             public List<CheatToolDetection> DetectedTools { get; set; }
             public bool ValheimToolerStatus { get; set; }
+            /// <summary>
+            /// Counts this client's reports within one connection, starting at 1. Zero from a client that does not
+            /// number its reports. The heartbeat reply carries the last one sent, so the server can tell a report
+            /// that never arrived from one that was never due.
+            /// </summary>
+            [DefaultValue(0)]
+            public int Seq { get; set; }
+            /// <summary>Sent in a report of its own, never alongside DetectedTools - see CheatDetector.</summary>
+            public List<UnaccountedAssembly> UnaccountedCode { get; set; }
 
             public bool cheatsDetected() {
                 return ValheimToolerStatus || (DetectedTools != null && DetectedTools.Count > 0);
@@ -1389,6 +1424,8 @@ namespace ValheimEnforcer.common {
             public string ClientContradiction { get; set; }
             [YamlMember(ScalarStyle = ScalarStyle.Literal)]
             public string ItemOriginFlagged { get; set; }
+            [YamlMember(ScalarStyle = ScalarStyle.Literal)]
+            public string CheatSuspected { get; set; }
         }
     }
 }

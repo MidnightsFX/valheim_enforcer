@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using ValheimEnforcer.common;
 
 namespace ValheimEnforcer.modules.cheatmonitor {
 
@@ -52,6 +53,21 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// for short titles that a legitimate application could plausibly begin with.
         /// </summary>
         public MatchMode WindowTitleMatch = MatchMode.Prefix;
+        /// <summary>
+        /// Harmony owner ids the tool registers its patches under, checked in-process with
+        /// Harmony.HasAnyPatches. Only consulted by the injected-assembly vector.
+        /// </summary>
+        public string[] HarmonyIds = Empty;
+        /// <summary>
+        /// Prefixes of item custom-data keys the tool writes. Read on the server from the items a client
+        /// reports, so it does not depend on the client's own scan.
+        /// </summary>
+        public string[] DataKeyPrefixes = Empty;
+        /// <summary>
+        /// ZDO long keys the tool writes onto objects it creates. Read on the server from the objects a
+        /// client's packets create.
+        /// </summary>
+        public string[] ZdoLongKeys = Empty;
         /// <summary>True for tools with no legitimate use whatsoever; these ban regardless of ActionOnDetection.</summary>
         public bool AutoBan;
 
@@ -96,28 +112,25 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 AssemblyNamespaces = new[] { "ValheimTooler" },
                 AutoBan = true
             },
-            // Valheaven, internally "ValheimAdminMenu". Neither a BepInEx plugin nor an external memory
-            // editor: it ships as a version.dll proxy dropped beside valheim.exe, which Windows loads ahead
-            // of the real one, and which then boots a managed assembly into the game - taking BepInEx's
-            // Harmony if BepInEx is there and loading its own if not.
+            // Valheaven. Neither a BepInEx plugin nor an external memory editor: it ships as a version.dll
+            // proxy dropped beside valheim.exe, which Windows loads ahead of the real one, and which then
+            // loads a managed menu into the game - using BepInEx's Harmony when BepInEx is there.
             //
-            // That shape is invisible to everything else this mod does. It is not in BepInEx/plugins so the
-            // plugin hashes never see it, it is not chainloaded so it is not in the declared mod list, it
-            // has no process of its own, and it draws inside the game so it has no window. The two vectors
-            // that do see it are the assembly it loads, by namespace, and the proxy DLL itself - caught not
-            // by its name, which is a real Windows DLL, but by where it is loaded from and by the hash of
-            // the file found there (JudgeProxyModule).
-            //
-            // Both spellings are carried because the tool answers to two names and we are working from its
-            // release and from a server log rather than from the binary. "Valheaven" is what it calls itself
-            // on screen and in its log lines; "ValheimAdminMenu" is the project behind it, which showed up in
-            // the ValheimAdminMenu.Locales.<lang>.json resources it ships - and a resource named that way is
-            // named after the assembly's root namespace, which makes it the likelier of the two to be what
-            // the types actually sit in.
+            // It is not in BepInEx/plugins, not in the declared mod list, has no process of its own and draws
+            // inside the game, so it is seen through what it leaves in the process and in the world:
+            //   - the proxy DLL, by where it was loaded from and by its hashes (JudgeProxyModule);
+            //   - the menu assembly, ValheavenModMenu, whose types sit in the ValheimAdminMenu and Valheaven
+            //     namespaces;
+            //   - the Harmony id its patches are registered under;
+            //   - the markers it writes onto items and onto the objects it places, which the server reads
+            //     from data it receives anyway (CheatArtifacts).
             new CheatToolSignature {
                 Tool = "Valheaven",
                 AssemblyNamespaces = new[] { "Valheaven", "ValheimAdminMenu" },
-                AssemblyNames = new[] { "Valheaven", "ValheimAdminMenu" },
+                AssemblyNames = new[] { "ValheavenModMenu", "Valheaven", "ValheimAdminMenu" },
+                HarmonyIds = new[] { "local.valheim.adminmenu", "valheaven.bootstrap" },
+                DataKeyPrefixes = new[] { "valheaven." },
+                ZdoLongKeys = new[] { "valheaven.planted.owner" },
                 AutoBan = true
             },
             // Injected-only; it has no process of its own, so the module vector is the only way to see it.
@@ -233,7 +246,9 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             // feeds PolicyKey, and PolicyKey is what makes the module scan re-examine modules it has already
             // seen. Leave it out and turning the setting on mid-session would find nothing, because every
             // module worth looking at was examined and dismissed under the old policy.
-            string key = $"{ValConfig.DetectCheatTools.Value}|{ValConfig.DetectCheatEngine.Value}|{ValConfig.DetectProxyLoaders.Value}|{ValConfig.AdditionalCheatProcesses.Value}";
+            // VerifyDoorstopTarget and DetectUnlistedGameFolderDlls are here for the same reason: each changes
+            // which already-examined modules deserve a second look.
+            string key = $"{ValConfig.DetectCheatTools.Value}|{ValConfig.DetectCheatEngine.Value}|{ValConfig.DetectProxyLoaders.Value}|{ValConfig.VerifyDoorstopTarget.Value}|{ValConfig.DetectUnlistedGameFolderDlls.Value}|{ValConfig.AdditionalCheatProcesses.Value}";
             List<CheatToolSignature> cached = enabledCache;
             if (cached != null && key == enabledCacheKey) { return cached; }
 
@@ -293,7 +308,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
         private static void CollectAssemblySignatures(CheatToolSignature[] source, List<CheatToolSignature> into) {
             foreach (CheatToolSignature sig in source) {
-                if (sig.AssemblyNamespaces.Length == 0 && sig.AssemblyNames.Length == 0) { continue; }
+                if (sig.AssemblyNamespaces.Length == 0 && sig.AssemblyNames.Length == 0 && sig.HarmonyIds.Length == 0) { continue; }
                 if (sig.Tool == ToolerLabel && !ValConfig.DetectValheimTooler.Value) { continue; }
                 into.Add(sig);
             }
@@ -385,28 +400,34 @@ namespace ValheimEnforcer.modules.cheatmonitor {
 
         // BepInEx's own doorstop is a winhttp.dll proxy in the game root, which is to say the mod loader
         // this server requires is itself an instance of the thing being detected. The name alone says
-        // nothing; what separates them is the files Doorstop ships beside it.
+        // nothing; what separates them is which assembly it started (VerifyDoorstop).
         private const string DoorstopName = "winhttp.dll";
         private static readonly string[] DoorstopMarkers = {
             "doorstop_config.ini", ".doorstop_version", "winhttp.dll.config"
         };
+        private const string DoorstopIniName = "doorstop_config.ini";
+        private const string PreloaderFileName = "BepInEx.Preloader.dll";
+        internal const string PreloaderAssemblyName = "BepInEx.Preloader";
 
-        // Published SHA256s of Valheaven's version.dll. A proxy DLL says a loader is installed; a hash match
-        // says which one, which is the difference between ActionOnDetection and an auto-ban. The author
-        // reposted three builds in three days, so this names what it can and the path check above is what
-        // actually does the detecting.
+        // Known SHA256s of cheat loader builds, of the whole file. A proxy DLL says a loader is installed; a
+        // hash match says which one, which is the difference between ActionOnDetection and an auto-ban.
         private static readonly Dictionary<string, string> ProxyLoaderHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) {
             { "b381ba752c760398866dc8933816f07b9b0c64651972d413a716ad1d255c7985", "Valheaven" },
             { "229aa381485ea15099775581673cd6388ce7dbeadb6a1bde8858df4021e418e3", "Valheaven" },
-            { "726066d7780ae8bd9f9e0e4e3604584a47df4bf85dedfc61b2495716bff42d85", "Valheaven" }
+            { "726066d7780ae8bd9f9e0e4e3604584a47df4bf85dedfc61b2495716bff42d85", "Valheaven" },
+            { "80d486a3aca93cde32f746cf29b75675149236bbb3e4e6a7c1e92eb0cec59b7a", "Valheaven" },
+            { "c1f721d92b2325aef0d36f5bc5164f4cce0b5c55d5fb91d06bbff74b120d12de", "Valheaven" }
         };
 
-        // There is deliberately no shipped table of builds to treat as good. A hash is the only thing that
-        // separates a legitimate loader from a cheat one - both are a system DLL name in the game folder,
-        // both sit beside BepInEx - and pre-trusting a build ships the evasion with it: stock Doorstop is
-        // legitimate and loads whatever its ini names, so an exemption for its hash is an exemption for
-        // anything it is pointed at. Trust here is the admin's to grant, one file at a time, through
-        // AllowedProxyLoaderHashes.
+        // Known SHA256s of a cheat loader's code alone - the executable sections, see PeCodeHash. A loader
+        // that carries its payload inside itself changes its file hash with every payload, while its code
+        // stays the same.
+        private static readonly Dictionary<string, string> ProxyLoaderCodeHashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) {
+            { "a338aed3d6a91ed3bda300ec1b9b16ff2696aa78542fccabc4c4c023cb5732a5", "Valheaven" }
+        };
+
+        // There is deliberately no shipped table of builds to treat as good. Trust here is the admin's to
+        // grant, one file at a time, through AllowedProxyLoaderHashes.
 
         /// <summary>
         /// Whether this module name is one worth resolving a path for. Called once per newly loaded module,
@@ -444,12 +465,14 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// name and path tests, which is what this did before it hashed anything. Fail closed on detection,
         /// fail open on exemption.
         /// </summary>
-        internal static ProxyVerdict JudgeProxyModule(string moduleName, string modulePath, string sha256, bool nameIgnored, out string tool) {
+        internal static ProxyVerdict JudgeProxyModule(string moduleName, string modulePath, string sha256, string codeHash, bool nameIgnored,
+                                                      DoorstopContext doorstop, out string tool, out string note) {
             tool = null;
+            note = null;
             if (string.IsNullOrEmpty(moduleName) || string.IsNullOrEmpty(modulePath)) { return ProxyVerdict.None; }
 
-            // 1. A build known to be a cheat. Nothing below can reach past this.
-            tool = ProxyToolForHash(sha256);
+            // 1. A build known to be a cheat, by either hash. Nothing below can reach past this.
+            tool = ProxyToolForHash(sha256, codeHash);
             if (tool != null) { return ProxyVerdict.Strong; }
 
             // 2. Explicit admin intent about this exact file. The only thing that grants trust here.
@@ -458,23 +481,199 @@ namespace ValheimEnforcer.modules.cheatmonitor {
             // 3. The name, or the directory, is allowlisted.
             if (nameIgnored || IsIgnoredPath(modulePath)) { return ProxyVerdict.None; }
 
-            // 4. BepInEx's own doorstop, recognised by the files Doorstop ships beside it. Only ever
-            //    winhttp.dll: every client on this server has BepInEx in the game root, so a marker there
-            //    says nothing whatsoever about a file under any other name - including the name Valheaven
-            //    uses, which is why this is not generalised.
+            // 4. BepInEx's own doorstop. Only ever winhttp.dll: every client on this server has BepInEx in the
+            //    game root, so its presence says nothing about a file under any other name.
             if (string.Equals(moduleName, DoorstopName, StringComparison.OrdinalIgnoreCase)) {
-                // Weak rather than strong when the markers are absent: a broken or hand-assembled BepInEx
-                // install reaches that state honestly.
-                return HasDoorstopMarker(modulePath) ? ProxyVerdict.None : ProxyVerdict.Weak;
+                if (doorstop == null || !doorstop.Verify) {
+                    // Weak rather than strong when the markers are absent: a broken or hand-assembled BepInEx
+                    // install reaches that state honestly.
+                    return HasDoorstopMarker(modulePath) ? ProxyVerdict.None : ProxyVerdict.Weak;
+                }
+                DoorstopCheck check = VerifyDoorstop(modulePath, doorstop, out string targetName);
+                if (check == DoorstopCheck.Verified) { return ProxyVerdict.None; }
+                note = $"target={(string.IsNullOrEmpty(targetName) ? "?" : targetName)} ({(check == DoorstopCheck.Mismatch ? "mismatch" : "undetermined")})";
+                return ProxyVerdict.Weak;
             }
 
+            // A name in neither family reaches here only through the game-folder listing
+            // (DetectUnlistedGameFolderDlls), and falls to Weak with the weak family.
             return Matches(moduleName, StrongProxyNames, MatchMode.Exact) ? ProxyVerdict.Strong : ProxyVerdict.Weak;
         }
 
-        /// <summary>The tool a proxy DLL's SHA256 identifies, or null when the build is not one we know.</summary>
+        /// <summary>The tool a proxy DLL's file SHA256 identifies, or null when the build is not one we know.</summary>
         internal static string ProxyToolForHash(string sha256) {
             if (string.IsNullOrEmpty(sha256)) { return null; }
             return ProxyLoaderHashes.TryGetValue(sha256, out string tool) ? tool : null;
+        }
+
+        /// <summary>The tool either hash identifies: the whole file first, then its code.</summary>
+        internal static string ProxyToolForHash(string sha256, string codeHash) {
+            string tool = ProxyToolForHash(sha256);
+            if (tool != null || string.IsNullOrEmpty(codeHash)) { return tool; }
+            return ProxyLoaderCodeHashes.TryGetValue(codeHash, out tool) ? tool : null;
+        }
+
+        // ---- Doorstop -------------------------------------------------------------------------------------
+
+        internal enum DoorstopCheck { Verified, Mismatch, Undetermined }
+
+        /// <summary>
+        /// What the doorstop check needs to know about this process. Everything here is read on the main
+        /// thread and handed to the scan worker as a finished object; the worker never touches the AppDomain
+        /// or the environment itself.
+        /// </summary>
+        internal sealed class DoorstopContext {
+            internal bool Verify;
+            /// <summary>DOORSTOP_INVOKE_DLL_PATH, which Doorstop sets to the assembly it started.</summary>
+            internal string EnvTarget;
+            /// <summary>--doorstop-target-assembly (Doorstop 4) or --doorstop-target (Doorstop 3).</summary>
+            internal string CommandLineTarget;
+            /// <summary>The folder of the BepInEx this game is running.</summary>
+            internal string RunningCoreDir;
+            internal int PreloaderCount;
+            internal string GameRoot;
+
+            private static DoorstopContext captured;
+
+            /// <summary>
+            /// Main thread only. None of this moves within a process, so it is gathered once; only the setting
+            /// is read each time.
+            /// </summary>
+            internal static DoorstopContext Current(bool verify) {
+                DoorstopContext cached = captured;
+                if (cached == null) {
+                    cached = Capture();
+                    captured = cached;
+                }
+                if (cached.Verify == verify) { return cached; }
+                return new DoorstopContext {
+                    Verify = verify,
+                    EnvTarget = cached.EnvTarget,
+                    CommandLineTarget = cached.CommandLineTarget,
+                    RunningCoreDir = cached.RunningCoreDir,
+                    PreloaderCount = cached.PreloaderCount,
+                    GameRoot = cached.GameRoot,
+                };
+            }
+
+            private static DoorstopContext Capture() {
+                DoorstopContext ctx = new DoorstopContext { Verify = true };
+                try { ctx.EnvTarget = Environment.GetEnvironmentVariable("DOORSTOP_INVOKE_DLL_PATH"); } catch (Exception) { }
+                try { ctx.CommandLineTarget = CommandLineDoorstopTarget(Environment.GetCommandLineArgs()); } catch (Exception) { }
+                try { ctx.RunningCoreDir = Path.GetDirectoryName(typeof(BepInEx.BaseUnityPlugin).Assembly.Location); } catch (Exception) { }
+                try { ctx.GameRoot = BepInEx.Paths.GameRootPath; } catch (Exception) { }
+                try {
+                    foreach (System.Reflection.Assembly asm in AppDomain.CurrentDomain.GetAssemblies()) {
+                        if (asm.IsDynamic) { continue; }
+                        if (string.Equals(asm.GetName().Name, PreloaderAssemblyName, StringComparison.OrdinalIgnoreCase)) {
+                            ctx.PreloaderCount++;
+                        }
+                    }
+                } catch (Exception) { }
+                return ctx;
+            }
+        }
+
+        /// <summary>The doorstop target named on the command line, or null.</summary>
+        internal static string CommandLineDoorstopTarget(string[] args) {
+            if (args == null) { return null; }
+            string[] keys = { "--doorstop-target-assembly", "--doorstop-target" };
+            for (int i = 0; i < args.Length; i++) {
+                string arg = args[i];
+                if (string.IsNullOrEmpty(arg)) { continue; }
+                foreach (string key in keys) {
+                    if (string.Equals(arg, key, StringComparison.OrdinalIgnoreCase)) {
+                        return i + 1 < args.Length ? args[i + 1] : null;
+                    }
+                    if (arg.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase)) {
+                        return arg.Substring(key.Length + 1);
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Whether the winhttp.dll at <paramref name="modulePath"/> started the BepInEx this game is running.
+        ///
+        /// The target is what Doorstop itself says it started, then the command line, then its ini. A relative
+        /// target is resolved against the game folder, which is where Doorstop resolves it too. Verified means
+        /// that target is the preloader in the running BepInEx's own folder, and that exactly one preloader
+        /// is loaded.
+        /// </summary>
+        internal static DoorstopCheck VerifyDoorstop(string modulePath, DoorstopContext ctx, out string targetName) {
+            targetName = null;
+            if (ctx == null) { return DoorstopCheck.Undetermined; }
+            try {
+                string moduleDir = Path.GetDirectoryName(modulePath);
+                string target = FirstNonEmpty(ctx.EnvTarget, ctx.CommandLineTarget, ReadIniTarget(moduleDir));
+                if (target == null) { return DoorstopCheck.Undetermined; }
+
+                string baseDir = string.IsNullOrEmpty(ctx.GameRoot) ? moduleDir : ctx.GameRoot;
+                string full = ResolvePath(target, baseDir);
+                if (full == null) { return DoorstopCheck.Undetermined; }
+                targetName = Path.GetFileName(full);
+
+                if (ctx.PreloaderCount == 0 || string.IsNullOrEmpty(ctx.RunningCoreDir)) { return DoorstopCheck.Undetermined; }
+                if (ctx.PreloaderCount > 1) { return DoorstopCheck.Mismatch; }
+
+                string expected = ResolvePath(Path.Combine(ctx.RunningCoreDir, PreloaderFileName), ctx.RunningCoreDir);
+                return string.Equals(full, expected, StringComparison.OrdinalIgnoreCase) ? DoorstopCheck.Verified : DoorstopCheck.Mismatch;
+            } catch (Exception) {
+                return DoorstopCheck.Undetermined;
+            }
+        }
+
+        private static string FirstNonEmpty(params string[] values) {
+            foreach (string value in values) {
+                if (!string.IsNullOrEmpty(value) && value.Trim().Length > 0) { return value; }
+            }
+            return null;
+        }
+
+        /// <summary>A path with quotes stripped and separators normalised, made absolute against a base.</summary>
+        internal static string ResolvePath(string path, string baseDir) {
+            if (string.IsNullOrEmpty(path)) { return null; }
+            string trimmed = path.Trim().Trim('"').Trim();
+            if (trimmed.Length == 0) { return null; }
+            trimmed = trimmed.Replace('/', Path.DirectorySeparatorChar);
+            if (!Path.IsPathRooted(trimmed)) {
+                if (string.IsNullOrEmpty(baseDir)) { return null; }
+                trimmed = Path.Combine(baseDir, trimmed);
+            }
+            return Path.GetFullPath(trimmed);
+        }
+
+        /// <summary>
+        /// The target assembly named in the doorstop_config.ini beside the dll: target_assembly (Doorstop 4)
+        /// or targetAssembly (Doorstop 3). Null when there is no ini or no such key.
+        /// </summary>
+        internal static string ReadIniTarget(string dir) {
+            if (string.IsNullOrEmpty(dir)) { return null; }
+            try {
+                string ini = Path.Combine(dir, DoorstopIniName);
+                if (!File.Exists(ini)) { return null; }
+                return ParseIniTarget(File.ReadAllLines(ini));
+            } catch (Exception) {
+                return null;
+            }
+        }
+
+        internal static string ParseIniTarget(string[] lines) {
+            if (lines == null) { return null; }
+            foreach (string raw in lines) {
+                if (raw == null) { continue; }
+                string line = raw.Trim();
+                if (line.Length == 0 || line[0] == '#' || line[0] == ';' || line[0] == '[') { continue; }
+                int eq = line.IndexOf('=');
+                if (eq <= 0) { continue; }
+                string key = line.Substring(0, eq).Trim();
+                if (!string.Equals(key, "target_assembly", StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(key, "targetAssembly", StringComparison.OrdinalIgnoreCase)) { continue; }
+                string value = line.Substring(eq + 1).Trim();
+                return value.Length == 0 ? null : value;
+            }
+            return null;
         }
 
         private static bool IsUnderWindows(string path) {
@@ -597,7 +796,7 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         /// a "sha256:" prefix, spaces, colons, hyphens - is stripped rather than rejected. Case is left
         /// alone; the set that holds the result is case-insensitive.
         /// </summary>
-        private static string NormalizeHash(string entry) {
+        internal static string NormalizeHash(string entry) {
             if (string.IsNullOrEmpty(entry)) { return null; }
             string value = entry.Trim();
             // A "sha256:" / "sha-256:" prefix, not a separator inside the digits. The first colon is the
@@ -616,6 +815,195 @@ namespace ValheimEnforcer.modules.cheatmonitor {
                 digits.Append(c);
             }
             return digits.Length == 64 ? digits.ToString() : null;
+        }
+
+        // ---- Server-side judgement ------------------------------------------------------------------------
+        //
+        // The client reports what it saw; these decide, from the server's own tables, what that means. A
+        // client that lies can only lie about itself, because the ban always lands on the socket it reported
+        // from.
+
+        internal const string AdminListedLoaderLabel = "Admin-listed loader build";
+        internal const string AdminListedAssemblyLabel = "Admin-listed assembly";
+
+        internal enum ServerProxyOutcome { Unknown, Banned, Allowed }
+
+        private static readonly Regex FileHashPattern = new Regex(@"sha256=([0-9a-fA-F]{64})", RegexOptions.Compiled);
+        private static readonly Regex CodeHashPattern = new Regex(@"code=([0-9a-fA-F]{64})", RegexOptions.Compiled);
+
+        // Server only, main thread only; same parse-on-change shape as the allowlist above.
+        private static string bannedProxyHashesRaw;
+        private static HashSet<string> bannedProxyHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        private static void RefreshBannedProxyHashes() {
+            string raw = ValConfig.BannedProxyLoaderHashes?.Value ?? "";
+            if (raw == bannedProxyHashesRaw) { return; }
+            HashSet<string> parsed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string entry in SplitList(raw)) {
+                string normalized = NormalizeHash(entry);
+                if (normalized == null) {
+                    Logger.LogWarning($"BannedProxyLoaderHashes: '{entry}' is not a SHA256 (64 hex characters) and is ignored.");
+                    continue;
+                }
+                parsed.Add(normalized);
+            }
+            bannedProxyHashes = parsed;
+            bannedProxyHashesRaw = raw;
+        }
+
+        /// <summary>
+        /// The server's own verdict on one proxy detection, from the hashes the client put in its detail.
+        ///
+        /// Checked in this order: a build this mod knows, then one the admin has banned, then one the admin
+        /// has allowed. <paramref name="hash"/> comes back as the hash that decided it, or the file hash when
+        /// nothing did. Main thread only.
+        /// </summary>
+        internal static ServerProxyOutcome ServerProxyVerdict(string detail, out string tool, out string hash) {
+            tool = null;
+            hash = null;
+            if (string.IsNullOrEmpty(detail)) { return ServerProxyOutcome.Unknown; }
+            RefreshBannedProxyHashes();
+            RefreshAllowedProxyHashes();
+            return ServerProxyVerdict(detail, bannedProxyHashes, allowedProxyHashes, out tool, out hash);
+        }
+
+        /// <summary>The same verdict against explicit tables, with no config behind it.</summary>
+        internal static ServerProxyOutcome ServerProxyVerdict(string detail, ICollection<string> banned, ICollection<string> allowed,
+                                                              out string tool, out string hash) {
+            tool = null;
+            hash = null;
+            if (string.IsNullOrEmpty(detail)) { return ServerProxyOutcome.Unknown; }
+
+            Match fileMatch = FileHashPattern.Match(detail);
+            Match codeMatch = CodeHashPattern.Match(detail);
+            string file = fileMatch.Success ? fileMatch.Groups[1].Value.ToLowerInvariant() : null;
+            string code = codeMatch.Success ? codeMatch.Groups[1].Value.ToLowerInvariant() : null;
+            hash = file ?? code;
+            if (hash == null) { return ServerProxyOutcome.Unknown; }
+
+            string known = ProxyToolForHash(file);
+            if (known != null) { tool = known; hash = file; return ServerProxyOutcome.Banned; }
+            if (!string.IsNullOrEmpty(code) && ProxyLoaderCodeHashes.TryGetValue(code, out known)) {
+                tool = known;
+                hash = code;
+                return ServerProxyOutcome.Banned;
+            }
+
+            if (banned != null) {
+                if (file != null && banned.Contains(file)) { tool = AdminListedLoaderLabel; hash = file; return ServerProxyOutcome.Banned; }
+                if (code != null && banned.Contains(code)) { tool = AdminListedLoaderLabel; hash = code; return ServerProxyOutcome.Banned; }
+            }
+
+            // Only the file hash can allow: an allowance is a statement about one exact file.
+            if (allowed != null && file != null && allowed.Contains(file)) { hash = file; return ServerProxyOutcome.Allowed; }
+            return ServerProxyOutcome.Unknown;
+        }
+
+        // The admin's namespace and MVID ban lists for unaccounted code. Server only, main thread only.
+        private static string bannedCodeRaw;
+        private static List<string> bannedNamespaces = new List<string>();
+        private static HashSet<string> bannedMvids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        private static void RefreshBannedCode() {
+            string raw = $"{ValConfig.BannedAssemblyNamespaces?.Value}|{ValConfig.BannedAssemblyMvids?.Value}";
+            if (raw == bannedCodeRaw) { return; }
+            bannedNamespaces = SplitList(ValConfig.BannedAssemblyNamespaces?.Value);
+            HashSet<string> mvids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string entry in SplitList(ValConfig.BannedAssemblyMvids?.Value)) {
+                string normalized = NormalizeMvid(entry);
+                if (normalized == null) {
+                    Logger.LogWarning($"BannedAssemblyMvids: '{entry}' is not a GUID and is ignored.");
+                    continue;
+                }
+                mvids.Add(normalized);
+            }
+            bannedMvids = mvids;
+            bannedCodeRaw = raw;
+        }
+
+        /// <summary>A GUID in its canonical "D" form, or null when the entry is not one.</summary>
+        internal static string NormalizeMvid(string entry) {
+            if (string.IsNullOrEmpty(entry)) { return null; }
+            return Guid.TryParse(entry.Trim(), out Guid guid) ? guid.ToString("D") : null;
+        }
+
+        /// <summary>
+        /// The tool one reported unaccounted assembly belongs to, from the server's own catalog and ban lists,
+        /// or null when nothing claims it. <paramref name="ban"/> says whether that verdict bans. Main thread only.
+        /// </summary>
+        internal static string ServerCodeVerdict(DataObjects.UnaccountedAssembly code, out bool ban) {
+            ban = false;
+            if (code == null) { return null; }
+            RefreshBannedCode();
+
+            foreach (CheatToolSignature[] table in new[] { AutoBanTools, GeneralTools }) {
+                foreach (CheatToolSignature sig in table) {
+                    bool hit = Matches(code.Name, sig.AssemblyNames, MatchMode.Exact);
+                    if (!hit && code.Namespaces != null) {
+                        foreach (string ns in code.Namespaces) {
+                            if (MatchesNamespace(ns, sig.AssemblyNamespaces)) { hit = true; break; }
+                        }
+                    }
+                    if (!hit && code.PatchOwners != null) {
+                        foreach (string owner in code.PatchOwners) {
+                            if (Matches(owner, sig.HarmonyIds, MatchMode.Exact)) { hit = true; break; }
+                        }
+                    }
+                    if (hit) {
+                        ban = sig.AutoBan;
+                        return sig.Tool;
+                    }
+                }
+            }
+
+            if (code.Namespaces != null && bannedNamespaces.Count > 0) {
+                foreach (string ns in code.Namespaces) {
+                    if (MatchesNamespace(ns, bannedNamespaces.ToArray())) {
+                        ban = true;
+                        return $"{AdminListedAssemblyLabel} ({ns})";
+                    }
+                }
+            }
+            string mvid = NormalizeMvid(code.Mvid);
+            if (mvid != null && bannedMvids.Contains(mvid)) {
+                ban = true;
+                return $"{AdminListedAssemblyLabel} ({mvid})";
+            }
+            return null;
+        }
+
+        // ---- Artifacts ------------------------------------------------------------------------------------
+        //
+        // Markers cheat tools write into data the server receives anyway. Built from the whole catalog, not
+        // the client's scan toggles: nothing here runs on a client.
+
+        private static volatile List<KeyValuePair<int, string>> zdoArtifactKeys;
+
+        /// <summary>The tool whose marker an item custom-data key is, or null.</summary>
+        internal static string ToolForItemDataKey(string key) {
+            if (string.IsNullOrEmpty(key)) { return null; }
+            foreach (CheatToolSignature[] table in new[] { AutoBanTools, GeneralTools }) {
+                foreach (CheatToolSignature sig in table) {
+                    if (Matches(key, sig.DataKeyPrefixes, MatchMode.Prefix)) { return sig.Tool; }
+                }
+            }
+            return null;
+        }
+
+        /// <summary>Every catalogued ZDO marker, as the key hash ZDO values are stored under, with its tool.</summary>
+        internal static List<KeyValuePair<int, string>> ZdoArtifactKeys() {
+            List<KeyValuePair<int, string>> cached = zdoArtifactKeys;
+            if (cached != null) { return cached; }
+            List<KeyValuePair<int, string>> keys = new List<KeyValuePair<int, string>>();
+            foreach (CheatToolSignature[] table in new[] { AutoBanTools, GeneralTools }) {
+                foreach (CheatToolSignature sig in table) {
+                    foreach (string key in sig.ZdoLongKeys) {
+                        if (!string.IsNullOrEmpty(key)) { keys.Add(new KeyValuePair<int, string>(key.GetStableHashCode(), sig.Tool)); }
+                    }
+                }
+            }
+            zdoArtifactKeys = keys;
+            return keys;
         }
 
         /// <summary>

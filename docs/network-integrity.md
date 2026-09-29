@@ -47,6 +47,8 @@ Every player who gets past the join gate is, by construction, running only mods 
 
 Distinct guards rather than total trips: one player hitting the same guard four hundred times is a single behaviour the guard already stopped, while tripping the teleport, global-key and object-destroy guards once each is a toolkit. Run `enforcer-trust` to see who has tripped what before acting.
 
+One entry comes from the anti-cheat rather than the relay: `cheat-heartbeat`, recorded when a client stops answering the server's checks on its cheat scan (`CheatScanHeartbeat` - see [Cheat Detection](cheat-detection.md)). The missing answer is the one part of that exchange the server observes for itself.
+
 Only *enforced* refusals count. A correction a guard made quietly - a rebound chat name - is not evidence, because an ordinary chat mod that decorates names produces exactly the same thing on the wire.
 
 ## Things worth knowing

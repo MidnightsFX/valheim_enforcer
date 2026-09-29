@@ -214,7 +214,7 @@ Patchers are enumerated and logged whether or not `ValidatePatchers` is on, so l
 
 ## Attestation
 
-Off by default. `AttestationPolicy` makes each client prove its mod report was generated *for this connection*.
+`Report` by default. `AttestationPolicy` makes each client prove its mod report was generated *for this connection*.
 
 Without it, a client reports the same plugin list and the same file hashes every session, forever - so a client patched to skip the work can capture one valid payload and replay it indefinitely. The server now hands each connection a random value during the handshake, and the client returns a digest over that value and the exact mod and patcher list it is sending. The server recomputes it and compares.
 
@@ -223,7 +223,7 @@ Without it, a client reports the same plugin list and the same file hashes every
 | Value | Effect |
 | --- | --- |
 | `Off` | Nothing is issued and nothing is checked |
-| `Report` | A missing or wrong attestation is logged; the player connects |
+| `Report` | A missing or wrong attestation is logged; the player connects. The default |
 | `Require` | A missing or wrong attestation is a rejection |
 
 **Before setting `Require`:** a player on an older ValheimEnforcer sends no attestation at all, and is rejected too. Roll the pack out first. If the server's own record of a connection's nonce goes missing, that connection is *allowed* rather than refused - our bookkeeping failing is not the player's fault.

@@ -658,15 +658,9 @@ namespace ValheimEnforcer.modules.character {
         private static DataObjects.Character BuildNewCharacter(Player player, string playerID, string playerName) {
             Logger.LogInfo($"Building a new character record for {playerName} ({playerID}).");
 
-            // Clear item custom data BEFORE packing, not after. Packing copies it (PackedItem.CopyCustomData),
-            // so clearing afterwards left the record claiming custom data the live item no longer had, and the
-            // very first delta comparison saw every item as changed.
-            if (ValConfig.ValidateItemCustomData.Value) {
-                foreach (ItemDrop.ItemData item in player.GetInventory().GetAllItems()) {
-                    item.m_customData?.Clear();
-                }
-            }
-
+            // Items are packed WITH their custom data, which is cleared further down once the rules have run.
+            // Clearing first meant every confiscation below was recorded with an empty custom-data map, so an
+            // admin returning an enchanted item handed back a bare one.
             DataObjects.Character character = new DataObjects.Character() {
                 Name = playerName,
                 HostID = playerID,
@@ -687,6 +681,21 @@ namespace ValheimEnforcer.modules.character {
 
             NewCharacterRules.Policy policy = NewCharacterRules.Current();
             NewCharacterRules.Result result = NewCharacterRules.Apply(character, policy, record: true);
+            // Now that the confiscations are recorded as the items actually were, clear item custom data from
+            // what the character keeps - on both sides. Packing copies it (PackedItem.CopyCustomData), so
+            // clearing only the live items left the record claiming custom data they no longer had, and the
+            // very first delta comparison saw every item as changed. Before the loadout reaches the player, as
+            // it always was; the loadout's own record entries carry no custom data.
+            if (ValConfig.ValidateItemCustomData.Value) {
+                foreach (ItemDrop.ItemData item in player.GetInventory().GetAllItems()) {
+                    item.m_customData?.Clear();
+                }
+                if (character.PlayerItems != null) {
+                    foreach (PackedItem kept in character.PlayerItems) {
+                        kept?.m_customdata?.Clear();
+                    }
+                }
+            }
             // The record now holds the loadout; put the same thing in the hands of the player standing here.
             // Both sides run the same decision, as with every other join rule - the difference is only that
             // one has an inventory to put items into and the other has a file.

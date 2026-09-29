@@ -26,6 +26,8 @@ namespace ValheimEnforcer.modules.network {
     ///   RPC_TeleportPlayer - teleports whoever receives it. Dropped for non-admins.
     ///   RPC_Damage         - carries a HitData the attacker's client wrote. Dropped when the numbers are
     ///                        impossible.
+    ///   SpawnObject        - makes every receiver instantiate any prefab. Nothing in the game sends it, so
+    ///                        a client's is dropped (BlockSpawnObjectRPC; see StructureValidator).
     ///
     /// Called from <see cref="RoutedRpcGuard"/>, which already owns the prefix on ZRoutedRpc.RPC_RoutedRPC and
     /// has resolved the real peer behind the connection. Keeping one prefix on that method matters: two
@@ -39,6 +41,17 @@ namespace ValheimEnforcer.modules.network {
         private static readonly int ChatMessageHash = "ChatMessage".GetStableHashCode();
         private static readonly int TeleportPlayerHash = "RPC_TeleportPlayer".GetStableHashCode();
         private static readonly int DamageHash = "RPC_Damage".GetStableHashCode();
+        private static readonly int SpawnObjectHash = "SpawnObject".GetStableHashCode();
+
+        /// <summary>
+        /// Whether SpawnObject is judged in the relay. Not an RPC guard - it belongs to World Integrity, and
+        /// works whether or not EnableRpcGuards is on.
+        /// </summary>
+        private static bool SpawnObjectWatched() {
+            return (ValConfig.BlockSpawnObjectRPC != null && ValConfig.BlockSpawnObjectRPC.Value)
+                || (ValConfig.EnableStructureValidation != null && ValConfig.EnableStructureValidation.Value
+                    && ValConfig.DetectNonBuildableStructures != null && ValConfig.DetectNonBuildableStructures.Value);
+        }
 
         /// <summary>
         /// True when at least one of the relay filters is live. Checked before the header of a packet is even
@@ -54,6 +67,9 @@ namespace ValheimEnforcer.modules.network {
             // being an RPC guard and must not depend on EnableRpcGuards being on - putting this below the
             // early return would make switching the audit on do nothing at all on most servers.
             if (modules.audit.AuditPolicy.Active()) { return true; }
+            // The same, for SpawnObject: it is refused in the relay on behalf of World Integrity, and must not
+            // depend on the RPC guards being on either.
+            if (SpawnObjectWatched()) { return true; }
             if (!RpcGuardPolicy.Active()) { return false; }
             return ValConfig.GuardChatSenderName.Value
                 || ValConfig.GuardPlayerTeleportRpc.Value
@@ -70,6 +86,7 @@ namespace ValheimEnforcer.modules.network {
         /// switch the chat-name and teleport guards back on for a server that has EnableRpcGuards off.
         /// </summary>
         internal static bool IsWatched(int methodHash) {
+            if (methodHash == SpawnObjectHash) { return SpawnObjectWatched(); }
             bool guards = RpcGuardPolicy.Active();
             if (methodHash == ChatMessageHash) { return guards && ValConfig.GuardChatSenderName.Value; }
             if (methodHash == TeleportPlayerHash) { return guards && ValConfig.GuardPlayerTeleportRpc.Value; }
@@ -181,6 +198,10 @@ namespace ValheimEnforcer.modules.network {
         internal static RpcVerdict InspectInPlace(ZNetPeer peer, int methodHash, ZDOID targetZdo, ZPackage pkg) {
             try {
                 if (methodHash == TeleportPlayerHash) { return JudgeTeleport(peer); }
+                if (methodHash == SpawnObjectHash) {
+                    pkg.ReadInt(); // the parameters package's length prefix; the arguments are the bytes after it
+                    return JudgeSpawnObject(peer, pkg);
+                }
                 if (methodHash == DamageHash) {
                     bool auditing = modules.audit.AuditPolicy.Active();
                     // Nobody wants this payload: the audit is off and the guard would exempt this peer anyway.
@@ -207,6 +228,13 @@ namespace ValheimEnforcer.modules.network {
                 if (data.m_methodHash == ChatMessageHash) { return BindChatName(peer, data); }
                 if (data.m_methodHash == TeleportPlayerHash) { return JudgeTeleport(peer); }
                 if (data.m_methodHash == DamageHash) { return JudgeDamage(peer, data); }
+                if (data.m_methodHash == SpawnObjectHash) {
+                    ZPackage parameters = data.m_parameters;
+                    parameters.SetPos(0);
+                    RpcVerdict verdict = JudgeSpawnObject(peer, parameters);
+                    parameters.SetPos(0); // the caller forwards this package untouched when we pass
+                    return verdict;
+                }
             } catch (Exception e) {
                 Logger.LogDebug($"RoutedRpcFilter could not inspect method {data.m_methodHash}: {e.Message}");
             }
@@ -279,6 +307,23 @@ namespace ValheimEnforcer.modules.network {
             RpcGuardPolicy.Report(peer, "chat-name",
                 $"chat payload claimed the name '{RpcGuardPolicy.Trim(claimedName)}'; rebound to '{authoritative}'");
             return RpcVerdict.Rewritten;
+        }
+
+        // ---- SpawnObject ---------------------------------------------------------------------------------
+
+        /// <summary>
+        /// Refuses a client's SpawnObject before it is handled or relayed, so neither the server nor any other
+        /// client instantiates it. Dropping it only on the server would leave every other client creating the
+        /// object - and being blamed for it.
+        ///
+        /// Parameter layout, from ZRpc.Serialize over ZNetScene's Register&lt;Vector3, Quaternion, int&gt;: three
+        /// floats, four floats, then the prefab hash. <paramref name="args"/> must sit at the first of them.
+        /// </summary>
+        private static RpcVerdict JudgeSpawnObject(ZNetPeer peer, ZPackage args) {
+            Vector3 pos = args.ReadVector3();
+            args.ReadQuaternion();
+            int prefabHash = args.ReadInt();
+            return modules.worldintegrity.StructureValidator.JudgeSpawnObject(peer, pos, prefabHash) ? RpcVerdict.Pass : RpcVerdict.Drop;
         }
 
         // ---- RPC_TeleportPlayer --------------------------------------------------------------------------

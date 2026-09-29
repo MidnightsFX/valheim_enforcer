@@ -1309,6 +1309,11 @@ namespace ValheimEnforcer.modules {
         /// </summary>
         private static readonly HashSet<string> ValidatedHosts = new HashSet<string>();
 
+        /// <summary>Whether this host's mod list passed validation on its current connection. Server side only.</summary>
+        internal static bool IsValidatedHost(string hostId) {
+            return !string.IsNullOrEmpty(hostId) && ValidatedHosts.Contains(hostId);
+        }
+
         /// <summary>
         /// Whether this connection is held to the mod gate at all.
         ///
@@ -1449,6 +1454,8 @@ namespace ValheimEnforcer.modules {
                 worldintegrity.StructureValidator.Forget(hostId);
                 worldintegrity.ItemOriginValidator.Forget(hostId);
                 worldintegrity.InventoryBoundsValidator.Forget(hostId);
+                cheatmonitor.CheatSuspicion.Forget(hostId);
+                cheatmonitor.CheatArtifacts.Forget(hostId);
             }
         }
 

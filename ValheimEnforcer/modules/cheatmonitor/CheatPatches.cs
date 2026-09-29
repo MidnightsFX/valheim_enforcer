@@ -40,6 +40,13 @@ namespace ValheimEnforcer.modules.cheatmonitor {
         [HarmonyPriority(Priority.Last)]
         private static void Postfix() {
             CheatDetector.Teardown();
+            // The server halves: per-connection state for connections that are all gone now.
+            CheatHeartbeat.Reset();
+            CheatSuspicion.Reset();
+            CheatArtifacts.Reset();
+            ValConfig.ResetCheatReportState();
+            // Issued nonces are per connection; none of those connections survive a shutdown.
+            mods.Attestation.ClearAll();
         }
     }
 }

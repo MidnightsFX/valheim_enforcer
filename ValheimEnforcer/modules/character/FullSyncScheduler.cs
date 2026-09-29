@@ -102,6 +102,10 @@ namespace ValheimEnforcer.modules.character {
             // Watches for the game's own save thread to finish so an archive is never taken of a world that
             // is still being written. Returns immediately unless a save has just started - see SaveArchiver.
             modules.archive.SaveArchiver.Tick();
+            // Asks each client, on its own schedule, whether its cheat scan is still running. Here for the same
+            // reason as the drains above - a server-only main-thread tick - and ahead of the pull logic below,
+            // which returns early.
+            modules.cheatmonitor.CheatHeartbeat.Tick();
 
             if (ValConfig.FullSyncSpreadAcrossInterval != null && ValConfig.FullSyncSpreadAcrossInterval.Value) {
                 SpreadPull();

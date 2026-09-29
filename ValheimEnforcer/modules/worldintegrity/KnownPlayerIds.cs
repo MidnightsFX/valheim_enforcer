@@ -85,6 +85,13 @@ namespace ValheimEnforcer.modules.worldintegrity {
             return known.ContainsKey(playerId);
         }
 
+        /// <summary>The account a player id was first reported by, or null when this server has not seen it.</summary>
+        internal static string AccountOf(long playerId) {
+            if (playerId == 0L) { return null; }
+            Load();
+            return known.TryGetValue(playerId, out string account) && !string.IsNullOrEmpty(account) ? account : null;
+        }
+
         internal static int Count() {
             Load();
             return known.Count;

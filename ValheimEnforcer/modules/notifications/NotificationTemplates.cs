@@ -22,6 +22,7 @@ namespace ValheimEnforcer.modules.notifications {
         StructureFlagged,
         ClientContradiction,
         ItemOriginFlagged,
+        CheatSuspected,
     }
 
     /// <summary>
@@ -161,6 +162,7 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.StructureFlagged:
                 case NotificationEvent.ClientContradiction:
                 case NotificationEvent.ItemOriginFlagged:
+                case NotificationEvent.CheatSuspected:
                     return NotificationCategory.Moderation;
                 case NotificationEvent.ModMismatch:
                     return NotificationCategory.ModMismatch;
@@ -191,6 +193,7 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.StructureFlagged: return set.StructureFlagged;
                 case NotificationEvent.ClientContradiction: return set.ClientContradiction;
                 case NotificationEvent.ItemOriginFlagged: return set.ItemOriginFlagged;
+                case NotificationEvent.CheatSuspected: return set.CheatSuspected;
                 default: return null;
             }
         }
@@ -208,6 +211,7 @@ namespace ValheimEnforcer.modules.notifications {
                 case NotificationEvent.StructureFlagged: set.StructureFlagged = template; break;
                 case NotificationEvent.ClientContradiction: set.ClientContradiction = template; break;
                 case NotificationEvent.ItemOriginFlagged: set.ItemOriginFlagged = template; break;
+                case NotificationEvent.CheatSuspected: set.CheatSuspected = template; break;
             }
         }
 
@@ -346,6 +350,8 @@ namespace ValheimEnforcer.modules.notifications {
                 { "creator", "none" },
                 { "health", "1.00000E+30" },
                 { "count", "24" },
+                { "tool", "Anti-cheat tampering" },
+                { "detail", "prefix on CheatDetectorBehaviour.ReportNewDetections by sample.owner (SampleAssembly)" },
             };
         }
 

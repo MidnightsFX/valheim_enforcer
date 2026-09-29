@@ -36,6 +36,7 @@ Leaving `WebhookUrl` empty and setting only one category is fine: that category 
 | `NotifyCheaterBanned` | `true` | Player banned for cheat usage |
 | `NotifyCharacterRejected` | `true` | Connection refused by `EnforceCharacterLimit` |
 | `NotifyStructureFlagged` | `true` | Structure validation caught a player placing something invalid. At most one post per player per minute, however many objects were involved |
+| `NotifyCheatSuspected` | `true` | A medium-confidence sign that a client's anti-cheat was interfered with: its detector patched or stopped, or reports it sent that never arrived. Nobody is kicked or banned for these alone. At most one post per player per minute |
 
 These are deliberately **not** synced to clients — a webhook URL is a password in URL form, and syncing it would hand it to everyone who connects. Edit them in the config file or in Configuration Manager on the server.
 
@@ -135,6 +136,7 @@ Then per event:
 | `characterRejected` | `{character}` `{playerId}` `{reason}` `{maxCharacters}` |
 | `modMismatch` | `{player}` `{playerId}` `{summary}` `{missingMods}` `{extraMods}` `{versionMismatches}` `{adminOnlyMods}` `{hashMismatches}` `{unverifiedMods}` |
 | `structureFlagged` | `{player}` `{playerId}` `{prefab}` `{position}` `{reason}` `{creator}` `{health}` `{count}` `{action}` |
+| `cheatSuspected` | `{player}` `{playerId}` `{tool}` `{detail}` `{reason}` |
 
 `{summary}` on a mod mismatch is the whole rejection written out as prose, which is what the default shows. The lists beside it are the same information split up, for when you want to say something specific — ping the mod team only when `{hashMismatches}` is involved, or post nothing but `{missingMods}` in a support channel. `{versionMismatches}` names both versions per mod — `com.example.Mod (needs 1.4.2, has 1.3.0)` — and a wrong version lands there even when the file check is what caught it, so `{hashMismatches}` only ever holds a file that fails at the version the server expects.
 

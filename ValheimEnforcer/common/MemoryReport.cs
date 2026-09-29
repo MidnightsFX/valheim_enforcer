@@ -97,7 +97,7 @@ namespace ValheimEnforcer.common {
             return $"drift resync cooldowns {ValConfig.DriftResyncTrackedCount}, guard report cooldowns {RpcGuardPolicy.TrackedCount}, " +
                    $"structure notify cooldowns {StructureValidator.TrackedCount}, item origin cooldowns {ItemOriginValidator.TrackedCount}, " +
                    $"inventory grid cooldowns {InventoryBoundsValidator.TrackedCount}, " +
-                   $"trust records {PeerTrust.TrackedCount}, first-save armed {armedNew} new / {armedReturning} returning, " +
+                   $"trust records {PeerTrust.TrackedCount}, heartbeat records {modules.cheatmonitor.CheatHeartbeat.TrackedCount}, first-save armed {armedNew} new / {armedReturning} returning, " +
                    $"known player ids {KnownPlayerIds.Count()}";
         }
 

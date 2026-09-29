@@ -4,6 +4,7 @@ using System.Globalization;
 using UnityEngine;
 using ValheimEnforcer.common;
 using ValheimEnforcer.modules.character;
+using ValheimEnforcer.modules.cheatmonitor;
 using ValheimEnforcer.modules.notifications;
 
 namespace ValheimEnforcer.modules.worldintegrity {
@@ -99,6 +100,9 @@ namespace ValheimEnforcer.modules.worldintegrity {
         private static bool deathWatch;
         private static bool nonBuildableWatch;
         private static bool healthWatch;
+        // Cheat tool markers on created objects (DetectCheatToolArtifacts). Respects the admin exemption like
+        // structure detection, but not the structure validation master switch: it is its own setting.
+        private static bool artifactWatch;
 
         /// <summary>Whether created ids are worth collecting at all this packet - see <see cref="NoteCreated"/>.</summary>
         private static bool collectCreated;
@@ -150,7 +154,9 @@ namespace ValheimEnforcer.modules.worldintegrity {
                 bool healthOn = ValConfig.DetectExcessiveStructureHealth.Value;
                 bool structureOn = ValConfig.EnableStructureValidation.Value && (nonBuildableOn || healthOn);
                 bool deathOn = ValConfig.ServerSideJoinEnforcement != null && ValConfig.ServerSideJoinEnforcement.Value;
-                if (!structureOn && !deathOn) { return; }
+                bool artifactOn = ValConfig.DetectCheatToolArtifacts != null && ValConfig.DetectCheatToolArtifacts.Value
+                    && CheatToolCatalog.ZdoArtifactKeys().Count > 0;
+                if (!structureOn && !deathOn && !artifactOn) { return; }
                 if (ZNet.instance == null || !ZNet.instance.IsServer()) { return; }
 
                 ZNetPeer peer = PeerFor(rpc);
@@ -167,13 +173,15 @@ namespace ValheimEnforcer.modules.worldintegrity {
                 }
 
                 bool wantNonBuildable = structureWatch && nonBuildableOn;
-                if (!deathOn && !wantNonBuildable && !wantHealth) { return; }
+                bool wantArtifacts = artifactOn && !IsExempt(peer);
+                if (!deathOn && !wantNonBuildable && !wantHealth && !wantArtifacts) { return; }
 
                 inboundPeer = peer;
                 deathWatch = deathOn;
                 nonBuildableWatch = wantNonBuildable;
                 healthWatch = wantHealth;
-                collectCreated = deathOn || wantNonBuildable;
+                artifactWatch = wantArtifacts;
+                collectCreated = deathOn || wantNonBuildable || wantArtifacts;
             } catch (Exception e) {
                 ClearPacketState();
                 Logger.LogDebug($"Structure validation could not open a packet: {e.Message}");
@@ -189,6 +197,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
             ZNetPeer peer = inboundPeer;
             bool death = deathWatch;
             bool nonBuildable = nonBuildableWatch;
+            bool artifacts = artifactWatch;
 
             // Cleared before the scan below, not after. Nothing from here on is part of the client's packet,
             // so nothing it touches may be attributed to the peer - and with collectCreated already false, a
@@ -198,11 +207,12 @@ namespace ValheimEnforcer.modules.worldintegrity {
             deathWatch = false;
             nonBuildableWatch = false;
             healthWatch = false;
+            artifactWatch = false;
             collectCreated = false;
 
             try {
-                if (peer != null && (death || nonBuildable) && createdZdos.Count > 0) {
-                    InspectCreated(peer, death, nonBuildable);
+                if (peer != null && (death || nonBuildable || artifacts) && createdZdos.Count > 0) {
+                    InspectCreated(peer, death, nonBuildable, artifacts);
                 }
             } catch (Exception e) {
                 Logger.LogDebug($"Structure validation could not inspect the objects a packet created: {e.Message}");
@@ -233,13 +243,14 @@ namespace ValheimEnforcer.modules.worldintegrity {
         /// The prefab hash is read once per created ZDO and everything branches off it, so a packet that
         /// created nothing interesting costs one dictionary lookup and one comparison each.
         /// </summary>
-        private static void InspectCreated(ZNetPeer peer, bool death, bool nonBuildable) {
+        private static void InspectCreated(ZNetPeer peer, bool death, bool nonBuildable, bool artifacts) {
             ZDOMan man = ZDOMan.instance;
             if (man == null) { return; }
 
             bool indexReady = false;
             bool indexChecked = false;
             bool deathRecorded = false;
+            List<KeyValuePair<int, string>> artifactKeys = artifacts ? CheatToolCatalog.ZdoArtifactKeys() : null;
 
             foreach (ZDOID id in createdZdos) {
                 // Normally still here: ZDOMan.DestroyZDO only queues the id, and the removal itself happens
@@ -262,6 +273,10 @@ namespace ValheimEnforcer.modules.worldintegrity {
                     ObserveDeath(peer);
                 }
 
+                // A cheat tool's own marker on an object this packet created. The loudest finding about the
+                // object, so it supersedes anything else queued for it and skips the checks below.
+                if (artifactKeys != null && QueueArtifact(zdo, id, prefabHash, artifactKeys)) { continue; }
+
                 if (!nonBuildable) { continue; }
                 if (!indexChecked) {
                     indexReady = StructureIndex.EnsureBuilt();
@@ -275,6 +290,17 @@ namespace ValheimEnforcer.modules.worldintegrity {
                 DropPending(id);
                 Queue(zdo, prefabHash, "placed a structure no build tool can place", float.NaN);
             }
+        }
+
+        private static bool QueueArtifact(ZDO zdo, ZDOID id, int prefabHash, List<KeyValuePair<int, string>> artifactKeys) {
+            foreach (KeyValuePair<int, string> key in artifactKeys) {
+                long value = zdo.GetLong(key.Key, 0L);
+                if (value == 0L) { continue; }
+                DropPending(id);
+                Queue(zdo, prefabHash, $"created an object carrying {key.Value}'s marker (placed by {CheatArtifacts.DescribePlayerId(value)})", float.NaN);
+                return true;
+            }
+            return false;
         }
 
         /// <summary>Removes an already-queued offence for one object, so it is not reported twice.</summary>
@@ -361,6 +387,7 @@ namespace ValheimEnforcer.modules.worldintegrity {
             deathWatch = false;
             nonBuildableWatch = false;
             healthWatch = false;
+            artifactWatch = false;
             collectCreated = false;
             if (createdZdos.Count > 0) { createdZdos.Clear(); }
             if (pending.Count > 0) { pending.Clear(); }
@@ -420,36 +447,41 @@ namespace ValheimEnforcer.modules.worldintegrity {
         }
 
         /// <summary>
-        /// Gate on ZNetScene.RPC_SpawnObject, the second way to get a structure into the world.
-        ///
-        /// ZNetScene.SpawnObject has no callers anywhere in the game assembly - it is a routed RPC that makes
-        /// every receiver, the server included, Instantiate an arbitrary prefab by hash. Because the resulting
-        /// ZDO is created by the server rather than sent by the client, the ZDOData path above never sees it,
-        /// so it needs its own check. Returns false to skip the vanilla handler.
+        /// Backstop on ZNetScene.RPC_SpawnObject. The decision is made in the relay (RoutedRpcFilter), before
+        /// the server hands the call on to every other client; this only sees what the relay let through, and
+        /// the calls the server - or a listen host's own game - makes itself, which are never blocked.
+        /// Returns false to skip the vanilla handler.
         /// </summary>
         internal static bool AllowSpawnObject(long spawner, Vector3 pos, int prefabHash) {
-            try {
-                if (!ValConfig.EnableStructureValidation.Value) { return true; }
-                if (ZNet.instance == null || !ZNet.instance.IsServer()) { return true; }
+            if (ZNet.instance == null || !ZNet.instance.IsServer()) { return true; }
+            if (spawner == ZNet.GetUID()) { return true; }
+            return JudgeSpawnObject(ZNet.instance.GetPeer(spawner), pos, prefabHash);
+        }
 
-                // ZNetScene.SpawnObject has no caller anywhere in the game assembly - it is a routed RPC that
-                // makes every receiver, the server included, Instantiate an arbitrary prefab by hash. So no
-                // client-originated SpawnObject is legitimate, whatever the prefab: a structure, a creature, a
-                // boss, an item. `spawner` is trustworthy here because RoutedRpcGuard corrects the routed sender
-                // before this runs.
-                ZNetPeer peer = ZNet.instance.GetPeer(spawner);
+        /// <summary>
+        /// Whether a client may have SpawnObject reach anybody. True lets it through.
+        ///
+        /// ZNetScene.SpawnObject has no caller anywhere in the game assembly - it is a routed RPC that makes
+        /// every receiver Instantiate an arbitrary prefab by hash, and because the resulting objects are created
+        /// by the receivers rather than sent by the client, the ZDOData path above never sees who asked. So no
+        /// client-originated SpawnObject is legitimate, whatever the prefab. Blocked when BlockSpawnObjectRPC is
+        /// on; a non-buildable structure is blocked by the structure check even when it is off. The peer is
+        /// trustworthy because RoutedRpcGuard resolves it from the connection, not from the packet.
+        /// </summary>
+        internal static bool JudgeSpawnObject(ZNetPeer peer, Vector3 pos, int prefabHash) {
+            try {
+                if (ZNet.instance == null || !ZNet.instance.IsServer()) { return true; }
                 if (peer != null && IsExempt(peer)) { return true; } // admins keep their devcommands-style freedom
 
                 bool indexReady = StructureIndex.EnsureBuilt();
                 if (indexReady && StructureIndex.IsIgnored(prefabHash)) { return true; } // allowlisted prefab
 
-                bool isStructure = indexReady
-                    && ValConfig.DetectNonBuildableStructures.Value
-                    && StructureIndex.IsNonBuildableStructure(prefabHash);
-
-                // A non-structure SpawnObject only blocks when BlockSpawnObjectRPC is on. A structure one is
-                // covered by the structure check regardless, so it goes through even when the broad block is off.
-                if (!isStructure && !ValConfig.BlockSpawnObjectRPC.Value) { return true; }
+                bool nonBuildable = indexReady && StructureIndex.IsNonBuildableStructure(prefabHash);
+                bool structureRule = nonBuildable
+                    && ValConfig.EnableStructureValidation.Value
+                    && ValConfig.DetectNonBuildableStructures.Value;
+                if (!structureRule && !ValConfig.BlockSpawnObjectRPC.Value) { return true; }
+                bool isStructure = nonBuildable;
 
                 string reason = isStructure
                     ? "asked the server to spawn a structure no build tool can place (SpawnObject RPC)"

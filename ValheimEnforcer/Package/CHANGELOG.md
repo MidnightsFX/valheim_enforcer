@@ -1,3 +1,40 @@
+**0.33.0**
+---
+```
+- Cheat detection
+    - The server now judges proxy DLL hashes itself, against its own tables, whatever the client made of
+      them. Adds BannedProxyLoaderHashes (Anti-Cheat, empty, server only): ban a build you have identified
+      from the next report on, without waiting for a release.
+    - Adds DetectUnlistedGameFolderDlls (Anti-Cheat, default on): any DLL loaded from the game folder that
+      the game does not ship there is reported with its hashes. Logged only, unless the hash is a known or
+      banned build.
+    - Adds ReportUnaccountedCode (Anti-Cheat, default on): clients report managed code in the game that no
+      installed mod, patcher, BepInEx or the game accounts for - assembly name, build id (MVID), up to eight
+      namespaces, file name without its folder, what it patches and whether it draws on screen. Logged once
+      per build per session. Adds BannedAssemblyNamespaces and BannedAssemblyMvids (Anti-Cheat, empty,
+      server only) to ban on them.
+    - Adds DetectAntiCheatTampering (Anti-Cheat, default on): the client checks that the cheat detector's
+      own methods have not been patched. Findings are medium confidence.
+    - Adds CheatScanHeartbeat (Anti-Cheat, default on), with CheatHeartbeatIntervalMinutes (5),
+      CheatHeartbeatTimeoutSeconds (60) and CheatHeartbeatMissesAllowed (2): the server asks each client for
+      the state of its scan, and the client must answer even when it has found nothing. Missed answers are
+      logged and count as the cheat-heartbeat guard for ReportClientContradictions. A stopped scan or reports
+      that never arrived are medium confidence.
+    - Adds DetectCheatToolArtifacts (Anti-Cheat, advanced, default on): the server reads known cheat tools'
+      markers off the objects clients create (handled like a structure detection) and the items they report
+      (logged and posted only - items change hands).
+    - Only matched entries used to leave the client. Unaccounted-code reports and heartbeat answers now do
+      too; neither carries paths, window titles or the process list. See docs/cheat-detection.md.
+- BlockSpawnObjectRPC now takes effect on its own, without EnableStructureValidation. It was already on by
+  default, so this switches blocking on for every existing config. A blocked call is now refused before the
+  server relays it: previously every other client still received it and created the object. Calls the
+  server makes itself are never blocked. Turn it off if a mod on your server legitimately has clients send
+  SpawnObject.
+- AttestationPolicy now defaults to Report: a failed attestation is logged and the player still connects.
+  Existing configs keep their value.
+- enforcer-harden reports the new settings and AttestationPolicy.
+```
+
 **0.32.1**
 ---
 ```

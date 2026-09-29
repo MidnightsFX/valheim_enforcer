@@ -19,7 +19,9 @@ Valheim gives the server nothing to work with here. There is no "place piece" me
 
 **Nobody is blamed for somebody else's structure.** Ownership of an object moves to whichever player is nearest, every couple of seconds. Health that was already too high before a client wrote to it is attributed to no one, so walking past a cheated structure — or hitting it — cannot get an innocent player reported. `enforcer-structures-scan` is how those get found.
 
-There is a second door: `SpawnObject`, a routed message nothing in the game ever sends, which asks the server to instantiate any prefab by hash — a creature or an item as easily as a structure. `BlockSpawnObjectRPC` (on) refuses every one of them and, by default, posts the block to your moderation channel; it follows `StructureValidationAction` for what happens to the player, which defaults to `Log`, so out of the box it blocks and reports without kicking or banning. A structure spawned this way is reported as a structure detection either way. Turn it off to fall back to refusing only non-buildable structures through `SpawnObject`, if a mod on your server legitimately uses the call.
+There is a second door: `SpawnObject`, a routed message nothing in the game ever sends, which makes every receiver instantiate any prefab by hash — a creature or an item as easily as a structure. `BlockSpawnObjectRPC` (on) refuses every one of them before the server relays it, so neither the server nor any other client instantiates it, and, by default, posts the block to your moderation channel; it follows `StructureValidationAction` for what happens to the player, which defaults to `Log`, so out of the box it blocks and reports without kicking or banning. **It works on its own** — `EnableStructureValidation` does not have to be on — and never blocks a call the server makes itself. Turn it off, if a mod on your server legitimately has clients send the call, to fall back to refusing only non-buildable structures through `SpawnObject` while structure validation is on.
+
+Separately, `DetectCheatToolArtifacts` (Anti-Cheat, on) reads the markers known cheat menus write onto the objects they place. An object a client creates carrying one is handled exactly like a structure detection here — logged, posted, `StructureValidationAction` — and works whether or not the rest of structure validation is on.
 
 ## Settings
 
@@ -27,7 +29,7 @@ There is a second door: `SpawnObject`, a routed message nothing in the game ever
 | --- | --- | --- |
 | `EnableStructureValidation` | `false` | Master switch. Everything below is inert until this is on |
 | `DetectNonBuildableStructures` | `true` | The build-menu check |
-| `BlockSpawnObjectRPC` | `true` | Refuse every client-sent `SpawnObject` RPC (all prefabs, not just structures) and post it to the moderation channel |
+| `BlockSpawnObjectRPC` | `true` | Refuse every client-sent `SpawnObject` RPC (all prefabs, not just structures) before it is relayed, and post it to the moderation channel. Works without `EnableStructureValidation` |
 | `DetectExcessiveStructureHealth` | `true` | The health-ceiling check |
 | `StructureValidationAction` | `Log` | What happens to the player: `Log`, `Kick` or `Ban`. Detections are logged and posted to Discord regardless |
 | `RemoveDetectedStructures` | `false` | Whether the structure itself is deleted |
