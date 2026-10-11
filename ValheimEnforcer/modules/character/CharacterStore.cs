@@ -9,7 +9,9 @@ using static ValheimEnforcer.common.DataObjects;
 
 namespace ValheimEnforcer.modules.character {
     /// <summary>
-    /// Server-side, asynchronous, coalescing persistence for player character saves (disk storage mode).
+    /// Asynchronous, coalescing persistence for character save files: everything a server receives from its
+    /// clients in disk storage mode, and every save any machine - client, listen host or server - writes for
+    /// itself through <see cref="ValConfig.WritePlayerCharacterToSave"/>.
     ///
     /// Motivation: the vanilla server periodically broadcasts "save player profiles" to every client at
     /// once, which makes all connected clients send a full character save to the server in the same
@@ -33,11 +35,27 @@ namespace ValheimEnforcer.modules.character {
     /// <see cref="ValConfig.CharacterCacheIdleMinutes"/> are dropped; the next update for that character
     /// reads the file back, on the worker.
     ///
+    /// The same worker writes the saves a machine makes for itself (<see cref="SubmitSnapshot"/>), which used to
+    /// be serialized and written on the main thread wherever they were asked for - on a client that was a join,
+    /// every death and every respawn, each a visible hitch with a large character. The main thread now only takes
+    /// a copy (<see cref="CharacterSnapshot"/>), so the caller's own object - on a client, the live tracked
+    /// character - is free to change again the moment the call returns. Admin commands go through here too, and
+    /// that is what orders an admin's edit against a client's save already queued for the same character.
+    ///
+    /// When a pending write is landed (the flush rules):
+    ///  - before anything reads a character's file back: <see cref="ValConfig.LoadCharacterFromSave"/>, a login
+    ///    (ValConfig.SendSavedCharacter) and a map request each wait, bounded, for THAT character
+    ///    (<see cref="FlushCharacter"/>);
+    ///  - when a player leaves, their write stops waiting for its interval (<see cref="RequestWriteForSender"/>);
+    ///  - before a session ends and before the process exits, everything is written and the worker stopped
+    ///    (<see cref="Shutdown"/>, from the ZNet.Shutdown prefix and Application.quitting). ZNet.Shutdown runs
+    ///    inside Game.Shutdown after its profile save, so the end-of-session save is always among what it lands.
+    ///
     /// Threading contract:
     ///  - The main thread only ever calls the Submit*/Seed/IsCached/HasUnwrittenChanges/Snapshot/Flush/
     ///    FlushCharacter/RequestWriteForSender/Shutdown API and hands the worker immutable strings (or objects
-    ///    it will not touch again after handoff). It never dereferences a cached
-    ///    <see cref="DataObjects.Character"/>.
+    ///    it will not touch again after handoff - a snapshot is a copy nobody else holds). It never dereferences
+    ///    a cached <see cref="DataObjects.Character"/>.
     ///  - The worker thread is the SOLE owner and mutator of cached <see cref="DataObjects.Character"/>
     ///    objects, and the only thread that writes an entry's fields, with the exceptions being a single word
     ///    each: <see cref="Entry.Dirty"/> is volatile and the main thread reads it,
@@ -45,7 +63,8 @@ namespace ValheimEnforcer.modules.character {
     ///    <see cref="Entry.CanonKey"/> never changes after construction, and the main thread reads
     ///    <see cref="Entry.LastSender"/> only to decide whose write to hurry, where a stale value costs nothing.
     ///  - Internal-storage (ZDO) writes are intentionally NOT handled here: ZDOs are main-thread only.
-    ///    Callers use this store for disk mode and keep the existing synchronous path for internal mode.
+    ///    Callers use this store for disk mode and keep the existing synchronous path for internal mode. Only
+    ///    the file copy WritePlayerCharacterToSave keeps beside the registry comes here.
     /// </summary>
     internal static class CharacterStore {
 
@@ -80,6 +99,14 @@ namespace ValheimEnforcer.modules.character {
             // Worker-only. Write this one on the next pass whatever the interval says: it was changed by
             // something other than a routine delta.
             public bool WriteNow;
+            // The account folder the file lives in, when that is not simply Character.HostID. Only a snapshot
+            // sets it: WritePlayerCharacterToSave files a save under the id its caller passed, and the store
+            // has to put it where that synchronous write always did. Set at construction and never changed.
+            public string AccountId;
+            // Worker-only. The write still owed for this entry was asked for by something worth an Info line - a
+            // join, a death, a logout, an admin's edit - rather than the routine baseline refresh. Cleared once
+            // written.
+            public bool Notable;
         }
 
         private abstract class Message {
@@ -106,6 +133,13 @@ namespace ValheimEnforcer.modules.character {
         }
         private sealed class DeltaMessage : Message { public DeltaSummaryUpdate Delta; public long Sender; }
         private sealed class DeathMessage : Message { public string HostID; public string Name; }
+        /// <summary>A whole character this machine wrote itself - see <see cref="SubmitSnapshot"/>. The character
+        /// is a copy nobody else holds, so the worker owns it from the moment it is queued.</summary>
+        private sealed class SnapshotMessage : Message {
+            public string AccountId;
+            public DataObjects.Character Character;
+            public bool Routine;
+        }
         /// <summary>Seal this character into a crash-recovery snapshot for the peer that is playing it. The
         /// keys are an immutable object captured on the main thread, so the worker never reads the key file
         /// and an admin rotating it mid-seal cannot change what this one produces.</summary>
@@ -348,6 +382,31 @@ namespace ValheimEnforcer.modules.character {
             Enqueue(new DeathMessage { HostID = hostId, Name = name }, hostId, name);
         }
 
+        /// <summary>
+        /// Write a whole character this machine produced itself: a client's or a host's own save, an admin
+        /// command's edit, an import. <paramref name="detached"/> must be a copy nobody else holds
+        /// (<see cref="CharacterSnapshot.TryCopy"/>), because from here on it belongs to the worker, which
+        /// serializes it. Filed under <paramref name="accountId"/>, as the synchronous write it replaces filed it.
+        ///
+        /// It replaces whatever the store held for the character, which is what that synchronous write followed
+        /// by <see cref="Invalidate"/> used to do - but in order: it lands behind every message already queued
+        /// for this character and ahead of every one queued after it, so a stale queued save cannot overtake it
+        /// and it cannot overtake a newer one. A client change it was not taken from is asked for again rather
+        /// than lost (see Apply). Written on the next pass; two snapshots of the same character that reach the
+        /// worker together are one write, the later one.
+        /// </summary>
+        internal static void SubmitSnapshot(string accountId, DataObjects.Character detached, bool routine) {
+            if (detached == null) { return; }
+            // Both become path segments on the worker. The caller has already checked them; this keeps the
+            // worker from ever composing a path outside the character folder even if a future caller forgets.
+            if (!PeerIdentity.IsSafeToken(accountId) || !PeerIdentity.IsSafeToken(detached.Name)) {
+                Logger.LogWarning($"Refusing to queue a character save under an unsafe account id or name ('{accountId}' / '{detached.Name}').");
+                return;
+            }
+            EnsureWorker();
+            Enqueue(new SnapshotMessage { AccountId = accountId, Character = detached, Routine = routine }, accountId, detached.Name);
+        }
+
         /// <summary>Main thread: take the next queued drift-recovery request, or null when there are none.
         /// Drained by FullSyncSchedulerBehaviour, which already ticks server-side every frame.</summary>
         internal static DriftResync TryDequeueDriftResync() {
@@ -398,10 +457,11 @@ namespace ValheimEnforcer.modules.character {
         }
 
         /// <summary>Drop any cached state for a character so the next access reloads from disk. Used
-        /// after a synchronous out-of-band write (e.g. the admin confiscated-item return path) so the
-        /// async store cannot later overwrite it with a stale cached copy. A change the worker had applied
-        /// but not yet written is not written over the admin's file; that client is asked for a full save
-        /// instead (see DrainOnce).</summary>
+        /// after a synchronous out-of-band write - WritePlayerCharacterToSave with BackgroundCharacterWrites off -
+        /// so the async store cannot later overwrite it with a stale cached copy. A change the worker had applied
+        /// but not yet written is not written over that file; that client is asked for a full save instead (see
+        /// WriteDue). Never call this after <see cref="SubmitSnapshot"/>: the snapshot may already be the entry
+        /// it would drop, and its write would go with it.</summary>
         internal static void Invalidate(string id, string name) {
             cache.TryRemove(KeyFor(id, name), out _);
         }
@@ -547,7 +607,17 @@ namespace ValheimEnforcer.modules.character {
             return messages.IsEmpty && !workerBusy && unwrittenCount == 0;
         }
 
-        /// <summary>Flush and stop the worker. Called from the server shutdown path.</summary>
+        /// <summary>Application.quitting. Every save a session makes has normally been written by the time ZNet
+        /// shuts down (see <see cref="Shutdown"/>), so this usually finds nothing to do. It is here because the
+        /// worker is a background thread, and anything still queued when the process exits would go with it.</summary>
+        internal static void OnApplicationQuitting() {
+            Shutdown();
+        }
+
+        /// <summary>Flush and stop the worker. Called from the ZNet.Shutdown prefix on every machine - the end of
+        /// a client's session, a host's or a server's - and on application quit. Blocks the main thread until
+        /// the writes land (bounded), which is the point: nothing after this may assume a save is still
+        /// pending. A later write starts the worker again.</summary>
         internal static void Shutdown() {
             if (!running) { return; }
             if (!Flush(TimeSpan.FromSeconds(10))) {
@@ -663,9 +733,10 @@ namespace ValheimEnforcer.modules.character {
                 try {
                     // Record the mtime the OS reports for our own write so a later login can tell an
                     // out-of-band edit apart from a file we wrote ourselves.
-                    entry.SourceMtime = WriteToDisk(entry.Character);
+                    entry.SourceMtime = WriteToDisk(entry);
                     entry.Dirty = false;
                     entry.WriteNow = false;
+                    entry.Notable = false;
                     entry.DirtySinceTicks = 0L;
                     entry.RetryAfterTicks = 0L;
                     writtenScratch.Add(kv.Key);
@@ -1021,8 +1092,69 @@ namespace ValheimEnforcer.modules.character {
                     Logger.LogInfo($"Stored the map for {cur.Name} ({map.Blob.Length} bytes).");
                     return entry;
                 }
+                case SnapshotMessage snap:
+                    return ApplySnapshot(snap, out key);
             }
             return null;
+        }
+
+        // Worker-thread only. A snapshot replaces the store's copy of its character wholesale, under every spelling
+        // the character is held by, and is written exactly as it arrived - unlike a client's full save, nothing in
+        // it is merged with the copy it replaces, because it is the copy: the machine's own save, or an admin's
+        // edit of what LoadCharacterFromSave handed them.
+        private static Entry ApplySnapshot(SnapshotMessage snap, out string key) {
+            DataObjects.Character c = snap.Character;
+            key = KeyFor(snap.AccountId, c.Name);
+            string canon = CanonicalKey(snap.AccountId, c.Name);
+            Entry previous = null;
+            long newest = c.SaveSequence;
+
+            // Removing through the collection interface removes the pair only while the value is still the exact
+            // entry inspected, as in the sweep.
+            ICollection<KeyValuePair<string, Entry>> pairs = cache;
+            foreach (KeyValuePair<string, Entry> kv in cache) {
+                Entry old = kv.Value;
+                if (!string.Equals(old.CanonKey, canon, StringComparison.OrdinalIgnoreCase)) { continue; }
+                bool sameKey = kv.Key == key;
+                if (sameKey) { previous = old; }
+                long held = old.Character?.SaveSequence ?? 0L;
+                if (held > newest) { newest = held; }
+
+                // The server bumps SaveSequence for every client message it applies, so a copy holding a higher
+                // number than this snapshot - or one still unwritten - has a client's change in it that the
+                // snapshot was not taken from: an admin read the character, the player kept playing, and the
+                // admin's edit is now about to be written over what they did. The edit wins, as it did when it
+                // was written on the spot and the cached copy invalidated; the client still has its change, so
+                // it is asked for a full save, which lands on top. On a client the entries are only ever its own
+                // snapshots, with no sender, and none of this applies.
+                if (old.LastSender != 0L && old.Character != null && (old.Dirty || held > c.SaveSequence)) {
+                    Logger.LogInfo($"{c.Name} ({snap.AccountId}) was saved over an update from their client that it did not include; asking the client for a full save.");
+                    driftResyncs.Enqueue(new DriftResync { Sender = old.LastSender, HostID = old.Character.HostID, Name = old.Character.Name });
+                }
+                if (old.Dirty) {
+                    // Superseded, so nobody will write it, and a login must not wait on it.
+                    old.Dirty = false;
+                    unwritten.Remove(kv.Key);
+                }
+                if (!sameKey) { pairs.Remove(kv); }
+            }
+
+            // Never backwards. Crash recovery adopts a snapshot only when its sequence is strictly greater than the
+            // one held here, so lowering it would let a snapshot sealed before this save be adopted over it.
+            c.SaveSequence = newest;
+            Entry fresh = new Entry {
+                Character = c,
+                Dirty = true,
+                AccountId = snap.AccountId,
+                // A routine save that catches up with a notable one still owes the notable one's log line.
+                Notable = !snap.Routine || (previous != null && previous.Notable),
+                // The file is still the one the previous copy came from, until this one is written.
+                SourceMtime = previous?.SourceMtime ?? DateTime.MinValue,
+                LastTouchedTicks = DateTime.UtcNow.Ticks,
+                CanonKey = canon,
+            };
+            cache[key] = fresh;
+            return fresh;
         }
 
         private static string Describe(recovery.RecoverySeal.Verdict verdict) {
@@ -1134,9 +1266,10 @@ namespace ValheimEnforcer.modules.character {
 
         // Returns the UTC last-write time the OS records for the file we just wrote, so the caller can store
         // it as the entry's SourceMtime and later distinguish our own write from an out-of-band edit.
-        private static DateTime WriteToDisk(DataObjects.Character c) {
+        private static DateTime WriteToDisk(Entry entry) {
+            DataObjects.Character c = entry.Character;
             Directory.CreateDirectory(ValConfig.CharacterFilePath);
-            string dir = Path.Combine(ValConfig.CharacterFilePath, c.HostID);
+            string dir = Path.Combine(ValConfig.CharacterFilePath, entry.AccountId ?? c.HostID);
             if (!Directory.Exists(dir)) {
                 Directory.CreateDirectory(dir);
                 // A new account. CharacterSaves remembers the folder listing, and would otherwise have to
@@ -1146,10 +1279,21 @@ namespace ValheimEnforcer.modules.character {
             string path = Path.Combine(dir, $"{c.Name}.yaml");
             // CharacterYaml rather than the serializer: the same document for a small fraction of the
             // allocation, which matters more here than anywhere - this is the call behind every update from
-            // every player.
-            DateTime written = CharacterYaml.WriteFile(path, c);
-            // Debug: one per write is the store working, and the saves worth an Info line already have one.
-            if (Logger.DebugEnabled) { Logger.LogDebug($"Wrote {path}"); }
+            // every player. Timed as background work: it costs no frame, but a slow disk should still show.
+            StallWatch timer = StallWatch.StartBackground("Character save (serialize + write)");
+            DateTime written;
+            try {
+                written = CharacterYaml.WriteFile(path, c);
+            } finally {
+                timer.Stop();
+            }
+            // One line per write is the store working, so Debug - except for the saves that were always worth an
+            // Info line when they were written on the main thread: a join, a death, a logout, an admin's edit.
+            if (entry.Notable) {
+                Logger.LogInfo($"Wrote {path}");
+            } else if (Logger.DebugEnabled) {
+                Logger.LogDebug($"Wrote {path}");
+            }
             return written;
         }
     }

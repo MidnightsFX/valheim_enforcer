@@ -1,3 +1,11 @@
+**0.33.1**
+---
+```
+- Character saves are written in the background, so joining, dying and respawning no longer stutter.
+- Logging out, quitting or stopping a server waits for any pending character save, so the latest one is never lost.
+- Fixes the last save of a session being taken after the character was already cleared when a logout was delayed.
+```
+
 **0.33.0**
 ---
 ```

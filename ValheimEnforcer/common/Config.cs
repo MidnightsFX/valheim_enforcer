@@ -119,6 +119,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<int> CharacterWriteIntervalSeconds;
         public static ConfigEntry<bool> FullSyncSpreadAcrossInterval;
         public static ConfigEntry<bool> FastCharacterWriter;
+        public static ConfigEntry<bool> BackgroundCharacterWrites;
         public static ConfigEntry<bool> BinaryDeltaUpdates;
 
         public static ConfigEntry<bool> EnableCheatDetection;
@@ -452,6 +453,8 @@ namespace ValheimEnforcer {
             FastCharacterWriter = BindServerConfig("Advanced", "FastCharacterWriter", true, "If enabled (the default), character saves are written by a purpose-built writer instead of the general YAML serializer. The file is the same file - same keys, same layout, read back by the same reader, and interchangeable with saves written the other way - but producing it costs a small fraction of the memory, which matters because a character is rewritten every time a player's inventory changes. The writer checks itself against the serializer once at startup and hands everything back to the serializer for the session if the two disagree about anything, saying so in the log. Turn this off only if you suspect it of a problem; saves keep working exactly as they did before it existed.", advanced: true);
             FastCharacterWriter.SettingChanged += (sender, args) => CharacterYaml.SetEnabled(FastCharacterWriter.Value);
             CharacterYaml.SetEnabled(FastCharacterWriter.Value);
+            // Read only on the main thread, by WritePlayerCharacterToSave, so no worker snapshot is needed.
+            BackgroundCharacterWrites = BindServerConfig("Advanced", "BackgroundCharacterWrites", true, "If enabled (the default), character saves are written to disk on a background thread. The game takes a quick copy of the character and carries on, and the file is written a moment later - the same file, published the same way. Before this, every save this machine made for itself was written in the middle of a frame: on a client that is the join, every death and every respawn, each a visible stutter with a large character. Saves of the same character that pile up are written once, anything that reads a character back waits for its pending write first, and logging out, a server shutting down and quitting all wait for every pending write before going on. Saves clients send to a server were already written in the background and still are, regardless of this setting. Turn this off only if you suspect it of a problem; saves are then written on the spot, exactly as before. The in-world copy InternalStorageMode keeps is written on the spot either way, because the world's data can only be changed from the game's main thread.", advanced: true);
             BinaryDeltaUpdates = BindServerConfig("Advanced", "BinaryDeltaUpdates", true, "If enabled (the default), the server tells connecting clients it accepts incremental character updates in a compact binary form, and clients that understand that send it instead of YAML. Same content either way; the binary form costs the server a few kilobytes to read where the YAML one cost around a hundred and fifty, once per player every few seconds, on the main thread. Clients running a build from before this existed keep sending YAML and are handled as they always were, and turning this off makes every client do the same from its next connection.", advanced: true);
 
             EnableCheatDetection = BindServerConfig("Anti-Cheat", "EnableCheatDetection", true, "Master switch for client-side cheat scanning. When enabled the client checks running processes, the DLLs loaded into the game, and open window titles against a catalog of known cheat tools. Only matched entries are reported to the server - the player's full process list is never transmitted.");
@@ -565,7 +568,20 @@ namespace ValheimEnforcer {
 
         // routine: set for the recurring background baseline write driven by CharacterDeltaTracker, which happens
         // often enough that logging every one at info level would drown the log. Notable saves (join, logout,
-        // death, an incoming character from a client) leave it false and stay visible without debug logging.
+        // death, an incoming character from a client) leave it false and stay visible without debug logging -
+        // the line is written by whichever thread writes the file, when it has.
+        //
+        // Threading: the main thread takes a copy of the character (CharacterSnapshot) and queues it, and that is
+        // all. Turning it into YAML and writing the file happen on the CharacterStore worker, which publishes by
+        // rename as this always did, writes saves of the same character that reach it together once (the latest
+        // wins), and orders the write against everything else queued for that character. The caller keeps its
+        // object and may change it again the moment this returns. Nothing can read a stale file because of it:
+        // LoadCharacterFromSave and a login wait for that character's pending write first, and ZNet.Shutdown and
+        // Application.quitting land every pending write before the session or the process ends - see the flush
+        // rules on CharacterStore.
+        //
+        // What still happens on the main thread: the in-world registry in InternalStorageMode, which is a ZDO; and
+        // the whole write, the old way, when BackgroundCharacterWrites is off or the copy has failed its self-test.
         internal static void WritePlayerCharacterToSave(string id, DataObjects.Character character, bool routine = false) {
             // The id and the character name are both used as path segments below. On the server they arrive from
             // a client (the account id from the socket, the name from the peer-info package), so a
@@ -580,6 +596,32 @@ namespace ValheimEnforcer {
                 InternalDataStore.SaveAccountCharacter(character);
             }
             // Double write the data so that if the storage mode is switched the data will still be present.
+            if (BackgroundCharacterWrites == null || BackgroundCharacterWrites.Value) {
+                // Timed because it is the one part of a save left on the frame. It should not come near the
+                // threshold; if it does, a character has grown large enough to be worth knowing about.
+                StallWatch snapshotTimer = StallWatch.Start("Character save (snapshot)");
+                DataObjects.Character copy;
+                try {
+                    copy = CharacterSnapshot.TryCopy(character);
+                } finally {
+                    snapshotTimer.Stop();
+                }
+                if (copy != null) {
+                    modules.character.CharacterStore.SubmitSnapshot(id, copy, routine);
+                    return;
+                }
+            }
+            WritePlayerCharacterNow(id, character, routine);
+        }
+
+        // The synchronous write, on the calling thread: BackgroundCharacterWrites is off, or the snapshot copy
+        // failed its self-test this session.
+        private static void WritePlayerCharacterNow(string id, DataObjects.Character character, bool routine) {
+            // Anything still queued for this character has to land first, or the worker would write it after this
+            // and it would win. Only ever true here when the setting was switched off mid-session.
+            if (modules.character.CharacterStore.HasUnwrittenChanges(id, character.Name)) {
+                modules.character.CharacterStore.FlushCharacter(id, character.Name, LoginFlushBound);
+            }
             Directory.CreateDirectory(Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder));
             string accountDir = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, id);
             // A folder that is about to exist for the first time is a new account, which the remembered folder
@@ -588,10 +630,9 @@ namespace ValheimEnforcer {
             var saveDir = Directory.CreateDirectory(accountDir);
             string path = Path.Combine(saveDir.FullName, $"{character.Name}.yaml");
             if (routine) { Logger.LogDebug($"Writing to {path}"); } else { Logger.LogInfo($"Writing to {path}"); }
-            // Serializing the whole character and writing it is synchronous and on the main thread on
-            // every path except the server's disk-mode store, and a large save (the confiscated list can
-            // run to hundreds of entries) makes that long enough to see. Timed so it shows up as itself
-            // rather than as an unexplained hitch.
+            // Serializing the whole character and writing it here is on the main thread, and a large save (the
+            // confiscated list can run to hundreds of entries) makes that long enough to see. Timed so it shows
+            // up as itself rather than as an unexplained hitch.
             StallWatch timer = StallWatch.Start("Character save (serialize + write)");
             try {
                 // Through CharacterYaml rather than Serialize + WriteAllText: the same document for a fraction of
@@ -602,6 +643,9 @@ namespace ValheimEnforcer {
             } finally {
                 timer.Stop();
             }
+            // Written around the store, so a copy it still holds would be written back over this on its next
+            // change. The background path needs none of this: there the write IS the store's.
+            modules.character.CharacterStore.Invalidate(id, character.Name);
         }
 
         internal static DataObjects.Character LoadCharacterFromSave(string id, string name) {
@@ -628,9 +672,10 @@ namespace ValheimEnforcer {
             }
 
             // The store may be holding a change for this character that has not reached the file yet - for about
-            // a second normally, and for up to CharacterWriteIntervalSeconds when that is set. Everything that
-            // comes through here on a server is about to act on what the file says (an admin command, the death
-            // observer), so ask for that write first. Costs a dictionary probe when nothing is outstanding.
+            // a second normally, and for up to CharacterWriteIntervalSeconds when that is set - including a save
+            // this machine queued itself through WritePlayerCharacterToSave. Everything that comes through here
+            // is about to act on what the file says (a join on a host, an admin command, the death observer), so
+            // ask for that write first. Costs a dictionary probe when nothing is outstanding.
             if (modules.character.CharacterStore.HasUnwrittenChanges(id, name)) {
                 modules.character.CharacterStore.FlushCharacter(id, name, LoginFlushBound);
             }
@@ -2347,18 +2392,11 @@ loadouts: {}
         internal static bool UpdatePlayerSaveWithDeltaData(DeltaSummaryUpdate deltaSummary, DataObjects.Character character) {
             bool drifted = MergeDelta(deltaSummary, character);
 
-            if (ValConfig.InternalStorageMode.Value) {
-                InternalDataStore.SaveAccountCharacter(character);
-            }
-
-            var charDir = Path.Combine(Paths.ConfigPath, ValheimEnforcer, CharacterFolder, deltaSummary.HostID);
-            // Ensure the per-id folder exists (internal-storage mode loads from a ZDO and may not have
-            // written the file yet). Mirrors WritePlayerCharacterToSave.
-            if (!Directory.Exists(charDir)) { modules.character.CharacterSaves.InvalidateFolderListing(); }
-            Directory.CreateDirectory(charDir);
-            string fullpath = Path.Combine(charDir, $"{deltaSummary.Name}.yaml");
-            CharacterYaml.WriteFile(fullpath, character);
+            // The registry write and the file copy beside it, which this used to open-code with a synchronous
+            // file write. Through WritePlayerCharacterToSave the registry half still happens here, on the main
+            // thread as it must, and the file half goes to the background writer like every other save.
             // Routine, like the delta it follows - see LogDeltaReceived.
+            WritePlayerCharacterToSave(deltaSummary.HostID, character, routine: true);
             if (Logger.DebugEnabled) { Logger.LogDebug($"Saved delta update for {character.Name}."); }
 
             return drifted;

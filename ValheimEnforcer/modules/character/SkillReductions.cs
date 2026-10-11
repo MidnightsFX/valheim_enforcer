@@ -108,14 +108,13 @@ namespace ValheimEnforcer.modules.character {
         }
 
         /// <summary>
-        /// Writes the edited character back. Paired with a store invalidation for the same reason
-        /// <see cref="ConfiscatedItems.Persist"/> is: this bypasses the async store, and a cached copy left behind
-        /// would be rewritten from pre-edit state on the next delta.
+        /// Writes the edited character back. No store invalidation, for the same reason
+        /// <see cref="ConfiscatedItems.Persist"/> no longer has one: the write goes through the async store, which
+        /// replaces its own copy in order.
         /// </summary>
         internal static void Persist(string account, string name, DataObjects.Character character) {
             if (character == null) { return; }
             ValConfig.WritePlayerCharacterToSave(account, character);
-            CharacterStore.Invalidate(account, name);
         }
 
         /// <summary>

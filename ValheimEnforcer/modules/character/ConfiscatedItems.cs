@@ -81,14 +81,15 @@ namespace ValheimEnforcer.modules.character {
         }
 
         /// <summary>
-        /// Writes the edited character back. Always paired with a store invalidation: this write bypasses the
-        /// async character store, so a cached copy left behind would be rewritten from pre-edit state on the
-        /// next delta and bring the entries straight back.
+        /// Writes the edited character back. This used to be paired with a store invalidation, because the write
+        /// went around the async character store and a cached copy left behind would have been rewritten from
+        /// pre-edit state on the next delta, bringing the entries straight back. The write now goes through the
+        /// store, which replaces its copy in order (CharacterStore.SubmitSnapshot), so there is nothing to
+        /// invalidate - and invalidating would drop the queued write itself.
         /// </summary>
         internal static void Persist(string account, string name, DataObjects.Character character) {
             if (character == null) { return; }
             ValConfig.WritePlayerCharacterToSave(account, character);
-            CharacterStore.Invalidate(account, name);
         }
 
         /// <summary>

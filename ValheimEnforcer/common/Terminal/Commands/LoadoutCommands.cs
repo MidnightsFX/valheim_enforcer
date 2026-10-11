@@ -136,8 +136,8 @@ namespace ValheimEnforcer.common {
                 return;
             }
 
+            // Through the async store, which replaces its cached copy in order - see ConfiscatedItems.Persist.
             ValConfig.WritePlayerCharacterToSave(account, character);
-            CharacterStore.Invalidate(account, name);
 
             // Same caveat as every other command that edits a stored save while somebody may be holding their
             // own copy of it.

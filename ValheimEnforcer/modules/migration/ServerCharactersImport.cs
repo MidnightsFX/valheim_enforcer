@@ -112,6 +112,14 @@ namespace ValheimEnforcer.modules.migration {
                 ImportOne(file, fileName, match, dryRun, force, report);
             }
 
+            // The writes above are queued for the character store's worker. Land them before returning: the
+            // startup pass relies on having finished writing before any peer can connect, so the connect-time
+            // lookup finds every imported file (see FirstSaveEnforcement), and an admin running the command
+            // expects the files to be there when it says they were imported.
+            if (!dryRun && report.Imported > 0 && !CharacterStore.Flush(TimeSpan.FromSeconds(30))) {
+                Logger.LogWarning("Import: some imported characters were still being written when the import finished; they will be on disk in a moment.");
+            }
+
             return report;
         }
 
@@ -154,9 +162,9 @@ namespace ValheimEnforcer.modules.migration {
             }
 
             try {
+                // Through the async store, which replaces anything it has cached for this character in order. The
+                // files are on disk by the time Run returns - see the flush there.
                 ValConfig.WritePlayerCharacterToSave(accountId, character);
-                // Mandatory after any write that goes around the async store, or it can overwrite us from cache.
-                CharacterStore.Invalidate(accountId, characterName);
                 report.Imported++;
                 report.Details.Add($"{characterName} ({accountId}): imported {character.PlayerItems.Count} item(s), {character.SkillLevels.Count} skill(s)");
                 Logger.LogInfo($"Imported ServerCharacters save for {characterName} ({accountId}).");

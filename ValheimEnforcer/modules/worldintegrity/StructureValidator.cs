@@ -401,9 +401,10 @@ namespace ValheimEnforcer.modules.worldintegrity {
         /// keep the pre-death items live on the server and dupe the grave on the next join.
         ///
         /// Attribution is always the packet's own peer, so a forged tombstone can only ever clear the SENDER's
-        /// own character - never another player's. Runs on the main thread (at the end of the packet), so it
-        /// does its own load/write rather than using the async store; deaths are rare, so the synchronous I/O
-        /// is fine.
+        /// own character - never another player's. Runs on the main thread (at the end of the packet). In disk
+        /// mode the clear is queued on the async store; in internal storage mode it loads and writes the registry
+        /// here, synchronously, because the registry is a ZDO - deaths are rare, so that is fine - and the file
+        /// copy WritePlayerCharacterToSave keeps beside it goes to the background writer like every other save.
         /// </summary>
         private static void ObserveDeath(ZNetPeer peer) {
             if (peer == null || peer.m_socket == null) { return; }

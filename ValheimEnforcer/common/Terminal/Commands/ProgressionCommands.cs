@@ -163,10 +163,9 @@ namespace ValheimEnforcer.common {
                 }
             }
 
-            // Written through the same path an admin's item return uses, which also drops the async store's
-            // cached copy - otherwise a pending write would put back what was just removed.
+            // Written through the same path an admin's item return uses, which replaces the async store's cached
+            // copy in order - otherwise a pending write would put back what was just removed.
             ValConfig.WritePlayerCharacterToSave(account, character);
-            CharacterStore.Invalidate(account, name);
 
             if (cleared.Count == 0) {
                 args.Output.Info($"{name} had nothing stored under '{section}', so nothing was deleted.");

@@ -191,6 +191,18 @@ One thing a menu advertises that is *not* a gap: Valheaven claims "anti-cheat sc
 
 `Discord.NotifyCheatSuspected` (on) posts medium-confidence sightings to the moderation channel. `Discord.NotifyCheaterBanned` (on) posts a message whenever a player is banned for cheating. It names the account behind the ban, so it is worth routing to `WebhookUrlModeration` and a staff-only channel — see [Discord Notifications](discord.md).
 
+## Privacy disclaimer
+
+*This is not legal advice, and installing this mod does not make a server compliant with whatever privacy law applies to it.*
+
+Cheat detection runs on the player's own machine, and only while a world is loaded. It looks at what is running alongside the game and what is loaded into it, and what it sends is described under [Privacy](#privacy-and-false-positives). It sends that to the server the player is connected to and nowhere else — nothing goes to the author of this mod. From there, it goes wherever that server's admin has pointed the [Discord notifications](discord.md).
+
+What happens to it on the server is up to whoever runs the server. The server log, the ban list and any Discord post name the account a detection came from; how long those are kept, who can read them and whether players were told is the admin's responsibility, not this mod's.
+
+For players: running mods is a choice, and so is joining a server that has cheat detection switched on. Joining one means agreeing to a scan that reports to that server for as long as you are connected. If you are not comfortable with that, the answer is a server that does not run it.
+
+Many public servers require anti-cheat measures due to a number of active cheaters in the community. Be wary of other mods which provide direct access to your system or personally identifiable data. This mod will never do that.
+
 ---
 
 [← All documentation](README.md)

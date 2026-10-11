@@ -41,10 +41,21 @@ namespace ValheimEnforcer.modules.character {
             }
         }
 
-        // Game.Logout is the end of a session for both a menu logout and a dropped connection (Game.FixedUpdate
-        // calls Logout when the connection status goes bad), so it is where the once-per-session join latch and
-        // the inventory subscription are torn down. Quit-to-desktop ends the process, so it needs no reset.
-        [HarmonyPatch(typeof(Game), nameof(Game.Logout))]
+        // The end of a session, where the once-per-session join latch, the tracked character and the inventory
+        // subscription are torn down. Every way a session ends passes through Game.Shutdown - a menu logout and a
+        // dropped connection (Game.FixedUpdate calls Logout) through ContinueLogout, quit-to-desktop through
+        // OnApplicationQuit - and a postfix there runs after the end-of-session save, which Shutdown reaches
+        // through SavePlayerProfile (see CaptureAfterProfileSave).
+        //
+        // This used to be a Game.Logout postfix, which is not the end of a session: Logout can return before
+        // ContinueLogout has run. Vanilla does that behind its low-disk-space prompt, and AsyncSave, with its async
+        // final save switched on, does it on every logout from a host, holding ContinueLogout for frames while the
+        // world save runs.
+        // Tearing down at Logout then dropped the tracked character before the final save was taken, so the save
+        // had to rebuild it from the file on the main thread on a host - and was refused outright on a client,
+        // whose join no longer counted as validated - and a player who cancelled the prompt was left playing
+        // with nothing tracked.
+        [HarmonyPatch(typeof(Game), nameof(Game.Shutdown))]
         public static class ClearPlayerCharacterOnLogout {
             [HarmonyPostfix]
             [HarmonyPriority(Priority.Last)]
@@ -164,17 +175,21 @@ namespace ValheimEnforcer.modules.character {
         //    see JoinValidationComplete.
         //  - Death: ClearTrackedItemsOnDeath pushes a full save with an emptied item list immediately, and the
         //    respawn re-baselines from the live player instead of running the join pipeline.
+        // Every one of these writes the local file through ValConfig.WritePlayerCharacterToSave, which takes a copy
+        // on the main thread and leaves the writing to the CharacterStore worker. The push to the server, where
+        // there is one, is still built and sent on the main thread, in the same order it always was.
 
-        // Drain the async character persistence store before the server stops so no queued save is lost.
-        // No-op on clients (the store is only used server-side, in disk storage mode).
+        // Land every pending character write before the session ends, so no queued save is lost - on a server
+        // or a host, everybody's; on a client, its own. Every session end reaches ZNet.Shutdown, and it is called
+        // from inside Game.Shutdown after SavePlayerProfile, so the end-of-session save CaptureAfterProfileSave
+        // has just queued is among what this waits for. Also stops the worker; the next session's first save
+        // starts it again.
         [HarmonyPatch(typeof(ZNet), nameof(ZNet.Shutdown))]
         public static class FlushCharacterStoreOnShutdown {
             [HarmonyPrefix]
             [HarmonyPriority(Priority.First)]
-            private static void Prefix(ZNet __instance) {
-                if (__instance != null && __instance.IsServer()) {
-                    CharacterStore.Shutdown();
-                }
+            private static void Prefix() {
+                CharacterStore.Shutdown();
             }
         }
 
@@ -225,6 +240,17 @@ namespace ValheimEnforcer.modules.character {
         //    custom-data-only change reach the delta stream at a moment when the dictionary is honest. The
         //    tracker's dirty flag is otherwise raised only by Inventory.Changed, so a change that never touches
         //    the inventory was never sampled at all — the same reason ForsakenPower and FoodSync nudge it.
+        //
+        // With AsyncSave installed this still holds, on the main thread. AsyncSave replaces the body with a prefix
+        // that runs PlayerProfile.SavePlayerData -> Player.Save right there, on this thread, and only hands the
+        // .fch write to its own worker - so by the time this postfix runs the custom data has been flushed, and
+        // the one thing not yet true is that the .fch is on disk, which nothing here reads. When AsyncSave drops a
+        // request because one of its saves is already in flight it skips Player.Save, and the routine branch
+        // below then samples custom data flushed a frame or two earlier; harmless. At shutdown it gets out of the
+        // way entirely (its Game.Shutdown prefix lands its own save and forces vanilla's synchronous path), so the
+        // end-of-session save below is taken after the profile is on disk, exactly as without it. The two never
+        // share a writer: AsyncSave's worker holds a lock shared with the world save for every job, and this
+        // mod's saves touch nothing that lock protects.
         [HarmonyPatch(typeof(Game), nameof(Game.SavePlayerProfile))]
         public static class CaptureAfterProfileSave {
             [HarmonyPostfix]

@@ -198,6 +198,12 @@ namespace ValheimEnforcer.common {
             "Steam_76561197993757990", "path\\to\\thing", "ends with backslash\\", "\"", "'", "''", "\"\"", "  ", "\t", "\n",
         };
 
+        /// <summary>The self-test's sample characters on their own, fresh on every call. CharacterSnapshot checks its
+        /// copy against the same ones.</summary>
+        internal static IEnumerable<Character> SelfTestCharacters() {
+            foreach (KeyValuePair<Character, bool> sample in SelfTestSamples()) { yield return sample.Key; }
+        }
+
         /// <summary>Each sample, and whether it is held against the original (true) or the serializer's round trip.</summary>
         private static IEnumerable<KeyValuePair<Character, bool>> SelfTestSamples() {
             // Every awkward string, as a value, as a map key, as a list entry and as a plain property. No times

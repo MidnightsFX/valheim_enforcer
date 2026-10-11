@@ -44,6 +44,12 @@ namespace ValheimEnforcer
             Localization = LocalizationManager.Instance.GetLocalization();
             Log = this.Logger;
             cfg = new ValConfig(Config);
+            // After the config is bound, which tells the YAML writer whether it is switched on. Both character
+            // self-tests run on a thread of their own from here, long before the first save could need them.
+            CharacterSnapshot.WarmUpInBackground();
+            // The character store's worker is a background thread and dies with the process; land anything it
+            // still holds. Normally there is nothing - ZNet.Shutdown already waited for it.
+            Application.quitting += CharacterStore.OnApplicationQuitting;
             EmbeddedResourceBundle = AssetUtils.LoadAssetBundleFromResources("ValheimEnforcer.assets.vebundle", typeof(ValheimEnforcer).Assembly);
             // Just needs to run AFTER all mods are loaded
             // For client
