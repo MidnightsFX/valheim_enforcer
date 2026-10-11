@@ -1,3 +1,9 @@
+**0.33.2**
+---
+```
+- Fixes other mods' custom character data not always being up to date when reapplied during a respawn.
+```
+
 **0.33.1**
 ---
 ```

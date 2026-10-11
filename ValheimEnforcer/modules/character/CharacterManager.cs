@@ -816,6 +816,22 @@ namespace ValheimEnforcer.modules.character {
             PersistAndPushCharacter(savableChar.HostID, savableChar);
         }
 
+        // Adopt the custom data the respawn's own profile save has just flushed (see CaptureRespawnSave). The next
+        // Player.Load installs the tracked copy over whatever vanilla loaded, so this is what makes the two agree.
+        // Nothing is pushed from here: the spawn that follows re-baselines and sends a full save with this copy in it.
+        internal static void CaptureCustomDataAtRespawnSave(Player player) {
+            if (player == null || PlayerCharacter == null) { return; }
+            Dictionary<string, string> previous = PlayerCharacter.PlayerCustomData ?? new Dictionary<string, string>();
+            Dictionary<string, string> current = CompatCustomData.SnapshotForTracking(player.m_customData);
+            PlayerCharacter.PlayerCustomData = current;
+
+            int changed = current.Count(kvp => !previous.TryGetValue(kvp.Key, out string value) || value != kvp.Value)
+                + previous.Keys.Count(key => !current.ContainsKey(key));
+            if (changed > 0) {
+                Logger.LogDebug($"Respawn save: picked up {changed} custom data change(s) for {PlayerCharacter.Name} made since the last sync.");
+            }
+        }
+
         /// <summary>
         /// Join under CatchupOverwriteOnJoin: the server holds a save for this character but has been told it is
         /// stale - the server ran without this mod for a while and the character kept playing. Validating

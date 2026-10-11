@@ -174,7 +174,8 @@ namespace ValheimEnforcer.modules.character {
         //  - Join: LoadAndValidatePlayer still pushes a full save directly. It runs once per session only -
         //    see JoinValidationComplete.
         //  - Death: ClearTrackedItemsOnDeath pushes a full save with an emptied item list immediately, and the
-        //    respawn re-baselines from the live player instead of running the join pipeline.
+        //    respawn re-baselines from the live player instead of running the join pipeline. Custom data for that
+        //    re-baseline is taken at the respawn's own profile save (CaptureRespawnSave).
         // Every one of these writes the local file through ValConfig.WritePlayerCharacterToSave, which takes a copy
         // on the main thread and leaves the writing to the CharacterStore worker. The push to the server, where
         // there is one, is still built and sent on the main thread, in the same order it always was.
@@ -281,6 +282,49 @@ namespace ValheimEnforcer.modules.character {
                 } catch (Exception e) {
                     Logger.LogError($"Final character save failed during shutdown; letting the game shut down anyway: {e}");
                 }
+            }
+        }
+
+        // Set only while Game._RequestRespawn runs, so the SavePlayerData postfix below can tell the respawn's own
+        // profile save apart from every other one.
+        private static bool respawnSaveInProgress = false;
+
+        // The one profile save CaptureAfterProfileSave never sees. Game._RequestRespawn - after a death, TeleportHome
+        // or SkipIntro - calls PlayerProfile.SavePlayerData directly rather than through Game.SavePlayerProfile, then
+        // destroys the player, and the new one is loaded from that save. Every mod that serializes in a Player.Save
+        // prefix has just flushed into m_customData there, but LoadPlayerCustomData then installs the tracked copy,
+        // which is only as fresh as the last routine save, before those mods' own Player.Load postfixes read it.
+        // Travel Totems is the case that surfaced it: it rebuilds its unlocked totems from that read, so every totem
+        // unlocked since the last autosave was forgotten on death, and the respawn's re-baseline then sent the
+        // forgotten state to the server. Capturing here, after the save, is what makes the tracked copy current.
+        [HarmonyPatch(typeof(Game), "_RequestRespawn")]
+        public static class MarkRespawnSave {
+            [HarmonyPrefix]
+            [HarmonyPriority(Priority.First)]
+            private static void Prefix() {
+                respawnSaveInProgress = true;
+            }
+
+            // A finalizer rather than a postfix, so the flag can never be left set by a throw.
+            [HarmonyFinalizer]
+            private static void Finalizer() {
+                respawnSaveInProgress = false;
+            }
+        }
+
+        [HarmonyPatch(typeof(PlayerProfile), nameof(PlayerProfile.SavePlayerData))]
+        public static class CaptureRespawnSave {
+            [HarmonyPostfix]
+            [HarmonyPriority(Priority.Last)]
+            private static void Postfix(Player player) {
+                if (!respawnSaveInProgress) { return; }
+                if (!ValConfig.PreventExternalCustomDataChanges.Value || !ValConfig.CaptureCustomDataOnRespawn.Value) { return; }
+                if (player == null || player != Player.m_localPlayer) { return; }
+                // Only once the join has been checked. Before that the live custom data is whatever the local file
+                // held, and adopting it here would have the next Player.Load install it - skipping the join's own
+                // enforcement. A SkipIntro respawn can land while a deferred join validation is still waiting.
+                if (CharacterManager.PlayerCharacter == null || !CharacterManager.JoinValidationComplete) { return; }
+                CharacterManager.CaptureCustomDataAtRespawnSave(player);
             }
         }
 
