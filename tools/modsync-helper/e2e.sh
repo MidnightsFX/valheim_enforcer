@@ -40,7 +40,7 @@ case " $* " in
   *" +connect 1.2.3.4:2456"*)
     printf '%s\n' "$@" > "$R/relaunched-args.txt"
     env | grep -E '^(DOORSTOP_|VE_E2E_FLAG)' | sort > "$R/relaunched-env.txt"
-    pwd > "$R/relaunched-cwd.txt"
+    pwd -P > "$R/relaunched-cwd.txt"
     exit 0 ;;
 esac
 {
@@ -96,7 +96,9 @@ check '[ ! -e "$R/staged" ] && [ ! -e "$R/apply.plan" ]' "staging and plan remov
 check '[ -f "$R/game-exited.txt" ]' "the game ran to its exit before anything was applied"
 check '[ "$(tr "\n" "|" < "$R/relaunched-args.txt")" = "--doorstop-x|a b|-console|+connect|1.2.3.4:2456|" ]' "arguments intact, the old join swapped for the new"
 check '[ "$(tr "\n" "|" < "$R/relaunched-env.txt")" = "DOORSTOP_ENABLED=1|DOORSTOP_TARGET_ASSEMBLY=$R/BepInEx.Preloader.dll|VE_E2E_FLAG=kept|" ]' "Doorstop settings kept, DOORSTOP_INITIALIZED stripped"
-check '[ "$(cat "$R/relaunched-cwd.txt")" = "$R/game dir" ]' "same working directory"
+# Compared with symlinks resolved on both sides. On macOS /var is a link to /private/var, and the relaunched shell
+# reports its directory one way or the other depending on whether it was handed a PWD - it is the same directory.
+check '[ "$(cat "$R/relaunched-cwd.txt")" = "$(cd "$R/game dir" && pwd -P)" ]' "same working directory"
 
 # A game that never exits: the helper waits on this script, gives up, and changes nothing.
 mkdir -p "$R/t2/staged"
