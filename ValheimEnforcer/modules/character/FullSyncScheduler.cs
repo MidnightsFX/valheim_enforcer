@@ -205,7 +205,7 @@ namespace ValheimEnforcer.modules.character {
         private static void DrainSanitizedPushes() {
             CharacterStore.SanitizedPush push;
             while ((push = CharacterStore.TryDequeueSanitizedPush()) != null) {
-                ValConfig.SendSanitizedYamlToClient(push.Sender, push.Name, push.StrippedYaml);
+                ValConfig.SendSanitizedYamlToClient(push.Sender, push.Name, push.StrippedYaml, push.GrantedLoadout);
             }
         }
 

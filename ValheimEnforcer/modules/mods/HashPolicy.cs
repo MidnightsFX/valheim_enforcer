@@ -39,7 +39,16 @@ namespace ValheimEnforcer.modules.mods {
         /// must not silently switch enforcement off.
         /// </summary>
         internal static string EffectiveMode(DataObjects.Mod authoritative) {
-            string global = ValConfig.HashEnforcement.Value ?? WhenKnown;
+            return EffectiveMode(authoritative, ValConfig.HashEnforcement.Value);
+        }
+
+        /// <summary>
+        /// The same, against a server setting that is not this machine's own. The client mod sync needs this:
+        /// before login nothing has been synced, so the client's copy of HashEnforcement is its own default
+        /// rather than the server's, and the server sends its value alongside its mod list instead.
+        /// </summary>
+        internal static string EffectiveMode(DataObjects.Mod authoritative, string globalMode) {
+            string global = NormalizeMode(globalMode) ?? WhenKnown;
             string over = authoritative?.HashEnforcement;
             if (string.IsNullOrWhiteSpace(over)) { return global; }
 
@@ -49,6 +58,14 @@ namespace ValheimEnforcer.modules.mods {
 
             WarnBadOverrideOnce(authoritative, over, global);
             return global;
+        }
+
+        /// <summary>One of the three modes in its canonical spelling, or null for anything else.</summary>
+        private static string NormalizeMode(string mode) {
+            if (string.Equals(mode, Off, StringComparison.OrdinalIgnoreCase)) { return Off; }
+            if (string.Equals(mode, WhenKnown, StringComparison.OrdinalIgnoreCase)) { return WhenKnown; }
+            if (string.Equals(mode, Strict, StringComparison.OrdinalIgnoreCase)) { return Strict; }
+            return null;
         }
 
         private static void WarnBadOverrideOnce(DataObjects.Mod authoritative, string over, string global) {
@@ -70,9 +87,14 @@ namespace ValheimEnforcer.modules.mods {
         /// mod in is what the per-mod override is for.
         /// </param>
         internal static HashVerdict Evaluate(DataObjects.Mod authoritative, DataObjects.Mod reported, bool requiredOrAdmin) {
+            return Evaluate(authoritative, reported, requiredOrAdmin, ValConfig.HashEnforcement.Value);
+        }
+
+        /// <summary>The same comparison, under a server setting that is not this machine's own.</summary>
+        internal static HashVerdict Evaluate(DataObjects.Mod authoritative, DataObjects.Mod reported, bool requiredOrAdmin, string globalMode) {
             if (authoritative == null || reported == null) { return HashVerdict.Pass; }
 
-            string mode = EffectiveMode(authoritative);
+            string mode = EffectiveMode(authoritative, globalMode);
             if (mode == Off) { return HashVerdict.Pass; }
 
             if (!authoritative.HasRecordedHash()) {

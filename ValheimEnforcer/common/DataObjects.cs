@@ -244,16 +244,33 @@ namespace ValheimEnforcer.common {
             public string Attestation { get; set; }
 
             /// <summary>
+            /// Server -> client: this server's admin has turned on OfferModDownloads, so a rejected client may
+            /// offer to install the server's pinned Thunderstore packages. Absent (false) otherwise, and from a
+            /// server that predates the feature, which a client reads as "no offer".
+            /// </summary>
+            [DefaultValue(false)]
+            public bool OffersModDownloads { get; set; }
+
+            /// <summary>
+            /// Server -> client, only alongside <see cref="OffersModDownloads"/>: the server's HashEnforcement
+            /// setting. A client is refused before login, so it never receives the server's synced config and
+            /// its own copy of this setting is just its default; the mod sync needs the real one to work out
+            /// which of the player's mods the server will refuse for their file.
+            /// </summary>
+            [DefaultValue(null)]
+            public string HashEnforcementMode { get; set; }
+
+            /// <summary>
             /// The server's payload for one specific connection: everything <see cref="ToZPackage"/> sends,
-            /// plus that connection's nonce.
+            /// plus that connection's nonce and, when the server offers them, the mod download fields.
             ///
             /// A copy rather than a mutation of the shared settings object, because two clients can be
             /// mid-handshake at once and stamping the live object would hand the second one the first one's
-            /// nonce. The copy is shallow on purpose - only the scalar differs, and nothing here writes to the
+            /// nonce. The copy is shallow on purpose - only the scalars differ, and nothing here writes to the
             /// dictionaries.
             /// </summary>
-            public ZPackage ToZPackage(string nonce) {
-                if (string.IsNullOrEmpty(nonce)) { return ToZPackage(); }
+            public ZPackage ToZPackage(string nonce, bool offersModDownloads = false, string hashEnforcementMode = null) {
+                if (string.IsNullOrEmpty(nonce) && !offersModDownloads) { return ToZPackage(); }
                 Mods forPeer = new Mods {
                     ActiveMods = ActiveMods,
                     RequiredMods = RequiredMods,
@@ -262,7 +279,9 @@ namespace ValheimEnforcer.common {
                     ServerOnlyMods = ServerOnlyMods,
                     ActivePatchers = ActivePatchers,
                     AllowedPatchers = AllowedPatchers,
-                    Nonce = nonce,
+                    Nonce = string.IsNullOrEmpty(nonce) ? null : nonce,
+                    OffersModDownloads = offersModDownloads,
+                    HashEnforcementMode = offersModDownloads ? hashEnforcementMode : null,
                 };
                 return forPeer.ToZPackage();
             }

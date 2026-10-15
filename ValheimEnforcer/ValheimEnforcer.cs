@@ -50,6 +50,8 @@ namespace ValheimEnforcer
             // The character store's worker is a background thread and dies with the process; land anything it
             // still holds. Normally there is nothing - ZNet.Shutdown already waited for it.
             Application.quitting += CharacterStore.OnApplicationQuitting;
+            // A mod sync from the last session applied its changes after the game had exited; say what happened.
+            if (ValConfig.AllowServerModInstalls.Value) { modules.modsync.ModSync.ReportLastRun(); }
             EmbeddedResourceBundle = AssetUtils.LoadAssetBundleFromResources("ValheimEnforcer.assets.vebundle", typeof(ValheimEnforcer).Assembly);
             // Just needs to run AFTER all mods are loaded
             // For client

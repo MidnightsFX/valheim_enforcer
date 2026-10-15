@@ -58,7 +58,7 @@ Requires BepInEx, Jotunn and YamlDotNet (handled for you by any mod manager).
 **Emergency crash recovery** — each player holds a sealed, signed snapshot of their own character that only the server can open. After an unclean shutdown the server asks for them back and adopts the ones that verify and are newer. Narrow window, every restore logged, and an honest note about the item duplication it can cause.
 [Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/crash-recovery.md)
 
-**Discord notifications** — joins, leaves, startup, shutdown, saves, cheat bans and refused connections. Each category can post to a channel of its own, and every message is a template you can rewrite, role pings included. Paste in a webhook URL and it starts posting; nothing else needs configuring.
+**Discord notifications** — joins, leaves, startup, shutdown, saves, cheat bans and refused connections. Each category can post to a channel of its own, and every message is a template you can rewrite, role pings included. Paste in a webhook URL and it starts posting; nothing else needs configuring. Where Discord is blocked, it can post through an HTTP proxy.
 [Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/discord.md)
 
 ---
@@ -133,3 +133,9 @@ Not yet implemented, but planned:
 ---
 
 Got a bug to report or just want to chat about the mod? Drop by the [Discord](https://discord.gg/Dmr9PQTy9m) or [GitHub](https://github.com/MidnightsFX/valheim_enforcer).
+
+---
+
+If you enjoy my mods donations are appreciated. My mods will never be paid and donations are not required.
+
+<a href="https://ko-fi.com/midnightsfx"><img height="36" src="https://storage.ko-fi.com/cdn/kofi2.png?v=3" alt="Support me on Ko-fi"></a>

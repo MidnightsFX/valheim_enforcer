@@ -41,6 +41,10 @@
     <EmbeddedResource Include="assets\vebundle" />
     <EmbeddedResource Include="assets\KnownCheaters.yaml" />
     <EmbeddedResource Include="assets\Notifications.yaml" />
+    <!-- The mod sync helper, built from tools/modsync-helper by its build.ps1. -->
+    <EmbeddedResource Include="assets\modsync\ve-modsync-windows-x64.exe" LogicalName="ValheimEnforcer.modsync.windows-x64" />
+    <EmbeddedResource Include="assets\modsync\ve-modsync-linux-x64" LogicalName="ValheimEnforcer.modsync.linux-x64" />
+    <EmbeddedResource Include="assets\modsync\ve-modsync-macos-x64" LogicalName="ValheimEnforcer.modsync.macos-x64" />
   </ItemGroup>
 
   <ItemGroup>

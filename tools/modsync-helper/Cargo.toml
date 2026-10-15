@@ -1,0 +1,18 @@
+[package]
+name = "ve-modsync"
+version = "1.0.0"
+edition = "2021"
+description = "Applies the mod changes ValheimEnforcer's mod sync staged, once Valheim has exited, then starts it again."
+license = "MIT"
+publish = false
+
+# No dependencies on purpose. This binary ships inside the mod and runs on players' machines, so everything it
+# does is in this crate and readable in one sitting: no crates.io code, no build scripts.
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

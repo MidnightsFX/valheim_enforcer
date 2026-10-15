@@ -188,6 +188,10 @@ namespace ValheimEnforcer.modules.character {
             public string HostID;
             public string Name;
             public string StrippedYaml;
+            /// <summary>The starter loadout written into this record, for the client to hand over; null when
+            /// none was. Read-only once loaded (a reload replaces the set wholesale), so it is safe to carry
+            /// from the worker back to the main thread.</summary>
+            public DataObjects.Loadout GrantedLoadout;
         }
 
         /// <summary>A finished crash-recovery snapshot, waiting for the main thread to put it on the wire.
@@ -878,11 +882,13 @@ namespace ValheimEnforcer.modules.character {
                     // Placed after the confiscation merge and before the entry is published below, so the
                     // entries this records are in the file that gets written.
                     bool pushSanitized = false;
+                    DataObjects.Loadout grantedLoadout = null;
                     if (full.NewCharacterPolicy != null && state == LoadState.Missing) {
                         NewCharacterRules.Result sanitized = NewCharacterRules.Apply(c, full.NewCharacterPolicy, record: true);
                         if (sanitized.Changed) {
                             Logger.LogWarning($"First save for {c.Name} ({c.HostID}) held to the new-character rules: {sanitized.Describe()}");
                             pushSanitized = true;
+                            grantedLoadout = sanitized.GrantedLoadout(full.NewCharacterPolicy);
                         }
                     }
                     // The returning-character counterpart: re-validate the first save of a session against the
@@ -922,7 +928,7 @@ namespace ValheimEnforcer.modules.character {
                     // payload: the main thread drains this concurrently with the worker, and by then the
                     // entry may have been replaced by a later save or dropped by the sweep.
                     if (pushSanitized) {
-                        sanitizedPushes.Enqueue(new SanitizedPush { Sender = full.Sender, HostID = c.HostID, Name = c.Name, StrippedYaml = SerializeStripped(c) });
+                        sanitizedPushes.Enqueue(new SanitizedPush { Sender = full.Sender, HostID = c.HostID, Name = c.Name, StrippedYaml = SerializeStripped(c), GrantedLoadout = grantedLoadout });
                     }
                     Logger.LogInfo($"Recieved Player data update - {c.Name}|{c.HostID}");
                     return fresh;

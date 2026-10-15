@@ -27,6 +27,7 @@ Leaving `WebhookUrl` empty and setting only one category is fine: that category 
 | `WebhookUrl` | *(empty)* | Master switch. Empty means no notifications at all |
 | `WebhookUrl…` *(the four above)* | *(empty)* | Per-category override; empty falls back to `WebhookUrl` |
 | `ServerLabel` | *(empty)* | Name for this server as `{server}` in templates. Only useful when several servers share a channel |
+| `ProxyUrl` | *(empty)* | HTTP proxy to send every post through, for a network that blocks Discord. Empty connects directly — see [Behind a proxy](#behind-a-proxy) |
 | `NotifyServerStartup` | `true` | Server came online |
 | `NotifyServerShutdown` | `true` | Server going down |
 | `NotifyWorldSaved` | `false` | Every world save. **Off on purpose** — the autosave fires roughly every 20 minutes, all day |
@@ -39,6 +40,23 @@ Leaving `WebhookUrl` empty and setting only one category is fine: that category 
 | `NotifyCheatSuspected` | `true` | A medium-confidence sign that a client's anti-cheat was interfered with: its detector patched or stopped, or reports it sent that never arrived. Nobody is kicked or banned for these alone. At most one post per player per minute |
 
 These are deliberately **not** synced to clients — a webhook URL is a password in URL form, and syncing it would hand it to everyone who connects. Edit them in the config file or in Configuration Manager on the server.
+
+## Behind a proxy
+
+If the server's network blocks Discord, point `ProxyUrl` at an HTTP proxy that can reach it and every post goes through that instead:
+
+```ini
+ProxyUrl = http://127.0.0.1:10809
+ProxyUrl = http://user:password@proxy.example.net:3128
+```
+
+- **HTTP proxies only.** SOCKS is not supported, but most proxy clients (v2ray, Clash, Shadowsocks front ends) offer an HTTP port next to their SOCKS one — use that. A bare `host:port` is read as `http://`.
+- **The proxy never sees the webhook.** The connection to Discord is tunnelled and stays encrypted end to end, so the proxy learns only that the server is talking to `discord.com`.
+- **A login goes in the address.** Percent-encode any `:` or `@` inside the user name or password (`p@ss` becomes `p%40ss`). It is never written to the log.
+- **An unusable proxy stops the posts** rather than falling back to a direct connection — you set one because the direct route is blocked or unwanted. The log says what is wrong with it at startup, and `enforcer-notify-test` refuses to run until it is fixed.
+- **A change takes effect on the next post**, once the config file reloads. No restart.
+
+This is for the webhook posts only. It does not affect the game connection or anything else the server does.
 
 ## Rewriting the messages
 

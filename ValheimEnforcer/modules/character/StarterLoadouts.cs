@@ -100,9 +100,18 @@ namespace ValheimEnforcer.modules.character {
         /// <summary>
         /// Main thread only. The loadout a brand new character should get, or null when there is none.
         /// Captured into the policy so the CharacterStore worker never reads a ConfigEntry or this file.
+        ///
+        /// Always null on a client of a remote server. Loadouts.yaml is a local file that is never sent
+        /// anywhere, so what a client finds on its own disk is the example it was created with, or a copy an
+        /// admin left there - not the server's kit. Reading it split players in two: one whose file happened
+        /// to match granted the kit locally, and the server then granted a second copy on top; everyone else
+        /// granted nothing, and the kit the server put into their record was dropped by the client's very
+        /// next save. The server decides the kit and sends it back with its first-save push
+        /// (CharacterManager.ApplyServerSanitizedCharacter).
         /// </summary>
         internal static Loadout Current() {
             if (!Enabled) { return null; }
+            if (ZNet.instance != null && !ZNet.instance.IsServer()) { return null; }
             string name = ValConfig.DefaultStarterLoadout != null ? ValConfig.DefaultStarterLoadout.Value : "";
             if (string.IsNullOrWhiteSpace(name)) { return null; }
             Loadout loadout = Find(name.Trim());

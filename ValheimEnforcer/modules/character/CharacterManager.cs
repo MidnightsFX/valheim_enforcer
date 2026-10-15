@@ -54,6 +54,12 @@ namespace ValheimEnforcer.modules.character {
         /// </summary>
         internal static bool CatchUpThisSession = false;
 
+        /// <summary>
+        /// A starter loadout the server granted while there was no player to hand it to, waiting for the respawn
+        /// that follows. See ApplyServerSanitizedCharacter and RebaselineFromLiveInventory.
+        /// </summary>
+        private static DataObjects.Loadout pendingLoadout = null;
+
         internal static void SetPlayerCharacter(DataObjects.Character character, bool catchUp = false) {
             if (character == null) { return; }
             Logger.LogDebug("Set character from Saved server data");
@@ -70,6 +76,7 @@ namespace ValheimEnforcer.modules.character {
             ServerCharacter = ServerCharacterState.Unknown;
             CatchUpThisSession = false;
             JoinValidationPending = false;
+            pendingLoadout = null;
             MapExploration.CancelPending();
             MapSync.CancelPending();
             MapSync.ResetSession();
@@ -593,8 +600,13 @@ namespace ValheimEnforcer.modules.character {
         /// Nothing is recorded as confiscated here: the server already recorded every removal, and recording
         /// again would file a second entry with a second id for each item, so an admin returning one would hand
         /// back two.
+        ///
+        /// <paramref name="grantedLoadout"/> is the starter loadout the server wrote into the record, which this
+        /// hands to the player. It has to be done here: removing what the record lacks never adds what it has,
+        /// and the re-baseline below then rebuilt the record from an inventory that had never held the kit - so
+        /// the kit the server granted was gone from its copy with the client's next save.
         /// </summary>
-        internal static void ApplyServerSanitizedCharacter(DataObjects.Character sanitized) {
+        internal static void ApplyServerSanitizedCharacter(DataObjects.Character sanitized, DataObjects.Loadout grantedLoadout = null) {
             if (sanitized == null) { return; }
             Logger.LogWarning($"The server applied its new-character rules to {sanitized.Name}: items and skills not in its record are being removed.");
 
@@ -603,6 +615,16 @@ namespace ValheimEnforcer.modules.character {
 
             Player player = Player.m_localPlayer;
             if (player == null) {
+                if (JoinValidationComplete) {
+                    // Between the player being destroyed and respawned - a skipped intro, most likely, which
+                    // lands right on top of a first save. The respawn's re-baseline would otherwise adopt an
+                    // inventory that never held the kit.
+                    if (grantedLoadout != null) {
+                        pendingLoadout = grantedLoadout;
+                        Logger.LogDebug("No local player right now; the starter loadout will be handed over when they respawn.");
+                    }
+                    return;
+                }
                 // Arrived before the player spawned; the join validation will run against this record.
                 Logger.LogDebug("No local player yet; the sanitized character will be applied by join validation.");
                 return;
@@ -627,6 +649,12 @@ namespace ValheimEnforcer.modules.character {
 
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
                 player.m_customData = CompatCustomData.ApplyToPlayer(sanitized.PlayerCustomData, player.m_customData);
+            }
+
+            // After the removals and the skill clamp, so the kit is never measured against them, and before the
+            // re-baseline, so it is in what gets pushed back.
+            if (grantedLoadout != null) {
+                StarterLoadouts.ApplyToPlayer(player, grantedLoadout, sanitized.Name);
             }
 
             // Re-baseline from what the player actually holds now, and drop the dirty flag the removals just
@@ -696,12 +724,6 @@ namespace ValheimEnforcer.modules.character {
                     }
                 }
             }
-            // The record now holds the loadout; put the same thing in the hands of the player standing here.
-            // Both sides run the same decision, as with every other join rule - the difference is only that
-            // one has an inventory to put items into and the other has a file.
-            if (policy.Loadout != null) {
-                StarterLoadouts.ApplyToPlayer(player, policy.Loadout, playerName);
-            }
             if (result.Changed) {
                 Logger.LogInfo($"New character rules applied to {playerName}: {result.Describe()}");
             }
@@ -725,6 +747,15 @@ namespace ValheimEnforcer.modules.character {
             // record kept. recordConfiscation is false because Apply above already recorded every removal -
             // recording again would file two entries, with two ids, for one item.
             ReconcilePlayerToCharacter(player, character, recordConfiscation: false, "New character");
+
+            // The record now holds the loadout; put the same thing in the hands of the player standing here.
+            // Last, the same order Apply uses on the record: grant after strip. Ahead of ZeroLiveSkills it had
+            // every skill the kit raised dropped straight back to zero, leaving the record and the player
+            // disagreeing until the next save took the zeros. Only ever set on this machine's own character -
+            // a client of a remote server is handed the kit by the server (StarterLoadouts.Current).
+            if (policy.Loadout != null) {
+                StarterLoadouts.ApplyToPlayer(player, policy.Loadout, playerName);
+            }
             return character;
         }
 
@@ -797,6 +828,12 @@ namespace ValheimEnforcer.modules.character {
             }
 
             Logger.LogInfo($"Player {savableChar.Name} respawned, re-baselining tracked state from their live inventory.");
+            // Handed over before the capture below, so the kit is in the baseline this respawn pushes.
+            if (pendingLoadout != null) {
+                DataObjects.Loadout loadout = pendingLoadout;
+                pendingLoadout = null;
+                StarterLoadouts.ApplyToPlayer(player, loadout, savableChar.Name);
+            }
             // Mid-session save, so it records the session as still active and potentially soon-to-be-stale.
             savableChar.LastDisconnect = DisconnectionState.DirtyDisconnect;
             savableChar.PlayerItems.Clear();

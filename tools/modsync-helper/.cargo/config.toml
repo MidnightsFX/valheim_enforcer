@@ -1,0 +1,5 @@
+# The Linux build is a fully static musl binary, linked with the LLD that ships with Rust, so it builds on
+# Windows with no Linux toolchain. Static also means LD_PRELOAD (how Doorstop loads BepInEx on Linux) cannot
+# inject anything into this process.
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"

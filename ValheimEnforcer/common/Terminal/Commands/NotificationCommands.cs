@@ -57,6 +57,10 @@ namespace ValheimEnforcer.common {
                 args.Output.Error($"No usable webhook URL for the {category} category. Set Discord.WebhookUrl on the server, or the URL for that category.");
                 return;
             }
+            if (!DiscordNotifier.IsProxyUsable(out string proxyProblem)) {
+                args.Output.Error($"Discord.ProxyUrl is set on the server but unusable ({proxyProblem}). Fix it, or clear it to post directly.");
+                return;
+            }
             if (DateTime.UtcNow - lastTestNotification < TestNotificationCooldown) {
                 args.Output.Warning("A test notification was just sent - wait a moment before sending another.");
                 return;

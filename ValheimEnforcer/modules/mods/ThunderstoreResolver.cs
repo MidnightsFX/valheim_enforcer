@@ -6,8 +6,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Net;
-using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -51,27 +49,12 @@ namespace ValheimEnforcer.modules.mods {
         // two patterns are also the injection guard: with no '/', '.', '%' or '..' able to survive them,
         // nothing an admin types can move the request off the path shape below.
         private static readonly Regex NamePart = new Regex(@"^[A-Za-z0-9_]+$", RegexOptions.Compiled);
-        private static readonly Regex VersionPart = new Regex(@"^\d{1,6}\.\d{1,6}\.\d{1,6}$", RegexOptions.Compiled);
+        internal static readonly Regex VersionPart = new Regex(@"^\d{1,6}\.\d{1,6}\.\d{1,6}$", RegexOptions.Compiled);
 
-        private static readonly string[] AllowedHosts = {
-            "thunderstore.io",
-            "www.thunderstore.io",
-            "gcdn.thunderstore.io",
-            "hcdn-1.hcdn.thunderstore.io",
-        };
-
-        private const int MaxRedirects = 5;
-        private const int MaxZipEntries = 2000;
-        private const long MaxEntryBytes = 64L * 1024 * 1024;
-        private const long MaxTotalUncompressedBytes = 400L * 1024 * 1024;
-
-        // AllowAutoRedirect is off so every hop can be re-checked against the allowlist; following redirects
-        // automatically would let a redirect walk the request off it. thunderstore.io/package/download/...
-        // always 302s to the CDN, so this path runs on every fetch.
-        private static readonly HttpClient http = new HttpClient(
-            new HttpClientHandler { AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.None }) {
-            Timeout = TimeSpan.FromSeconds(90)
-        };
+        // Shared with the client mod sync, which reads the same archives with the same limits.
+        internal const int MaxZipEntries = 2000;
+        internal const long MaxEntryBytes = 64L * 1024 * 1024;
+        internal const long MaxTotalUncompressedBytes = 400L * 1024 * 1024;
 
         private sealed class Attempt {
             public int Failures;
@@ -203,20 +186,6 @@ namespace ValheimEnforcer.modules.mods {
             return true;
         }
 
-        internal static bool IsAllowedUrl(string url) {
-            if (string.IsNullOrWhiteSpace(url)) { return false; }
-            if (!Uri.TryCreate(url, UriKind.Absolute, out Uri u)) { return false; }
-            if (u.Scheme != "https") { return false; }
-            foreach (string allowed in AllowedHosts) {
-                if (string.Equals(u.Host, allowed, StringComparison.OrdinalIgnoreCase)) { return true; }
-            }
-            return false;
-        }
-
-        private static string DownloadUrlFor(string owner, string name, string version) {
-            return $"https://thunderstore.io/package/download/{owner}/{name}/{version}/";
-        }
-
         private static bool ShouldAttempt(string spec) {
             lock (attempts) {
                 if (!attempts.TryGetValue(spec, out Attempt attempt)) { return true; }
@@ -272,10 +241,15 @@ namespace ValheimEnforcer.modules.mods {
 
                 try {
                     TryParseSpec(spec, out string owner, out string name, out string version);
-                    string url = DownloadUrlFor(owner, name, version);
+                    string url = ThunderstoreHttp.DownloadUrlFor(owner, name, version);
 
-                    using (MemoryStream archive = DownloadCapped(url, cap, token)) {
-                        if (archive == null) { continue; } // DownloadCapped already recorded the failure
+                    using (MemoryStream archive = ThunderstoreHttp.DownloadCapped(url, cap, token, out string failure)) {
+                        // Recorded against the spec, which is what ShouldAttempt looks up. This used to be keyed
+                        // by the URL, so a package that failed to download was never backed off.
+                        if (archive == null) {
+                            NoteFailure(spec, failure);
+                            continue;
+                        }
                         Dictionary<string, List<string>> byGuid = HashArchiveDlls(archive, spec, declaringGuid, out int dllCount);
                         if (dllCount == 0) {
                             NoteFailure(spec, "the archive contains no DLLs");
@@ -293,72 +267,6 @@ namespace ValheimEnforcer.modules.mods {
                     NoteFailure(spec, e.Message);
                 }
             }
-        }
-
-        /// <summary>
-        /// Downloads to memory with a hard byte cap, following redirects manually so each hop is re-validated.
-        /// Content-Length is checked when present but never trusted - the cap is enforced while streaming too,
-        /// so an absent or lying header cannot make the server allocate without bound.
-        /// </summary>
-        private static MemoryStream DownloadCapped(string url, long capBytes, CancellationToken token) {
-            string current = url;
-
-            for (int hop = 0; hop <= MaxRedirects; hop++) {
-                if (!IsAllowedUrl(current)) {
-                    NoteFailure(url, $"refused to follow '{current}': not a permitted Thunderstore host");
-                    return null;
-                }
-
-                using (HttpResponseMessage response = http.GetAsync(current, HttpCompletionOption.ResponseHeadersRead, token).GetAwaiter().GetResult()) {
-                    if ((int)response.StatusCode >= 300 && (int)response.StatusCode < 400) {
-                        Uri location = response.Headers.Location;
-                        if (location == null) {
-                            NoteFailure(url, $"HTTP {(int)response.StatusCode} with no redirect target");
-                            return null;
-                        }
-                        current = location.IsAbsoluteUri ? location.ToString() : new Uri(new Uri(current), location).ToString();
-                        continue;
-                    }
-
-                    if (!response.IsSuccessStatusCode) {
-                        NoteFailure(url, $"HTTP {(int)response.StatusCode}");
-                        return null;
-                    }
-
-                    long? declared = response.Content.Headers.ContentLength;
-                    if (declared.HasValue && declared.Value > capBytes) {
-                        NoteFailure(url, $"archive is {declared.Value / (1024 * 1024)}MB, over the {capBytes / (1024 * 1024)}MB limit");
-                        return null;
-                    }
-
-                    MemoryStream buffer = new MemoryStream(declared.HasValue ? (int)Math.Min(declared.Value, capBytes) : 1 << 20);
-                    try {
-                        using (Stream body = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()) {
-                            byte[] chunk = new byte[64 * 1024];
-                            long total = 0;
-                            int read;
-                            while ((read = body.Read(chunk, 0, chunk.Length)) > 0) {
-                                token.ThrowIfCancellationRequested();
-                                total += read;
-                                if (total > capBytes) {
-                                    NoteFailure(url, $"archive exceeded the {capBytes / (1024 * 1024)}MB limit while downloading");
-                                    buffer.Dispose();
-                                    return null;
-                                }
-                                buffer.Write(chunk, 0, read);
-                            }
-                        }
-                        buffer.Position = 0;
-                        return buffer;
-                    } catch {
-                        buffer.Dispose();
-                        throw;
-                    }
-                }
-            }
-
-            NoteFailure(url, $"more than {MaxRedirects} redirects");
-            return null;
         }
 
         /// <summary>
@@ -449,7 +357,7 @@ namespace ValheimEnforcer.modules.mods {
         /// plugin id it belongs to. Returns null for a native DLL, an obfuscated assembly, or anything Cecil
         /// cannot read; the caller then falls back to the whole-archive accepted set.
         /// </summary>
-        private static List<string> ReadPluginGuids(MemoryStream dll) {
+        internal static List<string> ReadPluginGuids(MemoryStream dll) {
             try {
                 dll.Position = 0;
                 using (AssemblyDefinition assembly = AssemblyDefinition.ReadAssembly(dll)) {

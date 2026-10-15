@@ -6,6 +6,7 @@ Both sides need ValheimEnforcer installed, but only the **server's** copy decide
 
 - [Mod List](#mod-list) — the four lists, the file format, what is kept up to date for you
 - [Mod File Verification](#mod-file-verification) — SHA256 checks that catch a recompiled mod
+- [Mod Downloads](#mod-downloads) — letting a refused player fix their mods from Thunderstore
 - [Patchers](#patchers) — the DLLs that load before any plugin
 - [Attestation](#attestation) — proving a mod report was generated for this connection
 - [Admin Bypass](#admin-bypass) — testing a mod against the live server
@@ -127,6 +128,7 @@ All of these are server-side and synced to admins, so an admin can change them i
 | `HashEnforcement` | Mods | `WhenKnown` | File verification mode — see [Mod File Verification](#mod-file-verification) |
 | `RecordHashesForLoadedMods` | Mods | `true` | Records the hash of every plugin this machine loads. Needs `UpdateLoadedModsOnStartup` to reach disk |
 | `ResolveThunderstoreHashes` | Mods | `false` | Downloads and hashes mods pinned with a `thunderstorePackage`. Off by default because it makes outbound requests |
+| `OfferModDownloads` | Mods | `false` | Lets a refused player install the mods this server has pinned — see [Mod Downloads](#mod-downloads) |
 | `ConfigPollIntervalSeconds` | Advanced | `30` | How often the file is checked for edits |
 | `HashComputeTimeoutSeconds` | Advanced | `30` | Safety valve for a stalled disk during startup hashing, not a tuning knob |
 | `ThunderstoreMaxArchiveMB` | Advanced | `128` | Largest package the resolver will download; bigger ones are skipped and logged |
@@ -169,7 +171,7 @@ Any mod in `Mods.yaml` can override the server setting with `hashEnforcement: Of
 - **Mods the server loads** pin themselves. `RecordHashesForLoadedMods` (on by default) writes the hash of every plugin the server runs into `Mods.yaml` at startup.
 - **Client-only mods** — a UI or QoL plugin the server never loads — need one of:
   - **By hand.** Put the SHA256 in `acceptedHashes` and set `hashSource: Manual`. `Get-FileHash -Algorithm SHA256 <file>.dll` produces it. Nothing else ever overwrites a `Manual` entry.
-  - **From Thunderstore.** Set `thunderstorePackage: Owner-ModName-Version` and enable `ResolveThunderstoreHashes`. The server downloads that package, hashes the DLLs inside it in memory, records them and discards the download. It re-downloads only when you change the pinned version. Only `thunderstore.io` and its CDN are ever contacted — arbitrary download URLs are not supported on purpose.
+  - **From Thunderstore.** Set `thunderstorePackage: Owner-ModName-Version` and enable `ResolveThunderstoreHashes`. The server downloads that package, hashes the DLLs inside it in memory, records them and discards the download. It re-downloads only when you change the pinned version. Only `thunderstore.io` and its CDN hosts (anything under `thunderstore.io`) are ever contacted — arbitrary download URLs are not supported on purpose.
 
 ```yaml
 requiredMods:
@@ -188,6 +190,41 @@ requiredMods:
 - Plugins loaded from memory rather than from a file (BepInEx ScriptEngine, in-game plugin loaders) cannot be verified. They report as `dynamic` and will be rejected once the server enforces that mod. The client logs a warning about this at startup, before you try to connect.
 - Under `Strict`, enforcement is deferred for mods whose `thunderstorePackage` has not resolved yet, but only until the first resolve pass after server start finishes. That window is bounded and logged; it exists so a restart does not lock everyone out for the few seconds the downloads take.
 - BepInEx *patchers* (`BepInEx/patchers/`) are not plugins and are not covered by any of this.
+
+## Mod Downloads
+
+Off on both sides by default. With it on, a player refused for their mods can have them fixed from the connection error window instead of working through the list by hand.
+
+It takes two switches, one each side, and neither is enough alone:
+
+| Setting | Where | Default | Effect |
+| --- | --- | --- | --- |
+| `OfferModDownloads` | Server, `Mods` | `false` | The server tells connecting clients they may install from its mod list |
+| `AllowServerModInstalls` | Player, `Client config` | `false` | The player agrees to let a server that offers do so. Local, never synced: it is the player's consent, not the server's |
+
+**The server never sends code.** Its mod list already goes to every connecting client, and for a pinned mod that list names a Thunderstore package and the file hashes the server accepts. The client downloads that exact version from `thunderstore.io` itself, checks that the plugin inside hashes to what the server recorded, and refuses the whole batch if anything does not match. So a server can only ever get a player the exact published build it checks for.
+
+When a server with `OfferModDownloads` on refuses a player, the error window gets a **Fix mods** button. It opens the plan:
+
+- **Install or update** — a required mod the player is missing, or a mod whose version or file the server refuses. The player's old copy is turned off and the pinned version installed to `BepInEx/plugins/Owner-ModName`, where r2modman and Gale put it.
+- **Turn off** — a mod on none of the server's lists. It is renamed to `.old`, never deleted.
+- **Not fixed automatically** — anything that cannot be pinned, with the reason.
+- **Left alone** — admin-only mods, since the client cannot know whether the player is an admin.
+
+Nothing happens until the player presses **Install and restart**. The packages are downloaded and checked first; then Valheim closes, a small helper program applies the changes once the game has exited, and starts it again — rejoining the server when it was joined by address. Without `AllowServerModInstalls` the window still shows the plan, and says how to turn it on.
+
+**Only pinned mods can be offered.** An entry needs a `thunderstorePackage` with a version, or one `ResolveThunderstoreHashes` has resolved, *and* recorded hashes. With the resolver on, a client-only mod in `optionalMods` or `requiredMods` like the ExtraSlots example above is enough. A mod the server loads itself has its hash recorded already, so adding its `thunderstorePackage` is all it needs — provided the server runs the same build as that Thunderstore version.
+
+### Things worth knowing about mod downloads
+
+- **Windows, Linux (including Proton) and macOS.** The changes are applied by a helper program that ships inside the mod — a Windows build, which Proton runs under Wine, a static Linux build and a macOS build. It waits for the game to exit, moves the files and starts the game again; it has no network access and does nothing the plan does not name. Source and build script are in `tools/modsync-helper`.
+- **The Mac build is Intel (x86_64) on purpose.** BepInEx's loader only exists for x86_64 on a Mac, so modded Valheim runs as x86_64 there — under Rosetta on Apple Silicon — and the helper runs wherever the mod does. It needs macOS 10.13 or later.
+- **The game comes back the way it was started.** On Windows the same command line, so Gale's and r2modman's launch arguments come back with it. On Linux the helper reads the game's own command line, environment and working directory before it exits, because there BepInEx is loaded through environment variables a launch script set. On macOS the mod hands the helper the command line and environment, so the relaunched game gets the same loader settings.
+- **Patchers and BepInEx core files are never installed.** A package containing them is refused and the player is told to use their mod manager.
+- **A mod's dependencies are not followed.** Only what is on the server's lists is installed, so a mod needing a library the server does not list will fail to load after the restart. List the library too.
+- **Mod managers are not told.** Gale and r2modman do not know about files written behind their back. A replaced mod folder still shows its old version in the manager, and a profile sync may undo the change.
+- **Replaced mod folders are kept** in `BepInEx/cache/ValheimEnforcer/modsync/replaced`, the last five runs, so a player can put one back by hand. What the script did is written to the player's log on the next start.
+- Only the plugin DLLs the server pinned are checked by hash. The rest of the package comes from the same Thunderstore version over HTTPS, and a Thunderstore version cannot be changed once published.
 
 ## Patchers
 

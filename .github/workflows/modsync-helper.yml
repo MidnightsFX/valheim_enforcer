@@ -1,0 +1,55 @@
+# Tests the mod sync helper (tools/modsync-helper) on a real Mac. The macOS build is cross-compiled on Windows by
+# build.ps1 and cannot be run there, so this is where it is proven: the unit tests, and the stand-in-game check
+# against both a fresh native build and the binary the mod actually ships.
+name: modsync helper
+
+on:
+  push:
+    paths:
+      - 'tools/modsync-helper/**'
+      - 'ValheimEnforcer/assets/modsync/**'
+      - '.github/workflows/modsync-helper.yml'
+  pull_request:
+    paths:
+      - 'tools/modsync-helper/**'
+      - 'ValheimEnforcer/assets/modsync/**'
+      - '.github/workflows/modsync-helper.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    # An Apple Silicon runner. The helper ships as x86_64 - Doorstop only exists for x86_64 on a Mac, so modded
+    # Valheim runs as x86_64 there - and everything below runs under Rosetta, the way it does on players' Macs.
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: tools/modsync-helper
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rosetta
+        run: |
+          /usr/bin/pgrep -q oahd || sudo softwareupdate --install-rosetta --agree-to-license
+          arch -x86_64 /usr/bin/true
+
+      - name: Rust x86_64 target
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Unit tests, x86_64 under Rosetta
+        run: cargo test --target x86_64-apple-darwin
+
+      - name: Build, x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '10.13'
+
+      - name: End to end, fresh build
+        run: bash e2e.sh target/x86_64-apple-darwin/release/ve-modsync
+
+      - name: End to end, the binary the mod ships
+        run: |
+          file ../../ValheimEnforcer/assets/modsync/ve-modsync-macos-x64
+          bash e2e.sh ../../ValheimEnforcer/assets/modsync/ve-modsync-macos-x64

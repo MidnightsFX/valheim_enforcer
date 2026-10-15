@@ -142,6 +142,16 @@ namespace ValheimEnforcer.modules.character {
                 if (Loadout != null && Loadout.Changed) { parts.Add($"starter loadout granted ({Loadout.Describe()})"); }
                 return parts.Count == 0 ? "nothing to do" : string.Join(", ", parts.ToArray());
             }
+
+            /// <summary>
+            /// The loadout this run wrote into the record, or null when it wrote none. The server sends it back
+            /// with the sanitized character so the client can put the same kit into the player's hands - the
+            /// record is all the server can change, and a client cannot work the kit out for itself (see
+            /// StarterLoadouts.Current).
+            /// </summary>
+            internal DataObjects.Loadout GrantedLoadout(Policy policy) {
+                return Loadout != null && Loadout.Changed ? policy?.Loadout : null;
+            }
         }
 
         /// <summary>

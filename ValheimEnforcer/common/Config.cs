@@ -33,6 +33,8 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> AutoAddPatchersToAllowed;
         public static ConfigEntry<string> AttestationPolicy;
         public static ConfigEntry<bool> ResolveThunderstoreHashes;
+        public static ConfigEntry<bool> OfferModDownloads;
+        public static ConfigEntry<bool> AllowServerModInstalls;
         public static ConfigEntry<int> HashComputeTimeoutSeconds;
         public static ConfigEntry<int> ThunderstoreMaxArchiveMB;
         public static ConfigEntry<bool> RemoveNontrackedItemsFromJoiningPlayers;
@@ -213,6 +215,7 @@ namespace ValheimEnforcer {
         public static ConfigEntry<string> DiscordWebhookUrlModeration;
         public static ConfigEntry<string> DiscordWebhookUrlModMismatch;
         public static ConfigEntry<string> DiscordServerLabel;
+        public static ConfigEntry<string> DiscordProxyUrl;
         public static ConfigEntry<bool> DiscordNotifyServerStartup;
         public static ConfigEntry<bool> DiscordNotifyServerShutdown;
         public static ConfigEntry<bool> DiscordNotifyWorldSaved;
@@ -342,6 +345,11 @@ namespace ValheimEnforcer {
             EnableTerminalColors = BindLocalConfig("Client config", "EnableTerminalColors", true,
                 "Colour the output of this mod's console commands by severity - green for a result, blue for detail lines, amber for a warning, red for a failure. Turn it off if your console theme makes the colours hard to read, or if you are copying output somewhere that would show the markup.");
 
+            // Local, and it has to be: this is the player's consent. A synced value would be the server deciding
+            // on the player's behalf that it may install mods on their machine.
+            AllowServerModInstalls = BindLocalConfig("Client config", "AllowServerModInstalls", true,
+                "Lets a server that turns you away for your mods offer to fix them. When a server with OfferModDownloads switched on refuses your connection, the connection error window gets a 'Fix mods' button. It shows you exactly what would change - which Thunderstore packages would be installed or updated, and which of your mods would be turned off - and nothing happens until you agree. Every package comes from thunderstore.io at the exact version the server pinned, and its files are checked against the hashes the server recorded before anything is installed; mods are turned off by renaming them to .old, never deleted, and anything replaced is moved to BepInEx/cache/ValheimEnforcer/modsync/replaced. Applying the changes closes Valheim, which then starts again and rejoins the server; a small helper program that ships inside this mod makes the changes once the game has closed. Windows, Linux (including Proton) and macOS. Off by default.");
+
             AllowPublicDiagnosticCommands = BindServerConfig("Advanced", "AllowPublicDiagnosticCommands", true,
                 "If enabled (the default), the two commands that tell somebody nothing but what they could already work out - 'enforcer-help', which lists the command names, and 'enforcer-whoami', which reports what this server makes of the connection the caller is sitting on - run for any player rather than admins only. This exists because the person who most needs to ask 'why am I not an admin here?' is by definition the person the admin check is refusing, and with the answer locked behind that same check an operator whose id is misspelled in adminlist.txt has no way to find out from in-game. Neither command reads or changes anything belonging to the server or to another player, and enforcer-whoami never names another admin. Turn it off if you would rather players could not see the command list at all; every other command stays admin-only regardless.", advanced: true);
 
@@ -355,6 +363,7 @@ namespace ValheimEnforcer {
             AutoAddPatchersToAllowed = BindServerConfig("Mods", "AutoAddPatchersToAllowed", true, "Adds the patchers this server itself has to the allowedPatchers list in Mods.yaml at startup, with their file hashes, so a server running patchers of its own does not have to write them out by hand. Mirrors AutoAddModsToRequired. Hashes are only ever added, never replaced, so an entry an admin pinned by hand survives. Turn it off to curate the list yourself - patchers the server runs are then refused for clients like any other.");
             RecordHashesForLoadedMods = BindServerConfig("Mods", "RecordHashesForLoadedMods", true, "If enabled, the SHA256 of every plugin DLL loaded on this machine is recorded into Mods.yaml at startup, so the mods the server itself runs get pinned with no manual work. Hashes an admin pinned by hand, or that came from a thunderstorePackage, are never overwritten. Requires UpdateLoadedModsOnStartup for the result to reach disk.");
             ResolveThunderstoreHashes = BindServerConfig("Mods", "ResolveThunderstoreHashes", false, "If enabled, the server downloads any mod in Mods.yaml carrying a 'thunderstorePackage' field (format Owner-ModName or Owner-ModName-Version, the same format a Thunderstore manifest uses), hashes the DLLs inside the archive in memory, records them, and discards the download. This is how you pin a client-only mod the server never loads itself. Only thunderstore.io and its CDN are ever contacted; arbitrary download URLs are deliberately not supported. Off by default because it makes outbound network requests.");
+            OfferModDownloads = BindServerConfig("Mods", "OfferModDownloads", true, "If enabled, a player turned away for their mods is offered a fix. The server's mod list already goes to every connecting client; with this on it also tells the client it may install from it, and a player who has AllowServerModInstalls switched on in their own config gets a 'Fix mods' button in the connection error window. Only entries that can be pinned exactly are offered: a 'thunderstorePackage' with a version (or one ResolveThunderstoreHashes has resolved) AND recorded file hashes, so the client downloads exactly the build the server checks for and refuses anything that does not match. Mods with no package or no hash are listed as things the player has to fix by hand. Unlisted mods the player carries are offered to be turned off. Nothing is installed without the player confirming it, and only from thunderstore.io. Off by default.");
             RemoveNontrackedItemsFromJoiningPlayers = BindServerConfig("Player Sync", "RemoveNontrackedItemsFromJoiningPlayers", true, "If enabled, any items that are not tracked by the server will be removed from joining player's inventories.");
             AddMissingItemsFromPlayerServerSave = BindServerConfig("Player Sync", "AddMissingItemsFromPlayerServerSave", true, "If enabled, any items the player does not have that are listed on the server will be given to the player when joining");
             RestoreSkillsFromPlayerServerSave = BindServerConfig("Player Sync", "RestoreSkillsFromPlayerServerSave", true, "If enabled, a returning character whose skills are below the levels the server holds for them has them raised back to those levels when they join - the skill counterpart of AddMissingItemsFromPlayerServerSave. This is what brings a character back after its local save was deleted and the character recreated under the same name: the server still holds their progress, and without this the recreated character's blank skills would be uploaded as the new record on their first save. Never lowers a skill; PreventExternalSkillRaises covers the other direction. Skipped on a dirty reconnect unless ItemReturnForDirtyReconnection is on, for the same reason item restoration is: the stored copy can be a delta window stale, and the one way it can hold a higher skill than the player has is a death the server never heard about. On by default.");
@@ -554,6 +563,7 @@ namespace ValheimEnforcer {
             DiscordWebhookUrlModeration = BindLocalConfig("Discord", "WebhookUrlModeration", "", "Webhook URL for cheat bans and character-limit rejections. Leave empty to use WebhookUrl. This is the one worth pointing at a private moderator channel: the messages name the account behind a ban.");
             DiscordWebhookUrlModMismatch = BindLocalConfig("Discord", "WebhookUrlModMismatch", "", "Webhook URL for connections refused over a mod mismatch. Leave empty to use WebhookUrl. Often worth a support channel of its own, since the message lists exactly which mods the player needs to fix.");
             DiscordServerLabel = BindLocalConfig("Discord", "ServerLabel", "", "Name for this server in notification messages, available to templates as the {server} placeholder. Empty by default, and no built-in template uses it - set it only if several servers post into the same channel and you need to tell them apart. Deliberately a setting rather than the server's advertised name, so it also works on a player-hosted world.");
+            DiscordProxyUrl = BindLocalConfig("Discord", "ProxyUrl", "", "HTTP proxy every webhook post is sent through, for a server whose network blocks Discord. Leave empty to connect directly. Written as http://host:port, or http://user:password@host:port for a proxy that needs a login - percent-encode any ':' or '@' inside the user name or password. SOCKS proxies are not supported, but most proxy clients offer an HTTP port alongside their SOCKS one. The connection to Discord stays encrypted through the proxy, so it sees only that the server is talking to discord.com - never the webhook URL or the messages. If this is set but unusable, nothing is posted rather than falling back to a direct connection. Server only and never synced, like the webhook URLs.");
             DiscordNotifyServerStartup = BindLocalConfig("Discord", "NotifyServerStartup", true, "Post a message when the server comes online.");
             DiscordNotifyServerShutdown = BindLocalConfig("Discord", "NotifyServerShutdown", true, "Post a message when the server shuts down.");
             DiscordNotifyWorldSaved = BindLocalConfig("Discord", "NotifyWorldSaved", false, "Post a message every time the world is saved, covering both the periodic autosave and a manual 'save' from the console. Off by default because the autosave fires roughly every twenty minutes, all day, whether or not anyone is playing - on most servers that buries everything else in the channel. Worth turning on temporarily when you are chasing a save problem, or permanently if it has its own channel via WebhookUrlServerStatus.");
@@ -1317,7 +1327,7 @@ loadouts: {}
                             Logger.LogWarning($"First save for {chara.Name} ({chara.HostID}) held to the new-character rules: {sanitized.Describe()}");
                             WritePlayerCharacterToSave(chara.HostID, chara);
                             // Already on the main thread here, so no queue hop is needed.
-                            SendSanitizedCharacterToClient(sender, chara);
+                            SendSanitizedCharacterToClient(sender, chara, sanitized.GrantedLoadout(newCharacterPolicy));
                             return;
                         }
                     }
@@ -1392,7 +1402,7 @@ loadouts: {}
         /// Sanitizing the stored save is only half a fix on its own - the player is still standing there
         /// holding the items. Without this the client's next delta or full save would simply put them back.
         /// </summary>
-        internal static void SendSanitizedCharacterToClient(long sender, DataObjects.Character chara) {
+        internal static void SendSanitizedCharacterToClient(long sender, DataObjects.Character chara, DataObjects.Loadout grantedLoadout = null) {
             if (chara == null) { return; }
             // Same withholding as every other server -> client character payload, but tagged SANITIZED so the
             // client reconciles its live inventory rather than just adopting the record.
@@ -1402,7 +1412,7 @@ loadouts: {}
             try {
                 chara.ConfiscatedItems = null;
                 chara.SkillReductions = null;
-                payload = CharacterPayload(CharacterYaml.ToYaml(chara), CharPayloadSanitized);
+                payload = CharacterPayload(CharacterYaml.ToYaml(chara), CharPayloadSanitized, grantedLoadout);
             } finally {
                 // The caller's object is server-side authoritative state; never leave it stripped.
                 chara.ConfiscatedItems = held;
@@ -1414,9 +1424,9 @@ loadouts: {}
         /// <summary>Counterpart for the async store, whose worker has already serialized the character with the
         /// server-owned lists withheld (CharacterStore.SanitizedPush). Nothing is read back out of the store:
         /// by the time the main thread drains the push the entry may have moved on, or been dropped.</summary>
-        internal static void SendSanitizedYamlToClient(long sender, string name, string strippedYaml) {
+        internal static void SendSanitizedYamlToClient(long sender, string name, string strippedYaml, DataObjects.Loadout grantedLoadout = null) {
             if (string.IsNullOrEmpty(strippedYaml)) { return; }
-            SendSanitizedPayload(sender, name, CharacterPayload(strippedYaml, CharPayloadSanitized));
+            SendSanitizedPayload(sender, name, CharacterPayload(strippedYaml, CharPayloadSanitized, grantedLoadout));
         }
 
         private static void SendSanitizedPayload(long sender, string name, ZPackage payload) {
@@ -1513,7 +1523,7 @@ loadouts: {}
                     yield break;
 
                 case CharacterPayloadOutcome.Sanitized:
-                    CharacterManager.ApplyServerSanitizedCharacter(incoming.Character);
+                    CharacterManager.ApplyServerSanitizedCharacter(incoming.Character, incoming.GrantedLoadout);
                     yield break;
 
                 // The server holds this character but has been told its copy is stale (CatchupOverwriteOnJoin).
@@ -1547,6 +1557,8 @@ loadouts: {}
         private struct IncomingCharacter {
             internal CharacterPayloadOutcome Outcome;
             internal DataObjects.Character Character;
+            /// <summary>The starter loadout the server granted, on a SANITIZED push that carried one.</summary>
+            internal DataObjects.Loadout GrantedLoadout;
         }
 
         // Split out of the handler because a C# iterator cannot yield out of a try/catch, and this read has to
@@ -1561,6 +1573,7 @@ loadouts: {}
 
             string yaml;
             string kind = CharPayloadCharacter;
+            string loadoutYaml = null;
             try {
                 yaml = package.ReadString();
                 // Older servers send the YAML with no tag after it.
@@ -1570,6 +1583,10 @@ loadouts: {}
                 // And older ones still send nothing after the tag, which leaves this session on YAML deltas.
                 if (package.GetPos() < package.Size()) {
                     DeltaWire.NoteServerCapabilities(package.ReadInt());
+                }
+                // A first-save push that granted a starter loadout carries it last. See CharacterPayload.
+                if (kind == CharPayloadSanitized && package.GetPos() < package.Size()) {
+                    loadoutYaml = package.ReadString();
                 }
             } catch (Exception e) {
                 Logger.LogWarning($"Could not read the character payload from the server: {e.Message}");
@@ -1592,10 +1609,22 @@ loadouts: {}
                 } else if (kind == CharPayloadCatchUp) {
                     outcome = CharacterPayloadOutcome.CatchUp;
                 }
-                return new IncomingCharacter { Outcome = outcome, Character = chara };
+                return new IncomingCharacter { Outcome = outcome, Character = chara, GrantedLoadout = ReadGrantedLoadout(loadoutYaml) };
             } catch (Exception e) {
                 Logger.LogWarning($"Could not parse the character the server sent: {e.Message}");
                 return new IncomingCharacter { Outcome = CharacterPayloadOutcome.Unreadable };
+            }
+        }
+
+        // Parsed apart from the character, so a loadout this client cannot read costs the player their kit and
+        // nothing else. Throwing it into the character's catch would have turned a good record into Unreadable.
+        private static DataObjects.Loadout ReadGrantedLoadout(string loadoutYaml) {
+            if (string.IsNullOrWhiteSpace(loadoutYaml)) { return null; }
+            try {
+                return DataObjects.yamldeserializer.Deserialize<DataObjects.Loadout>(loadoutYaml);
+            } catch (Exception e) {
+                Logger.LogWarning($"Could not read the starter loadout the server granted, so it will not be handed over: {e.Message}");
+                return null;
             }
         }
 
@@ -2433,7 +2462,7 @@ loadouts: {}
         /// defaults to CHAR. Neither combination breaks, which matters because the payload rides the connect
         /// handshake.
         /// </summary>
-        internal static ZPackage CharacterPayload(string yaml, string kind) {
+        internal static ZPackage CharacterPayload(string yaml, string kind, DataObjects.Loadout grantedLoadout = null) {
             ZPackage package = new ZPackage();
             package.Write(yaml ?? "");
             package.Write(kind);
@@ -2442,6 +2471,13 @@ loadouts: {}
             // in the binary form - see DeltaWire - and it rides every character payload rather than only the
             // connect one, so there is one layout to read instead of two.
             package.Write(DeltaWire.ServerCapabilities());
+            // The starter loadout the server has just written into this record, on a SANITIZED push only. After
+            // the capabilities for the same reason again. The record alone cannot say which of its items are the
+            // kit, and handing over "whatever the record has that the player does not" would also hand back
+            // anything moved out of the inventory while the first save was in flight.
+            if (grantedLoadout != null) {
+                package.Write(DataObjects.yamlserializer.Serialize(grantedLoadout));
+            }
             return package;
         }
 

@@ -1174,7 +1174,9 @@ namespace ValheimEnforcer.modules {
                     // client builds the report it has to fold the nonce into.
                     string nonce = Attestation.Issue(rpc.GetSocket()?.GetHostName());
                     Logger.LogDebug("Server sending mod version data to client");
-                    rpc.Invoke(nameof(RPC_ReceiveModVersionData), ModSettings.ToZPackage(nonce));
+                    // The download offer rides the same payload, because a client refused for its mods never gets
+                    // as far as the config sync that would otherwise tell it anything.
+                    rpc.Invoke(nameof(RPC_ReceiveModVersionData), ModSettings.ToZPackage(nonce, ValConfig.OfferModDownloads.Value, ValConfig.HashEnforcement.Value));
                 }
             }
         }
@@ -1201,6 +1203,8 @@ namespace ValheimEnforcer.modules {
 
                 // Always update so a clean run clears any note left over from a previous attempt.
                 DetailsUpdater?.UpdateErrorText(summary, details);
+                // Kept only when the server offers mod downloads; the error window works out what to offer.
+                modsync.ModSync.NoteServerList(serverMods);
                 if (modsvalid == false) {
                     // Client does not kick, but it does set the error message, the server ultimately does the actual validation-
                     // this client side comparison is just to provide feedback to the user
@@ -1464,6 +1468,8 @@ namespace ValheimEnforcer.modules {
             if (SceneManager.GetActiveScene().name.Equals("start") == false) { return; }
 
             DetailsUpdater = GUIManager.CustomGUIFront.AddComponent<JotunnDetailDisconnectExpansion>();
+            // Idle unless a server that refused us offered mod downloads.
+            GUIManager.CustomGUIFront.AddComponent<modsync.ModSyncWindow>();
         }
 
         public class JotunnDetailDisconnectExpansion : MonoBehaviour {
