@@ -49,8 +49,10 @@ namespace ValheimEnforcer.modules.modsync {
                     plan = ModSync.BuildPlan();
                     if (plan != null && plan.HasWork) {
                         AddFixButton(window);
-                    } else if (plan != null) {
-                        Logger.LogDebug("This server offers mod downloads, but there is nothing on this client it could fix.");
+                    } else if (plan != null && plan.Unfixable.Count > 0) {
+                        // Info, not Debug: with nothing to install there is no button, and this line is then the
+                        // only place a player or admin can find out why.
+                        Logger.LogInfo($"This server offers to fix mods, but none of the problems can be fixed automatically: {string.Join("; ", plan.Unfixable.ToArray())}");
                     }
                 }
             }

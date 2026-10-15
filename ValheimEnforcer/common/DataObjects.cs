@@ -141,6 +141,15 @@ namespace ValheimEnforcer.common {
             public string ThunderstorePackage { get; set; }
 
             /// <summary>
+            /// Where <see cref="ThunderstorePackage"/> came from when the server filled it in itself:
+            /// "Manifest" (the installed package's manifest.json) or "Thunderstore" (a lookup by the mod's name).
+            /// Null means an admin wrote it, and it is never touched. Filled-in packages are re-derived when the
+            /// mod is updated; deleting this field keeps the current value as the admin's own.
+            /// </summary>
+            [DefaultValue(null)]
+            public string PackageSource { get; set; }
+
+            /// <summary>
             /// Admin authored: per-mod override of the server's HashEnforcement setting. "Off", "WhenKnown" or
             /// "Strict".
             /// </summary>
@@ -171,6 +180,22 @@ namespace ValheimEnforcer.common {
             /// <summary>True when the server holds at least one hash to compare a client against.</summary>
             public bool HasRecordedHash() {
                 return AcceptedHashes != null && AcceptedHashes.Count > 0;
+            }
+
+            /// <summary>
+            /// False for an entry written with no version, which allows the mod in any version - the usual way to
+            /// list an optional client mod or an admin tool. Nothing automatic gives such an entry a version or a
+            /// file hash, and a hash recorded automatically is not held against it; see HashPolicy.Evaluate.
+            /// </summary>
+            public bool IsVersioned() {
+                return !string.IsNullOrWhiteSpace(Version);
+            }
+
+            /// <summary>True when the recorded hashes were produced by this mod (the server's own file, or a
+            /// Thunderstore package) rather than typed in by an admin.</summary>
+            public bool HashesAreAutomatic() {
+                return string.Equals(HashSource, modules.mods.HashPolicy.SourceLocal, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(HashSource, modules.mods.HashPolicy.SourceThunderstore, StringComparison.OrdinalIgnoreCase);
             }
         }
 

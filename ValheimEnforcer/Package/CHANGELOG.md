@@ -1,10 +1,18 @@
+**0.34.0**
+---
+```
+- A server can offer to fix a refused player's mods on Windows, Linux and macOS, installing the exact versions it checks for from Thunderstore and restarting the game once the player agrees.
+- Mods the server runs are matched to their Thunderstore package automatically, so they can be offered to players without editing the mod list.
+- Mods listed with a Thunderstore package and a version now have their files checked against the published build by default, including client-only mods the server does not run.
+- Mods listed without a version are allowed in any version and are no longer file-checked unless a hash is pinned by hand.
+- Fixes the server being unable to download Thunderstore packages to check mod files since Thunderstore moved its downloads to a new address.
+- Discord notifications can be sent through a proxy, for servers on a network that blocks Discord.
+```
+
 **0.33.3**
 ---
 ```
 - Fixes new players losing their starter loadout as soon as they joined unless they were an admin, and the loadout's skills being reset on a host's own new character.
-- A server can offer to fix a refused player's mods on Windows, Linux and macOS, installing the exact versions it checks for from Thunderstore and restarting the game, once both the server and the player have switched it on.
-- Fixes the server being unable to download Thunderstore packages to check mod files since Thunderstore moved its downloads to a new address.
-- Discord notifications can be sent through a proxy, for servers on a network that blocks Discord.
 ```
 
 **0.33.2**

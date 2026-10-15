@@ -53,6 +53,7 @@ namespace ValheimEnforcer.modules {
                 ModSettings = new DataObjects.Mods();
             }
             NoteModsOnAdminOnlyAndRequired();
+            ClearAutomaticHashesOnUnversioned(ModSettings);
 
             PluginHasher.WaitForPass(ValConfig.HashComputeTimeoutSeconds.Value * 1000);
             PatcherIndex.WaitForPass(ValConfig.HashComputeTimeoutSeconds.Value * 1000);
@@ -123,7 +124,10 @@ namespace ValheimEnforcer.modules {
             "#",
             "#   pluginID            The BepInEx plugin GUID. The same value as the entry's key. Written for you.",
             "#   version             The version this list expects. Kept current automatically for mods this",
-            "#                       machine actually loads, so updating a mod needs no edit here.",
+            "#                       machine actually loads, so updating a mod needs no edit here. Leave it out",
+            "#                       to allow any version: such an entry is never file-checked unless you pin a",
+            "#                       hash by hand, and is not offered for download. Usual for optional and admin",
+            "#                       mods.",
             "#   name                Human readable. Used in logs and in the text a rejected player is shown.",
             "#   enforceVersion      Require an exact version match. Default false, so a client a patch version",
             "#                       behind is not locked out of a server that never asked for exact versions.",
@@ -145,10 +149,16 @@ namespace ValheimEnforcer.modules {
             "#   hashedFrom          Bookkeeping for the above: 'local:<version>', or 'Owner-Name-Version' for a",
             "#                       resolved package. Re-resolution happens only when this stops matching.",
             "#   thunderstorePackage 'Owner-ModName' or 'Owner-ModName-Version' - the same dependency string a",
-            "#                       Thunderstore manifest uses. The server downloads that package and records",
-            "#                       its hashes. Needs ResolveThunderstoreHashes, which is off by default. This",
-            "#                       is the only way this mod reaches the network; download URLs are not",
-            "#                       supported on purpose.",
+            "#                       Thunderstore manifest uses. Lets the server offer the mod to players",
+            "#                       (OfferModDownloads), and with ResolveThunderstoreHashes (on by default) the",
+            "#                       server downloads that package and records its hashes. Filled in for you when",
+            "#                       AutoFillThunderstorePackages is on. Only thunderstore.io is ever contacted;",
+            "#                       download URLs are not supported on purpose.",
+            "#   packageSource       Written when the server filled thunderstorePackage in itself: Manifest (the",
+            "#                       installed package's manifest.json) or Thunderstore (a lookup by name). Such",
+            "#                       entries are kept current when the mod updates, and dropped if the new",
+            "#                       version is not on Thunderstore. A thunderstorePackage with no",
+            "#                       packageSource is yours and never touched - delete this line to keep one.",
             "#   hashEnforcement     Per-mod override of the server's HashEnforcement setting: " + HashPolicy.Off + ", " + HashPolicy.WhenKnown + "",
             "#                       or " + HashPolicy.Strict + ".",
             "#",
@@ -234,6 +244,22 @@ namespace ValheimEnforcer.modules {
         /// resolver so both go through the same self-write suppression - otherwise our own write comes straight
         /// back in through the file watcher one poll later.
         /// </summary>
+        // The write time Mods.yaml had when this mod last saved it.
+        private static System.DateTime lastSelfWriteUtc = System.DateTime.MinValue;
+
+        /// <summary>
+        /// Whether somebody else has edited Mods.yaml since <paramref name="stamp"/>. The background passes that
+        /// write to it (the Thunderstore package fill and the hash resolve) check this before saving, so an
+        /// admin's edit made while they worked is never overwritten - but one of those passes saving the file in
+        /// the meantime is not an edit to defer to. Treating it as one made each pass throw away the other's
+        /// finished work and start again.
+        /// </summary>
+        internal static bool ModsFileEditedSince(System.DateTime stamp) {
+            System.DateTime now;
+            try { now = File.GetLastWriteTimeUtc(ValConfig.ModsConfigFilePath); } catch (System.Exception) { return false; }
+            return now != stamp && now != lastSelfWriteUtc;
+        }
+
         internal static void PersistModSettings() {
             if (ModSettings == null) { return; }
             try {
@@ -247,6 +273,7 @@ namespace ValheimEnforcer.modules {
                 AtomicFile.WriteText(ValConfig.ModsConfigFilePath, WithPreservedComments(yaml));
                 // Qualified: Jotunn.Utils has a ConfigFileWatcher of its own and this file imports that namespace.
                 common.ConfigFileWatcher.NoteSelfWrite(ValConfig.ModsConfigFilePath);
+                try { lastSelfWriteUtc = File.GetLastWriteTimeUtc(ValConfig.ModsConfigFilePath); } catch (System.Exception) { /* only costs a redundant re-run */ }
             } catch (System.Exception e) {
                 Logger.LogWarning($"Could not write {ValConfig.ModsConfigFilePath}: {e.Message}");
             }
@@ -367,8 +394,11 @@ namespace ValheimEnforcer.modules {
         /// tampered with would quietly adopt the tampered hash as the new truth.
         /// </summary>
         private static void RecordLocalHashIfAllowed(Dictionary<string, DataObjects.Mod> modList, string key, string hash, string version) {
-            if (!ValConfig.RecordHashesForLoadedMods.Value || string.IsNullOrEmpty(hash)) { return; }
+            if (string.IsNullOrEmpty(hash)) { return; }
             if (!modList.TryGetValue(key, out DataObjects.Mod entry) || entry == null) { return; }
+            // Listed with no version means any version will do, and a recorded hash would pin one.
+            if (!entry.IsVersioned()) { return; }
+            if (!ValConfig.RecordHashesForLoadedMods.Value) { return; }
 
             if (!string.IsNullOrEmpty(entry.HashSource)
                 && !string.Equals(entry.HashSource, HashPolicy.SourceLocal, System.StringComparison.OrdinalIgnoreCase)) {
@@ -388,6 +418,31 @@ namespace ValheimEnforcer.modules {
         /// mod is refused to non-admins and demanded of nobody - but the requiredMods entry is dead and the file
         /// reads as though the mod were required, so the admin is told which one counts.
         /// </summary>
+        /// <summary>
+        /// Takes automatically recorded hashes off entries that have no version. Earlier builds filled in a blank
+        /// version for a mod the server runs and then pinned its file, so a file written by one of them can hold
+        /// such hashes; they are not enforced either way (see HashPolicy.Evaluate), and clearing them keeps the
+        /// file saying what is actually checked. A hash an admin pinned by hand is left alone.
+        /// </summary>
+        internal static void ClearAutomaticHashesOnUnversioned(DataObjects.Mods settings) {
+            if (settings == null) { return; }
+            List<string> cleared = new List<string>();
+            foreach (Dictionary<string, DataObjects.Mod> list in new[] { settings.RequiredMods, settings.OptionalMods, settings.AdminOnlyMods }) {
+                if (list == null) { continue; }
+                foreach (KeyValuePair<string, DataObjects.Mod> entry in list) {
+                    DataObjects.Mod mod = entry.Value;
+                    if (mod == null || mod.IsVersioned() || !mod.HasRecordedHash() || !mod.HashesAreAutomatic()) { continue; }
+                    mod.AcceptedHashes = null;
+                    mod.HashSource = null;
+                    mod.HashedFrom = null;
+                    cleared.Add(entry.Key);
+                }
+            }
+            if (cleared.Count > 0) {
+                Logger.LogInfo($"Cleared the recorded file hashes of mods listed without a version, which are allowed in any version: {string.Join(", ", cleared.ToArray())}.");
+            }
+        }
+
         private static void NoteModsOnAdminOnlyAndRequired() {
             if (ModSettings?.AdminOnlyMods == null || ModSettings.RequiredMods == null) { return; }
             List<string> both = ModSettings.AdminOnlyMods.Keys.Where(key => ModSettings.RequiredMods.ContainsKey(key)).ToList();
@@ -401,6 +456,9 @@ namespace ValheimEnforcer.modules {
         // dereferencing null.
         private static void UpdateModVersionIfChanged(Dictionary<string, DataObjects.Mod> modList, string key, string currentVersion) {
             if (!modList.TryGetValue(key, out DataObjects.Mod entry) || entry == null) { return; }
+            // A version that is there is kept current; a blank one is left blank. It is how an admin says any
+            // version is fine, and filling it in would turn on the file check for a mod they meant to leave open.
+            if (!entry.IsVersioned()) { return; }
             if (entry.Version == currentVersion) { return; }
 
             Logger.LogInfo($"Updating version for {key}: {entry.Version} -> {currentVersion}");

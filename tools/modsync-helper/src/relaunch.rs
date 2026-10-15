@@ -89,6 +89,12 @@ pub fn without_markers(env: Vec<(OsString, OsString)>) -> Vec<(OsString, OsStrin
 pub fn spawn(launch: &Launch) -> std::io::Result<()> {
     let mut command = Command::new(&launch.exe);
     command.args(&launch.args).env_clear().envs(launch.env.iter().map(|(k, v)| (k, v))).stdin(Stdio::null());
+    // Windows: nothing inherited. The helper is started by Valheim, a windowed program, and the standard handles
+    // it passes down point at nothing; handing them on to the relaunched game failed with "The handle is
+    // invalid" (os error 6), after every change had been applied. The game writes its log to files anyway.
+    // Unix keeps them: there they are real, and often the pipe Steam collects the game's output from.
+    #[cfg(windows)]
+    command.stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(cwd) = &launch.cwd {
         command.current_dir(cwd);
     }
@@ -171,6 +177,43 @@ mod tests {
         let without = crate::plan::parse(base).unwrap();
         let launch = prepare(&without).unwrap().unwrap();
         assert_eq!(launch.env.len(), without_markers(std::env::vars_os().collect()).len(), "no env records: inherited");
+    }
+
+    /// Valheim is a windowed program, so the standard handles the helper inherits from it point at nothing.
+    /// Passing them on to the relaunched game failed with "The handle is invalid. (os error 6)" - after every
+    /// change had been applied, leaving the game closed.
+    #[cfg(windows)]
+    #[test]
+    fn starts_the_game_from_a_helper_whose_own_handles_are_invalid() {
+        extern "system" {
+            fn GetStdHandle(which: u32) -> isize;
+            fn SetStdHandle(which: u32, handle: isize) -> i32;
+        }
+        const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+        const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+        // Not null and not INVALID_HANDLE_VALUE, which Rust already treats as "no handle", and far beyond any
+        // handle this process has open, so it cannot be reused by a handle the spawn itself opens. A closed
+        // handle's value does get reused straight away, which hid the failure from an earlier version of this test.
+        const BOGUS: isize = 0x0FFF_FFF0;
+
+        let (out, err) = unsafe { (GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)) };
+        unsafe {
+            SetStdHandle(STD_OUTPUT_HANDLE, BOGUS);
+            SetStdHandle(STD_ERROR_HANDLE, BOGUS);
+        }
+        let system = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        let launch = Launch {
+            exe: system.join("System32").join("cmd.exe"),
+            args: vec![OsString::from("/c"), OsString::from("exit")],
+            cwd: None,
+            env: std::env::vars_os().collect(),
+        };
+        let result = spawn(&launch);
+        unsafe {
+            SetStdHandle(STD_OUTPUT_HANDLE, out);
+            SetStdHandle(STD_ERROR_HANDLE, err);
+        }
+        assert!(result.is_ok(), "relaunch failed: {:?}", result);
     }
 
     #[test]

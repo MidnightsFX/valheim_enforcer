@@ -96,6 +96,7 @@ namespace ValheimEnforcer.modules.mods {
                 host = null;
             }
             while (resolved.TryDequeue(out ResolvedEntry _)) { }
+            ThunderstorePackageFinder.Teardown();
             running = false;
             passQueued = false;
             firstPassDone = false;
@@ -126,6 +127,8 @@ namespace ValheimEnforcer.modules.mods {
                 foreach (KeyValuePair<string, DataObjects.Mod> entry in list) {
                     DataObjects.Mod mod = entry.Value;
                     if (mod == null || string.IsNullOrWhiteSpace(mod.ThunderstorePackage)) { continue; }
+                    // Listed with no version: any version is allowed, so there is no build to hash.
+                    if (!mod.IsVersioned()) { continue; }
 
                     if (!TryResolveSpec(entry.Key, mod, out string spec)) { continue; }
 
@@ -387,6 +390,8 @@ namespace ValheimEnforcer.modules.mods {
             private DateTime modsFileStamp;
 
             public void Update() {
+                // Packages first: one it fills in is work for the pass below.
+                ThunderstorePackageFinder.Tick();
                 DrainResults();
 
                 if (!passQueued || running) { return; }
@@ -434,9 +439,8 @@ namespace ValheimEnforcer.modules.mods {
                 }
                 if (!changed) { return; }
 
-                DateTime now;
-                try { now = File.GetLastWriteTimeUtc(ValConfig.ModsConfigFilePath); } catch (Exception) { now = modsFileStamp; }
-                if (now != modsFileStamp) {
+                // Only an edit by somebody else counts; the package fill saving the file meanwhile does not.
+                if (ModManager.ModsFileEditedSince(modsFileStamp)) {
                     Logger.LogInfo("Mods.yaml changed while hashes were being resolved; not overwriting it. Re-resolving against the new file.");
                     RequestPass("mods file changed during resolve");
                     return;
@@ -455,6 +459,8 @@ namespace ValheimEnforcer.modules.mods {
                     // The null check is on the value, not just on the lookup: an entry written with nothing under
                     // it is a present key with a null value, which TryGetValue reports as a hit.
                     if (list == null || !list.TryGetValue(entry.PluginID, out DataObjects.Mod mod) || mod == null) { continue; }
+                    // The admin may have taken the version off while the download ran.
+                    if (!mod.IsVersioned()) { continue; }
 
                     // Never overwrite a hash an admin pinned by hand.
                     if (string.Equals(mod.HashSource, HashPolicy.SourceManual, StringComparison.OrdinalIgnoreCase)) {
@@ -478,6 +484,7 @@ namespace ValheimEnforcer.modules.mods {
             private static void Postfix(ZNet __instance) {
                 if (!__instance.IsServer()) { return; }
                 Initialize();
+                ThunderstorePackageFinder.RequestRun("server start");
                 RequestPass("server start");
             }
         }

@@ -97,6 +97,13 @@ namespace ValheimEnforcer.modules.mods {
             string mode = EffectiveMode(authoritative, globalMode);
             if (mode == Off) { return HashVerdict.Pass; }
 
+            // Listed with no version: the admin is allowing any version, and a file check would pin one. So nothing
+            // recorded automatically counts against it, and Strict does not demand a hash for it either. A hash
+            // typed in by hand still applies - that is the admin asking for exactly this check.
+            if (!authoritative.IsVersioned() && (!authoritative.HasRecordedHash() || authoritative.HashesAreAutomatic())) {
+                return HashVerdict.Pass;
+            }
+
             if (!authoritative.HasRecordedHash()) {
                 if (mode == Strict && requiredOrAdmin) {
                     // A resolve for this very mod may still be in flight. Rejecting every client for the

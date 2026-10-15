@@ -62,6 +62,12 @@
          own choosing. The archiver needs FileShare.ReadWrite|Delete, because the game or a backup tool may
          hold a save file open, so it opens each file itself and copies the stream into the entry. -->
     <Reference Include="System.IO.Compression" />
+    <!-- Valheim's own copy, on client and server alike; never shipped with the mod. Reads Thunderstore's
+         JSON when filling in a mod's package (ThunderstorePackageFinder). -->
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(VALHEIM_MANAGED)\Newtonsoft.Json.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>

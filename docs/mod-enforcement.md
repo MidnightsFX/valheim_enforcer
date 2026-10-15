@@ -52,11 +52,11 @@ requiredMods:
 | Field | What it does |
 | --- | --- |
 | `pluginID` | The plugin GUID again. The key above it is what lookups actually use |
-| `version` | The version to compare against, kept current for you |
+| `version` | The version to compare against, kept current for you. Leave it out to allow any version — see [below](#things-worth-knowing-about-file-verification) |
 | `name` | Human-readable label, for logs and the disconnect screen |
 | `enforceVersion` | When `true`, a client's version must match exactly. Defaults to `false` |
 | `keepWhenUnloaded` | When `true`, this entry is never dropped just because the server does not load the mod. Defaults to `false` — see [`RemoveUnloadedModsFromRequired`](#settings) |
-| `acceptedHashes`, `hashSource`, `thunderstorePackage`, `hashEnforcement` | File verification — see [Mod File Verification](#mod-file-verification) |
+| `acceptedHashes`, `hashSource`, `thunderstorePackage`, `packageSource`, `hashEnforcement` | File verification — see [Mod File Verification](#mod-file-verification) |
 
 The same table is written into the top of `Mods.yaml` and `ServerActiveMods.yaml`, so you do not need this page open to edit the file.
 
@@ -91,7 +91,8 @@ The client runs the same comparison against the server's list and shows the resu
 | Any `requiredMods` entry for a mod the server does not have loaded is removed, unless it is marked `keepWhenUnloaded` | `RemoveUnloadedModsFromRequired` *(on)* |
 | A mod's `version` is corrected in whichever list holds it when you update the mod | always |
 | The SHA256 of every plugin the server loads is recorded as its accepted hash | `RecordHashesForLoadedMods` *(on)* |
-| Mods pinned with a `thunderstorePackage` are downloaded and hashed | `ResolveThunderstoreHashes` *(off)* |
+| A mod with no `thunderstorePackage` gets one, from its installed package's `manifest.json` or a Thunderstore lookup | `AutoFillThunderstorePackages` *(on)* |
+| Mods pinned with a `thunderstorePackage` are downloaded and hashed | `ResolveThunderstoreHashes` *(on)* |
 | The file is rewritten with all of the above | `UpdateLoadedModsOnStartup` *(on)* |
 | The previous file is copied to `Mods.yaml.bak` before each rewrite | always |
 | Edits are picked up without a restart | `ConfigPollIntervalSeconds` *(30)* |
@@ -103,7 +104,7 @@ Updating a mod on the server therefore needs no edit here at all — the version
 - Membership of `optionalMods`, `adminOnlyMods` and `serverOnlyMods`. Nothing is ever added to these automatically; move an entry out of `requiredMods` by hand.
 - `enforceVersion: true`. Auto-added mods are always written with it off, so a client that is a patch version behind is not locked out of a server that never asked for exact versions.
 - `keepWhenUnloaded: true`, on any `requiredMods` entry for a mod the server does not run itself.
-- `thunderstorePackage`, `hashEnforcement`, and any `Manual` hash.
+- `hashEnforcement`, any `Manual` hash, and a `thunderstorePackage` for a mod the server cannot find one for itself.
 
 ### If the file will not parse
 
@@ -127,8 +128,9 @@ All of these are server-side and synced to admins, so an admin can change them i
 | `UpdateLoadedModsOnStartup` | Mods | `true` | Writes version corrections, auto-added mods, removed mods and recorded hashes back to the file. With it off, all of that still applies for the session but nothing is saved |
 | `HashEnforcement` | Mods | `WhenKnown` | File verification mode — see [Mod File Verification](#mod-file-verification) |
 | `RecordHashesForLoadedMods` | Mods | `true` | Records the hash of every plugin this machine loads. Needs `UpdateLoadedModsOnStartup` to reach disk |
-| `ResolveThunderstoreHashes` | Mods | `false` | Downloads and hashes mods pinned with a `thunderstorePackage`. Off by default because it makes outbound requests |
-| `OfferModDownloads` | Mods | `false` | Lets a refused player install the mods this server has pinned — see [Mod Downloads](#mod-downloads) |
+| `ResolveThunderstoreHashes` | Mods | `true` | Downloads and hashes mods pinned with a `thunderstorePackage`, once per pinned version. Turn it off, with `AutoFillThunderstorePackages`, if the server should make no outbound requests |
+| `OfferModDownloads` | Mods | `true` | Lets a refused player install the mods this server has pinned — see [Mod Downloads](#mod-downloads) |
+| `AutoFillThunderstorePackages` | Mods | `true` | Fills in `thunderstorePackage` for mods that have none — see [Mod Downloads](#mod-downloads) |
 | `ConfigPollIntervalSeconds` | Advanced | `30` | How often the file is checked for edits |
 | `HashComputeTimeoutSeconds` | Advanced | `30` | Safety valve for a stalled disk during startup hashing, not a tuning knob |
 | `ThunderstoreMaxArchiveMB` | Advanced | `128` | Largest package the resolver will download; bigger ones are skipped and logged |
@@ -147,7 +149,7 @@ All of these are server-side and synced to admins, so an admin can change them i
 
 **Stop requiring a mod you removed from the server.** Delete its entry from `requiredMods`, or leave `RemoveUnloadedModsFromRequired` on and every mod the server no longer loads is dropped from that list on the next start, apart from any marked `keepWhenUnloaded`.
 
-**Require a mod the server does not run.** Add it to `requiredMods` by hand with its GUID, version and name, and give it `keepWhenUnloaded: true` — without that, `RemoveUnloadedModsFromRequired` drops the entry on the next start. To verify the file as well, give it a `thunderstorePackage` and turn on `ResolveThunderstoreHashes`.
+**Require a mod the server does not run.** Add it to `requiredMods` by hand with its GUID, version and name, and give it `keepWhenUnloaded: true` — without that, `RemoveUnloadedModsFromRequired` drops the entry on the next start. To verify the file as well, give it a `thunderstorePackage` (or let `AutoFillThunderstorePackages` find one); `ResolveThunderstoreHashes` then records its hashes.
 
 
 ## Mod File Verification
@@ -171,7 +173,7 @@ Any mod in `Mods.yaml` can override the server setting with `hashEnforcement: Of
 - **Mods the server loads** pin themselves. `RecordHashesForLoadedMods` (on by default) writes the hash of every plugin the server runs into `Mods.yaml` at startup.
 - **Client-only mods** — a UI or QoL plugin the server never loads — need one of:
   - **By hand.** Put the SHA256 in `acceptedHashes` and set `hashSource: Manual`. `Get-FileHash -Algorithm SHA256 <file>.dll` produces it. Nothing else ever overwrites a `Manual` entry.
-  - **From Thunderstore.** Set `thunderstorePackage: Owner-ModName-Version` and enable `ResolveThunderstoreHashes`. The server downloads that package, hashes the DLLs inside it in memory, records them and discards the download. It re-downloads only when you change the pinned version. Only `thunderstore.io` and its CDN hosts (anything under `thunderstore.io`) are ever contacted — arbitrary download URLs are not supported on purpose.
+  - **From Thunderstore.** Set `thunderstorePackage: Owner-ModName-Version`, or let `AutoFillThunderstorePackages` find it; `ResolveThunderstoreHashes` (on by default) does the rest. The server downloads that package, hashes the DLLs inside it in memory, records them and discards the download. It re-downloads only when you change the pinned version. Only `thunderstore.io` and its CDN hosts (anything under `thunderstore.io`) are ever contacted — arbitrary download URLs are not supported on purpose.
 
 ```yaml
 requiredMods:
@@ -186,6 +188,7 @@ requiredMods:
 ### Things worth knowing about file verification
 
 - Recorded hashes are sent to clients on purpose, so the disconnect screen can name the mod that failed. They are not secrets — anyone can download the package and hash it themselves.
+- **A mod listed without a `version` is allowed in any version, so it is never file-checked.** Nothing fills in its version, records its file or resolves its package, and `Strict` does not demand a hash for it — the usual way to list an optional client mod or an admin tool. A hash you pin by hand still applies. Such a mod is also not offered by [Mod Downloads](#mod-downloads), since there is no particular build to install. Builds before 0.34.0 filled in a blank version for a mod the server runs; take the version off again to open one up, and the hashes recorded for it are cleared at the next start.
 - **A recorded hash pins the version too.** A different build of a mod is a different file, so a client on another version fails the file check whether or not `enforceVersion` is set on that entry. That rejection is reported as a version mismatch, naming the version to install — "modified mod files" is kept for a file whose version matches the server's and whose contents do not, which is the case where reinstalling actually helps.
 - Plugins loaded from memory rather than from a file (BepInEx ScriptEngine, in-game plugin loaders) cannot be verified. They report as `dynamic` and will be rejected once the server enforces that mod. The client logs a warning about this at startup, before you try to connect.
 - Under `Strict`, enforcement is deferred for mods whose `thunderstorePackage` has not resolved yet, but only until the first resolve pass after server start finishes. That window is bounded and logged; it exists so a restart does not lock everyone out for the few seconds the downloads take.
@@ -193,14 +196,14 @@ requiredMods:
 
 ## Mod Downloads
 
-Off on both sides by default. With it on, a player refused for their mods can have them fixed from the connection error window instead of working through the list by hand.
+On on both sides by default. A player refused for their mods can have them fixed from the connection error window instead of working through the list by hand.
 
 It takes two switches, one each side, and neither is enough alone:
 
 | Setting | Where | Default | Effect |
 | --- | --- | --- | --- |
-| `OfferModDownloads` | Server, `Mods` | `false` | The server tells connecting clients they may install from its mod list |
-| `AllowServerModInstalls` | Player, `Client config` | `false` | The player agrees to let a server that offers do so. Local, never synced: it is the player's consent, not the server's |
+| `OfferModDownloads` | Server, `Mods` | `true` | The server tells connecting clients they may install from its mod list |
+| `AllowServerModInstalls` | Player, `Client config` | `true` | The player agrees to let a server that offers do so. Local, never synced: it is the player's consent, not the server's |
 
 **The server never sends code.** Its mod list already goes to every connecting client, and for a pinned mod that list names a Thunderstore package and the file hashes the server accepts. The client downloads that exact version from `thunderstore.io` itself, checks that the plugin inside hashes to what the server recorded, and refuses the whole batch if anything does not match. So a server can only ever get a player the exact published build it checks for.
 
@@ -213,7 +216,12 @@ When a server with `OfferModDownloads` on refuses a player, the error window get
 
 Nothing happens until the player presses **Install and restart**. The packages are downloaded and checked first; then Valheim closes, a small helper program applies the changes once the game has exited, and starts it again — rejoining the server when it was joined by address. Without `AllowServerModInstalls` the window still shows the plan, and says how to turn it on.
 
-**Only pinned mods can be offered.** An entry needs a `thunderstorePackage` with a version, or one `ResolveThunderstoreHashes` has resolved, *and* recorded hashes. With the resolver on, a client-only mod in `optionalMods` or `requiredMods` like the ExtraSlots example above is enough. A mod the server loads itself has its hash recorded already, so adding its `thunderstorePackage` is all it needs — provided the server runs the same build as that Thunderstore version.
+**Only pinned mods can be offered.** An entry needs a `thunderstorePackage` with a version, or one `ResolveThunderstoreHashes` has resolved, *and* recorded hashes. A mod the server loads itself has its hash recorded already, so it only needs the package — and `AutoFillThunderstorePackages` (on by default) fills that in:
+
+1. **From the mod's folder.** r2modman and Gale install a package to `BepInEx/plugins/Owner-Name/` with its `manifest.json`, which names the package and the installed version. No network.
+2. **From Thunderstore.** Failing that, the server searches thunderstore.io by the mod's name. A result is only accepted after downloading that exact version and finding the plugin in it — and, for a mod the server runs, the very file the server runs. A dev build or a mod that is not on Thunderstore gets nothing rather than a guess.
+
+Filled-in entries are marked `packageSource: Manifest` or `packageSource: Thunderstore` and kept current when the mod updates. If the server is updated to a version that is not on Thunderstore — a dev build, say — the filled-in package is dropped and the mod is checked against the server's own file again, rather than going on demanding the old published build of every client. A `thunderstorePackage` you write yourself has no `packageSource` and is never touched; delete `packageSource` from a filled-in one to make it yours. A client-only mod the server does not run gets its hash from `ResolveThunderstoreHashes` (on by default); with that off it cannot be offered. With `OfferModDownloads` on, the server log says at startup which mods still cannot be offered and why, and a player's log says why when the window had nothing to fix.
 
 ### Things worth knowing about mod downloads
 

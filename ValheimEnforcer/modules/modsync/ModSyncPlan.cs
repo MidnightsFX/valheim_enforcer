@@ -165,6 +165,12 @@ namespace ValheimEnforcer.modules.modsync {
         }
 
         private void AddInstall(string id, DataObjects.Mod authoritative, string reason, string replacingId) {
+            // Same rule as HashPolicy.Evaluate: no version and no hash typed in by hand means any build will do,
+            // which leaves nothing exact to download and check.
+            if (!authoritative.IsVersioned() && (!authoritative.HasRecordedHash() || authoritative.HashesAreAutomatic())) {
+                Unfixable.Add($"{id}: the server lists it without a version, so there is no particular build to install");
+                return;
+            }
             if (!TryPinnedSpec(authoritative, out string spec)) {
                 Unfixable.Add($"{id}: the server names no Thunderstore package for it");
                 return;

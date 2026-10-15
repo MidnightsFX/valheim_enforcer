@@ -284,10 +284,12 @@ mod tests {
     use std::time::Instant;
 
     fn sleeper(seconds: u32) -> Child {
+        use std::process::Stdio;
+        // No standard handles at all, so this cannot be upset by the relaunch test pointing them elsewhere.
         #[cfg(windows)]
-        let child = Command::new("ping").args(["-n", &(seconds + 1).to_string(), "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn();
+        let child = Command::new("ping").args(["-n", &(seconds + 1).to_string(), "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
         #[cfg(unix)]
-        let child = Command::new("sleep").arg(seconds.to_string()).spawn();
+        let child = Command::new("sleep").arg(seconds.to_string()).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
         child.expect("start a short-lived process")
     }
 
