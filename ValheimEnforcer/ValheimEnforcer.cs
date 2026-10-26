@@ -29,7 +29,7 @@ namespace ValheimEnforcer
     {
         public const string PluginGUID = "MidnightsFX.ValheimEnforcer";
         public const string PluginName = "ValheimEnforcer";
-        public const string PluginVersion = "0.34.0";
+        public const string PluginVersion = "0.34.1";
 
         internal static ManualLogSource Log;
         internal ValConfig cfg;
@@ -44,9 +44,11 @@ namespace ValheimEnforcer
             Localization = LocalizationManager.Instance.GetLocalization();
             Log = this.Logger;
             cfg = new ValConfig(Config);
+            MonoDebugOptions.WarnIfNativeDebuggerSupport();
             // After the config is bound, which tells the YAML writer whether it is switched on. Both character
-            // self-tests run on a thread of their own from here, long before the first save could need them.
-            CharacterSnapshot.WarmUpInBackground();
+            // self-tests run on a thread of their own from here, long before the first save could need them -
+            // or right here, when Mono's debugger support would make that thread a risk.
+            CharacterSnapshot.WarmUpAtStartup();
             // The character store's worker is a background thread and dies with the process; land anything it
             // still holds. Normally there is nothing - ZNet.Shutdown already waited for it.
             Application.quitting += CharacterStore.OnApplicationQuitting;

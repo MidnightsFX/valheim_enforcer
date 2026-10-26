@@ -1,3 +1,9 @@
+**0.34.1**
+---
+```
+- Fixes a server hanging forever on startup when it is launched with Mono's native debugging switched on, and warns the admin when that option is set.
+```
+
 **0.34.0**
 ---
 ```

@@ -52,17 +52,28 @@ namespace ValheimEnforcer.common {
         /// millisecond "Character save" hitch at join the stall warning kept reporting. A world takes far longer
         /// to load than either test takes to run, so by the first save both have long settled. A save that does
         /// arrive first waits for the test in progress rather than starting a second one.
+        ///
+        /// Except under Mono's native-debugger support, where compiling on two threads at once can hang the game
+        /// for good (see <see cref="MonoDebugOptions"/>) and this thread was what hung it. There both tests run
+        /// on the calling thread, at startup, where the time they take is spent before anybody can join - and
+        /// with the serializer compiled here, the character store's worker has little left to compile later.
         /// </summary>
-        internal static void WarmUpInBackground() {
-            Thread thread = new Thread(() => {
-                try { CharacterYaml.WarmUp(); } catch (Exception) { /* it reports its own failures */ }
-                try { WarmUp(); } catch (Exception) { /* so does this */ }
-            }) {
+        internal static void WarmUpAtStartup() {
+            if (MonoDebugOptions.NativeDebuggerSupport) {
+                WarmUpBoth();
+                return;
+            }
+            Thread thread = new Thread(WarmUpBoth) {
                 IsBackground = true,
                 Name = "VE-CharacterWarmUp",
                 Priority = ThreadPriority.BelowNormal,
             };
             thread.Start();
+        }
+
+        private static void WarmUpBoth() {
+            try { CharacterYaml.WarmUp(); } catch (Exception) { /* it reports its own failures */ }
+            try { WarmUp(); } catch (Exception) { /* so does this */ }
         }
 
         // ---- Self-test ------------------------------------------------------------------------------------
@@ -72,7 +83,7 @@ namespace ValheimEnforcer.common {
         private static volatile bool passed;
 
         /// <summary>Whether the copy has been shown to keep everything. The first call runs the self-test, on
-        /// whichever thread asks; <see cref="WarmUpInBackground"/> exists so that is not the main thread.</summary>
+        /// whichever thread asks; <see cref="WarmUpAtStartup"/> exists so that is not the main thread mid-save.</summary>
         internal static bool Usable {
             get {
                 if (!tested) { RunSelfTest(); }
