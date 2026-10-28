@@ -1,3 +1,10 @@
+**0.35.0**
+---
+```
+- The world seed is now hidden from players by default, so it can no longer be looked up on a seed map site; admins still see it and a server can turn this off.
+- Players can no longer use the free fly camera to look through walls and terrain; admins still can and a server can turn this off.
+```
+
 **0.34.1**
 ---
 ```

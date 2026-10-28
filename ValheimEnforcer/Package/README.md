@@ -41,6 +41,9 @@ Requires BepInEx, Jotunn and YamlDotNet (handled for you by any mod manager).
 **Player activity audit** — the evidence layer under everything else. What a player is carrying, what they gained and lost, what they took from or put into chests, graves, ships and carts, and a rolling summary of the damage they are dealing. Seven days on disk, searchable with `grep`, downloadable to your own machine. It records and reports only — it never kicks, bans or confiscates.
 [Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/player-audit.md)
 
+**World privacy** — players can no longer read the world seed, so nobody can paste it into a seed map viewer and see where everything is before exploring. The server stops sending it to joining players and to the crossplay server listing, and `printseeds`, which any player can run from chat, is refused. Admins still see it. The numeric seed the game needs to build terrain still reaches clients, so this stops the seed being looked up, not a modified client rebuilding the map. The `freefly` photo-mode camera, which any player can also run from chat and which sees through walls and terrain into bases and underground, is refused too.
+[Full docs →](https://github.com/MidnightsFX/valheim_enforcer/blob/master/docs/world-privacy.md)
+
 ### Off until you switch them on
 
 **Structure validation** — catches a client spawning world-generation geometry (dungeon rooms, dvergr towns, ruins) instead of building, and pieces whose health has been set above what the prefab allows, which is how an indestructible structure is made. Blueprint and bulk-build mods cannot trip it, by design. `enforcer-structures-scan` finds what is already in your world.

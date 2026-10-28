@@ -14,6 +14,7 @@ Full reference for every feature. If you just want the short version, the [proje
 | [Character Progression](character-progression.md) | **on** | Server-side items and skills, the join rules, synced map/recipes/stats, character limits, starter kits, restoring what was taken |
 | [Cheat Detection](cheat-detection.md) | **on** | Scanning clients for known cheat tools, and what that is and is not worth |
 | [Player Activity Audit](player-audit.md) | **on** | What a player is carrying, how they got it, and what they are hitting things for |
+| [World Privacy](world-privacy.md) | **on** | Keeping the world seed from players, so the map cannot be looked up, and the free fly camera that sees through walls |
 | [Structure Validation](structure-validation.md) | off | Catching world-generation geometry spawned as if it were built, and indestructible pieces |
 | [Network Integrity](network-integrity.md) | off | Guards on the vanilla RPCs the server otherwise relays unchecked |
 | [Item Origins](item-origins.md) | mixed | Equipment that appears with no crafter and no route into this world (off), and items sitting in inventory slots that inventory does not have (on) |
@@ -45,6 +46,7 @@ Settings are grouped into these sections in `BepInEx/config/ValheimEnforcer.cfg`
 | `Audit` | [Player Activity Audit](player-audit.md#settings) |
 | `World Integrity` | [Structure Validation](structure-validation.md#settings), [Item Origins](item-origins.md) |
 | `Network Integrity` | [Network Integrity](network-integrity.md) |
+| `World Privacy` | [World Privacy](world-privacy.md) |
 | `Backups` | [Save Archives](save-archives.md#settings) |
 | `Crash Recovery` | [Emergency Crash Recovery](crash-recovery.md#settings) |
 | `Discord` | [Discord Notifications](discord.md#settings) — **not** synced to clients, because a webhook URL is a password |
