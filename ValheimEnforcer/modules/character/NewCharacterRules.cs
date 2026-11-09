@@ -63,27 +63,31 @@ namespace ValheimEnforcer.modules.character {
 
         /// <summary>Main thread only. Reads the current settings into a Policy.</summary>
         internal static Policy Current() {
+            // Every rule that takes something away is under the master switch; with it off a new character keeps
+            // all it arrived with. The loadout is not one of them - it is a gift with a switch of its own - so a
+            // server with enforcement off still hands it over, and that is then all this policy does.
+            bool enforce = CharacterEnforcement.Enabled;
             return new Policy {
-                ZeroSkills = ValConfig.NewCharacterSetSkillsToZero.Value,
-                StripItems = ValConfig.NewCharactersRemoveExtraItems.Value,
+                ZeroSkills = enforce && ValConfig.NewCharacterSetSkillsToZero.Value,
+                StripItems = enforce && ValConfig.NewCharactersRemoveExtraItems.Value,
                 // Nested under PreventExternalCustomDataChanges the same way the client's clear always has
                 // been: an admin who is not tracking custom data at all has not asked us to police it.
-                ClearCustomData = ValConfig.PreventExternalCustomDataChanges.Value && ValConfig.newCharacterClearCustomData.Value,
-                ClearGuardianPower = ValConfig.NewCharacterClearForsakenPower.Value,
+                ClearCustomData = enforce && ValConfig.PreventExternalCustomDataChanges.Value && ValConfig.newCharacterClearCustomData.Value,
+                ClearGuardianPower = enforce && ValConfig.NewCharacterClearForsakenPower.Value,
                 // One setting both tracks foods and clears a new character's: food eaten anywhere but here is exactly
                 // what tracking exists to keep out.
-                ClearFoods = ValConfig.PreventExternalFoodChanges.Value,
-                ConfiscateUnidentifiable = ValConfig.ConfiscateUnidentifiableItems.Value,
+                ClearFoods = enforce && ValConfig.PreventExternalFoodChanges.Value,
+                ConfiscateUnidentifiable = enforce && ValConfig.ConfiscateUnidentifiableItems.Value,
                 RecordReductions = ValConfig.RecordSkillReductions.Value,
                 // Each nested under the sync setting that makes the server hold the thing in the first place:
                 // with nothing stored there is nothing here to clear, and the client-side rules
                 // (KnownRecipes, ProgressionSync.ResetForNewCharacter) are what act on the live player.
-                ClearKnownItems = ProgressionSync.KnownItemsEnabled && ValConfig.NewCharacterClearKnownRecipes.Value,
+                ClearKnownItems = enforce && ProgressionSync.KnownItemsEnabled && ValConfig.NewCharacterClearKnownRecipes.Value,
                 // Its own flag rather than part of ClearKnownItems: the two are separate settings, and
                 // vanilla's known-items reset does not touch known texts, so neither should the record's.
-                ClearKnownTexts = ProgressionSync.KnownItemsEnabled && ValConfig.NewCharacterClearKnownTexts.Value,
-                ClearStats = ProgressionSync.StatsEnabled && ValConfig.NewCharacterClearPlayerStats.Value,
-                ClearSpawn = ProgressionSync.SpawnEnabled,
+                ClearKnownTexts = enforce && ProgressionSync.KnownItemsEnabled && ValConfig.NewCharacterClearKnownTexts.Value,
+                ClearStats = enforce && ProgressionSync.StatsEnabled && ValConfig.NewCharacterClearPlayerStats.Value,
+                ClearSpawn = enforce && ProgressionSync.SpawnEnabled,
                 Loadout = StarterLoadouts.Current(),
                 ProgressionTracked = ProgressionSync.KnownItemsEnabled,
                 SpawnTracked = ProgressionSync.SpawnEnabled,

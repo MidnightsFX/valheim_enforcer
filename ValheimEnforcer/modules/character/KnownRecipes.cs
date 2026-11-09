@@ -20,7 +20,10 @@ namespace ValheimEnforcer.modules.character {
     internal static class KnownRecipes {
 
         private static bool Enabled {
-            get { return ValConfig.NewCharacterClearKnownRecipes != null && ValConfig.NewCharacterClearKnownRecipes.Value; }
+            get {
+                return CharacterEnforcement.Enabled
+                       && ValConfig.NewCharacterClearKnownRecipes != null && ValConfig.NewCharacterClearKnownRecipes.Value;
+            }
         }
 
         /// <summary>Join, new character. Call after the new-character item rules, so rediscovery starts from what

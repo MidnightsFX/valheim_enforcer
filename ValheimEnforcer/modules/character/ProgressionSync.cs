@@ -348,7 +348,7 @@ namespace ValheimEnforcer.modules.character {
         /// mean an admin who turned one off still lost them to the other.
         /// </summary>
         internal static void ResetForNewCharacter(string characterName) {
-            if (!StatsEnabled) { return; }
+            if (!StatsEnabled || !CharacterEnforcement.Enabled) { return; }
             if (ValConfig.NewCharacterClearPlayerStats == null || !ValConfig.NewCharacterClearPlayerStats.Value) { return; }
             // Same guard as KnownRecipes: on a listen host or in singleplayer every character reads as new
             // the first time it is loaded with the mod installed, and zeroed statistics cannot be given back.

@@ -1,3 +1,9 @@
+**0.36.0**
+---
+```
+- Adds EnableCharacterEnforcement, which is a global toggle for all item/skill/food/forsaken power enforcement, default on.
+```
+
 **0.35.0**
 ---
 ```

@@ -25,7 +25,10 @@ namespace ValheimEnforcer.modules.character {
         private static string pendingFor;
 
         private static bool Enabled {
-            get { return ValConfig.NewCharacterResetMapExploration != null && ValConfig.NewCharacterResetMapExploration.Value; }
+            get {
+                return CharacterEnforcement.Enabled
+                       && ValConfig.NewCharacterResetMapExploration != null && ValConfig.NewCharacterResetMapExploration.Value;
+            }
         }
 
         /// <summary>Join, new character. Wipes the map now if it has loaded, otherwise as soon as it does.</summary>

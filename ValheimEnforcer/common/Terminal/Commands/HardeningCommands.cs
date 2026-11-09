@@ -77,7 +77,9 @@ namespace ValheimEnforcer.common {
                     Cost = "the item and creature spawner works; nothing in the game legitimately sends that message" },
                 new HardeningCheck { Name = "DetectCheatToolArtifacts", Toggle = ValConfig.DetectCheatToolArtifacts,
                     Cost = "objects and items carrying a known cheat tool's own markers go unnoticed" },
-                new HardeningCheck { Name = "ServerSideJoinEnforcement", Toggle = ValConfig.ServerSideJoinEnforcement,
+                new HardeningCheck { Name = "EnableCharacterEnforcement", Toggle = ValConfig.EnableCharacterEnforcement,
+                    Cost = "nothing a character brings in is confiscated, lowered or reset; every one is accepted as its player holds it" },
+                new HardeningCheck { Name = "ServerSideJoinEnforcement", Toggle = ValConfig.ServerSideJoinEnforcement, Requires = ValConfig.EnableCharacterEnforcement,
                     Cost = "the join rules are applied by the client only, which is the thing being defended against" },
             });
             // The inverse of every toggle above - on is the weaker setting - so it does not fit ReportGroup.

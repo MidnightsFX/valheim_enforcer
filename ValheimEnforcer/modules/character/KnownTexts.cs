@@ -31,7 +31,10 @@ namespace ValheimEnforcer.modules.character {
     internal static class KnownTexts {
 
         private static bool Enabled {
-            get { return ValConfig.NewCharacterClearKnownTexts != null && ValConfig.NewCharacterClearKnownTexts.Value; }
+            get {
+                return CharacterEnforcement.Enabled
+                       && ValConfig.NewCharacterClearKnownTexts != null && ValConfig.NewCharacterClearKnownTexts.Value;
+            }
         }
 
         /// <summary>

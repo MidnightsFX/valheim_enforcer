@@ -38,6 +38,9 @@ namespace ValheimEnforcer {
         public static ConfigEntry<bool> AutoFillThunderstorePackages;
         public static ConfigEntry<int> HashComputeTimeoutSeconds;
         public static ConfigEntry<int> ThunderstoreMaxArchiveMB;
+        // Master switch over every Player Sync rule below that takes something from a character or puts
+        // something back. Read through modules.character.CharacterEnforcement, never directly.
+        public static ConfigEntry<bool> EnableCharacterEnforcement;
         public static ConfigEntry<bool> RemoveNontrackedItemsFromJoiningPlayers;
         public static ConfigEntry<bool> AddMissingItemsFromPlayerServerSave;
         public static ConfigEntry<bool> RestoreSkillsFromPlayerServerSave;
@@ -371,6 +374,7 @@ namespace ValheimEnforcer {
             ResolveThunderstoreHashes = BindServerConfig("Mods", "ResolveThunderstoreHashes", true, "If enabled, the server downloads any mod in Mods.yaml carrying a 'thunderstorePackage' field (format Owner-ModName or Owner-ModName-Version, the same format a Thunderstore manifest uses), hashes the DLLs inside the archive in memory, records them, and discards the download. This is how you pin a client-only mod the server never loads itself, and what lets OfferModDownloads offer one. Each package is downloaded once and re-downloaded only when its pinned version changes. Only thunderstore.io and its CDN are ever contacted; arbitrary download URLs are deliberately not supported. On by default; turn it off if this server should make no outbound requests, along with AutoFillThunderstorePackages.");
             OfferModDownloads = BindServerConfig("Mods", "OfferModDownloads", true, "If enabled, a player turned away for their mods is offered a fix. The server's mod list already goes to every connecting client; with this on it also tells the client it may install from it, and a player who has AllowServerModInstalls switched on in their own config gets a 'Fix mods' button in the connection error window. Only entries that can be pinned exactly are offered: a 'thunderstorePackage' with a version (or one ResolveThunderstoreHashes has resolved) AND recorded file hashes, so the client downloads exactly the build the server checks for and refuses anything that does not match. Mods with no package or no hash are listed as things the player has to fix by hand. Unlisted mods the player carries are offered to be turned off. Nothing is installed without the player confirming it, and only from thunderstore.io. On by default; AutoFillThunderstorePackages fills in the packages for the mods this server runs.");
             AutoFillThunderstorePackages = BindServerConfig("Mods", "AutoFillThunderstorePackages", true, "If enabled, a mod in Mods.yaml with no 'thunderstorePackage' gets one filled in, so it can be offered to players (OfferModDownloads) and resolved (ResolveThunderstoreHashes) without writing each one by hand. The server first reads the manifest.json of the package folder the mod is installed in - the BepInEx/plugins/Owner-Name folder r2modman and Gale create - which needs no network. Failing that it searches thunderstore.io by the mod's name and only accepts a result after downloading that exact version and finding the plugin in it; for a mod the server runs itself, the file has to be the very one the server runs. Filled-in entries are marked 'packageSource' and kept current when the mod is updated; a thunderstorePackage you wrote yourself is never touched, and deleting packageSource makes a filled-in one yours. Searches go to thunderstore.io only, once per mod that lacks a manifest, and the result is remembered in Mods.yaml. On by default.");
+            EnableCharacterEnforcement = BindServerConfig("Player Sync", "EnableCharacterEnforcement", true, "Master switch for every Player Sync rule that takes something away from a character or puts something back. Enabled (the default), each rule below applies as it is set. Disabled, none of them do: nothing is confiscated, no skill is lowered or raised back, no item is handed back, and custom data, the Forsaken Power, food, known recipes and texts, statistics, the map and the spawn point are neither cleared for a new character nor put back for a returning one - on the client or by ServerSideJoinEnforcement. Characters are still saved on the server the whole time, each one exactly as its player brings it, so switching this back on later starts from where everybody actually is and needs no CatchupOverwriteOnJoin. Confiscated items and recorded skill reductions are kept, and the admin commands that hand them back still work. Starter loadouts and the character limit have switches of their own and are not affected, and a reported skill level outside the 0-100 the game can produce is still corrected.");
             RemoveNontrackedItemsFromJoiningPlayers = BindServerConfig("Player Sync", "RemoveNontrackedItemsFromJoiningPlayers", true, "If enabled, any items that are not tracked by the server will be removed from joining player's inventories.");
             AddMissingItemsFromPlayerServerSave = BindServerConfig("Player Sync", "AddMissingItemsFromPlayerServerSave", true, "If enabled, any items the player does not have that are listed on the server will be given to the player when joining");
             RestoreSkillsFromPlayerServerSave = BindServerConfig("Player Sync", "RestoreSkillsFromPlayerServerSave", true, "If enabled, a returning character whose skills are below the levels the server holds for them has them raised back to those levels when they join - the skill counterpart of AddMissingItemsFromPlayerServerSave. This is what brings a character back after its local save was deleted and the character recreated under the same name: the server still holds their progress, and without this the recreated character's blank skills would be uploaded as the new record on their first save. Never lowers a skill; PreventExternalSkillRaises covers the other direction. Skipped on a dirty reconnect unless ItemReturnForDirtyReconnection is on, for the same reason item restoration is: the stored copy can be a delta window stale, and the one way it can hold a higher skill than the player has is a death the server never heard about. On by default.");
@@ -949,11 +953,19 @@ loadouts: {}
             //
             // Unless an admin has asked for a catch-up: the stored copy is known to be stale (the server ran
             // without this mod for a while), so nothing is armed and the first save simply replaces it.
+            //
+            // Or has switched enforcement off altogether, which wants the very same join: nothing reconciled,
+            // the character adopted as its client holds it. The stored copy is current in that case rather than
+            // stale, but there is nothing to be done with it either way, so the same answer serves both.
             string payloadKind = CharPayloadCharacter;
             if (modules.character.FirstSaveEnforcement.CatchUpEnabled) {
                 modules.character.FirstSaveEnforcement.MarkCatchUpOnConnect(peer, saveId, saveName);
                 payloadKind = CharPayloadCatchUp;
                 Logger.LogWarning($"CatchupOverwriteOnJoin is on: {saveName} ({saveId}) will be adopted exactly as their client holds it, replacing the stored save. Turn it off once everyone has rejoined.");
+            } else if (!modules.character.CharacterEnforcement.Enabled) {
+                modules.character.FirstSaveEnforcement.MarkCatchUpOnConnect(peer, saveId, saveName);
+                payloadKind = CharPayloadCatchUp;
+                Logger.LogInfo($"EnableCharacterEnforcement is off: {saveName} ({saveId}) is taken exactly as their client holds it.");
             } else {
                 modules.character.FirstSaveEnforcement.MarkHasSaveOnConnect(peer, saveId, saveName);
             }
@@ -1284,8 +1296,17 @@ loadouts: {}
             modules.character.ReturningCharacterRules.Policy returningPolicy = null;
             if (ValConfig.ServerSideJoinEnforcement != null && ValConfig.ServerSideJoinEnforcement.Value
                 && modules.character.FirstSaveEnforcement.ShouldReconcileReturning(sender)) {
-                modules.character.ReturningCharacterRules.Policy candidate = modules.character.ReturningCharacterRules.Current();
-                if (candidate.AnyEnabled) { returningPolicy = candidate; }
+                if (!modules.character.CharacterEnforcement.Enabled) {
+                    // Connected while enforcement was on, and it was switched off before this first save arrived
+                    // (with it off at connect the peer is on the catch-up track and never armed here). The save is
+                    // taken as it stands, and the arming is dropped with it: otherwise it would outlive the join, and
+                    // switching enforcement back on later in the session would reconcile some mid-session save as
+                    // if it were the join - confiscating whatever was picked up since the last update.
+                    modules.character.FirstSaveEnforcement.ClearReturning(sender);
+                } else {
+                    modules.character.ReturningCharacterRules.Policy candidate = modules.character.ReturningCharacterRules.Current();
+                    if (candidate.AnyEnabled) { returningPolicy = candidate; }
+                }
             }
 
             // Who the server says this peer is. The payload names its own HostID and Name, but those are
@@ -1537,8 +1558,9 @@ loadouts: {}
                     CharacterManager.ApplyServerSanitizedCharacter(incoming.Character, incoming.GrantedLoadout);
                     yield break;
 
-                // The server holds this character but has been told its copy is stale (CatchupOverwriteOnJoin).
-                // The join adopts the live player instead of reconciling to it.
+                // The server holds this character but has been told its copy is stale (CatchupOverwriteOnJoin),
+                // or that nothing is to be enforced (EnableCharacterEnforcement off). The join adopts the live
+                // player instead of reconciling to it.
                 case CharacterPayloadOutcome.CatchUp:
                     CharacterManager.SetPlayerCharacter(incoming.Character, catchUp: true);
                     yield break;
@@ -2460,8 +2482,9 @@ loadouts: {}
         internal const string CharPayloadCharacter = "CHAR";
         internal const string CharPayloadNone = "NONE";
         internal const string CharPayloadSanitized = "SANITIZED";
-        // The stored character, sent while CatchupOverwriteOnJoin is on: adopt the live player rather than
-        // reconciling to it. An older client does not know the tag and reads it as CHAR, which is today's join.
+        // The stored character, sent while CatchupOverwriteOnJoin is on or EnableCharacterEnforcement is off:
+        // adopt the live player rather than reconciling to it. An older client does not know the tag and reads it
+        // as CHAR, which is today's join.
         internal const string CharPayloadCatchUp = "CATCHUP";
 
         /// <summary>

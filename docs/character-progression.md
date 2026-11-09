@@ -4,6 +4,7 @@
 
 - [How it works](#how-it-works)
 - [The join rules](#the-join-rules)
+- [Turning enforcement off](#turning-enforcement-off)
 - [Settings](#settings)
 - [Server-Synced Progression](#server-synced-progression) — map, recipes, trophies, statistics, spawn point
 - [One Character Per Account](#one-character-per-account)
@@ -42,6 +43,25 @@ Three things keep it current:
 **A character joining this server for the first time** — one the server has no save for at all — is handled separately. By default it forgets the recipes and build pieces it discovered elsewhere, forgets its known texts, and has its custom data cleared. Optionally it can also have its items stripped to an allowlist, its skills zeroed, its map of this world wiped, its Forsaken Power cleared, and its statistics reset. If [Starter Loadouts](#starter-loadouts) are on, the kit is handed over *after* all of that has run.
 
 Note that on a server that already has players, anyone joining for the first time since ValheimEnforcer was installed has no save yet and counts as new. Coming from ServerCharacters? [Import the saves first](migration.md).
+
+## Turning enforcement off
+
+`EnableCharacterEnforcement` (`true`) is the master switch for every rule on this page that takes something away from a character or puts something back. Set it to `false` and none of them run, however each one is set:
+
+- Nothing is confiscated, no skill is lowered or raised back, and no item is handed back.
+- Custom data, the Forsaken Power, food, known recipes and texts, statistics, the map and the spawn point are neither cleared for a new character nor put back for a returning one.
+- The server's own copy of the join rules (`ServerSideJoinEnforcement`) stands down with them.
+
+**Characters are still saved on the server the whole time**, each one exactly as its player brings it. So switching enforcement back on later picks up from where everybody actually is, and unlike running without the mod it needs no [catch-up](#switching-enforcer-back-on-after-running-without-it). Anything a player brought in while it was off counts as theirs from then on.
+
+What it leaves alone:
+
+- Confiscated items and recorded skill reductions are kept, and `enforcer-items-return` and `enforcer-skills-restore` still work.
+- [Starter Loadouts](#starter-loadouts) and [One Character Per Account](#one-character-per-account) have master switches of their own, so a new character still gets its kit.
+- A reported skill level outside the 0–100 the game can produce is still corrected.
+- Status effects saved at logout still come back on login.
+
+`enforcer-harden` lists it among the server's defences. A client running a build from before this setting existed does not know about it and may still apply the join rules to itself.
 
 ## Settings
 
@@ -101,7 +121,8 @@ The map, recipe and known-text wipes only happen once the server has confirmed i
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `ServerSideJoinEnforcement` | `true` | The server re-applies the join rules to the first full save a returning player uploads, instead of trusting the client to have done it. Inert if none of the underlying rules are on |
+| `EnableCharacterEnforcement` | `true` | Master switch for every rule on this page that takes something away or puts something back. Off, characters are still saved but none of the rules run — see [Turning enforcement off](#turning-enforcement-off) |
+| `ServerSideJoinEnforcement` | `true` | The server re-applies the join rules to the first full save a returning player uploads, instead of trusting the client to have done it. Inert if none of the underlying rules are on, or `EnableCharacterEnforcement` is off |
 | `ItemRemovalForDirtyReconnection` | `false` | Skip confiscation when the last disconnect was dirty, so crash victims keep items gained in the unsaved window |
 | `ItemReturnForDirtyReconnection` | `false` | Restore missing items and lowered skills on a dirty reconnect too. Off by default, to avoid duping items consumed — or handing back skill lost to a death — in the unsaved window |
 | `SavePlayerStatusEffectsOnLogout` | `true` | Save active character effects on logout and reapply them on login |

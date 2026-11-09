@@ -449,6 +449,16 @@ namespace ValheimEnforcer.modules.character {
             Logger.LogInfo($"Player {PlayerName} with ID {playerID} validating character data.");
             DataObjects.Character savableChar = ResolveSessionCharacter(playerID, PlayerName, out bool isNewCharacter);
 
+            // Enforcement is switched off, so a returning character is taken exactly as it stands. A remote server
+            // has already said so with its CATCHUP answer and been handled above; this is the same call for a
+            // character this machine holds itself - singleplayer, or a listen host's own - which never gets one.
+            bool enforce = CharacterEnforcement.Enabled;
+            if (!enforce && !isNewCharacter && savableChar != null) {
+                PlayerCharacter = savableChar;
+                CatchUpFromLivePlayer(player);
+                return;
+            }
+
             if (isNewCharacter) {
                 savableChar = BuildNewCharacter(player, playerID, PlayerName);
                 // Not part of BuildNewCharacter: the map is not in the character record, and unlike everything that
@@ -480,7 +490,7 @@ namespace ValheimEnforcer.modules.character {
             // every join — a forced-dirty disconnect cannot be used to bypass confiscation.
             bool skipRemovalForDirty = savableChar.LastDisconnect == DisconnectionState.DirtyDisconnect
                                        && ValConfig.ItemRemovalForDirtyReconnection.Value;
-            if (ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value && !skipRemovalForDirty) {
+            if (enforce && ValConfig.RemoveNontrackedItemsFromJoiningPlayers.Value && !skipRemovalForDirty) {
                 // A new character's removals were already recorded by the new-character strip, so this pass
                 // must not record them a second time; for a returning character it is the only recorder.
                 ReconcilePlayerToCharacter(player, savableChar, recordConfiscation: !isNewCharacter, "Join validation");
@@ -491,7 +501,7 @@ namespace ValheimEnforcer.modules.character {
             // skips restore on a dirty reconnect unless the admin opts in (ItemReturnForDirtyReconnection).
             bool suppressReturnForDirty = savableChar.LastDisconnect == DisconnectionState.DirtyDisconnect
                                           && !ValConfig.ItemReturnForDirtyReconnection.Value;
-            if (ValConfig.AddMissingItemsFromPlayerServerSave.Value && !suppressReturnForDirty) {
+            if (enforce && ValConfig.AddMissingItemsFromPlayerServerSave.Value && !suppressReturnForDirty) {
                 Logger.LogDebug("Checking to restore player items.");
                 List<Tuple<string, int>> prefablist = new List<Tuple<string, int>>();
                 foreach(ItemDrop.ItemData item in player.m_inventory.GetAllItems()) {
@@ -520,11 +530,11 @@ namespace ValheimEnforcer.modules.character {
             // above the live one is progress this server holds that the character no longer has - a local save
             // deleted and recreated, a death somewhere else - and it goes back on. Never lowers anything; the clamp
             // below is the other direction.
-            if (!isNewCharacter && ValConfig.RestoreSkillsFromPlayerServerSave.Value && !suppressReturnForDirty) {
+            if (enforce && !isNewCharacter && ValConfig.RestoreSkillsFromPlayerServerSave.Value && !suppressReturnForDirty) {
                 SkillReductions.RestoreOnJoin(player, savableChar);
             }
 
-            if (ValConfig.PreventExternalSkillRaises.Value) {
+            if (enforce && ValConfig.PreventExternalSkillRaises.Value) {
                 player.GetSkills().GetSkillList().ForEach(skill => {
                     if (savableChar.SkillLevels.TryGetValue(skill.m_info.m_skill, out float savedLevel)) {
                         if (SkillReductions.IsAbove(skill.m_level, savedLevel)) {
@@ -571,17 +581,7 @@ namespace ValheimEnforcer.modules.character {
                 Logger.LogDebug("Reapplied tracked custom data.");
             }
 
-            if (ValConfig.SavePlayerStatusEffectsOnLogout.Value && savableChar.ActiveCharacterEffects != null && savableChar.ActiveCharacterEffects.Count > 0) {
-                SEMan pseman = player.GetSEMan();
-                foreach (KeyValuePair<string, PackedStatusEffect> kvp in savableChar.ActiveCharacterEffects) {
-                    Logger.LogDebug($"Applying status effect: {kvp.Key}");
-                    StatusEffect se = kvp.Value.ToStatusEffect();
-                    if (se == null) { continue; }
-                    pseman.AddStatusEffect(se);
-                }
-                savableChar.ActiveCharacterEffects.Clear();
-                Logger.LogDebug("Validated saved status effects.");
-            }
+            ApplySavedStatusEffects(player, savableChar);
 
             PlayerCharacter = savableChar;
             PersistAndPushCharacter(playerID, savableChar);
@@ -608,7 +608,15 @@ namespace ValheimEnforcer.modules.character {
         /// </summary>
         internal static void ApplyServerSanitizedCharacter(DataObjects.Character sanitized, DataObjects.Loadout grantedLoadout = null) {
             if (sanitized == null) { return; }
-            Logger.LogWarning($"The server applied its new-character rules to {sanitized.Name}: items and skills not in its record are being removed.");
+            // With enforcement off the server's rules took nothing away, and a starter loadout is the only thing it
+            // can have sent back - so that is all that is done with it. Bringing the live player into line with the
+            // record anyway would only take back whatever the player picked up while the save was in flight.
+            bool enforce = CharacterEnforcement.Enabled;
+            if (enforce) {
+                Logger.LogWarning($"The server applied its new-character rules to {sanitized.Name}: items and skills not in its record are being removed.");
+            } else {
+                Logger.LogInfo($"The server answered {sanitized.Name}'s first save with enforcement off; only a starter loadout, if any, is handed over.");
+            }
 
             PlayerCharacter = sanitized;
             ServerCharacter = ServerCharacterState.Received;
@@ -630,25 +638,27 @@ namespace ValheimEnforcer.modules.character {
                 return;
             }
 
-            ReconcilePlayerToCharacter(player, sanitized, recordConfiscation: false, "Server first-save enforcement");
-
             if (sanitized.SkillLevels == null) { sanitized.SkillLevels = new Dictionary<Skills.SkillType, float>(); }
             if (sanitized.PlayerItems == null) { sanitized.PlayerItems = new List<PackedItem>(); }
 
-            foreach (Skills.Skill skill in player.GetSkills().GetSkillList()) {
-                if (!sanitized.SkillLevels.TryGetValue(skill.m_info.m_skill, out float savedLevel)) { continue; }
-                if (skill.m_level <= savedLevel) { continue; }
-                Logger.LogInfo($"Server first-save enforcement: lowering {skill.m_info.m_skill} from {skill.m_level} to {savedLevel}.");
-                skill.m_level = savedLevel;
-                skill.m_accumulator = 0;
-            }
+            if (enforce) {
+                ReconcilePlayerToCharacter(player, sanitized, recordConfiscation: false, "Server first-save enforcement");
 
-            ForsakenPower.ApplyRecord(player, sanitized, "Server first-save enforcement");
-            FoodSync.ApplyRecord(player, sanitized, "Server first-save enforcement");
-            ProgressionSync.Apply(sanitized.Progress, player, sanitized.Name);
+                foreach (Skills.Skill skill in player.GetSkills().GetSkillList()) {
+                    if (!sanitized.SkillLevels.TryGetValue(skill.m_info.m_skill, out float savedLevel)) { continue; }
+                    if (skill.m_level <= savedLevel) { continue; }
+                    Logger.LogInfo($"Server first-save enforcement: lowering {skill.m_info.m_skill} from {skill.m_level} to {savedLevel}.");
+                    skill.m_level = savedLevel;
+                    skill.m_accumulator = 0;
+                }
 
-            if (ValConfig.PreventExternalCustomDataChanges.Value) {
-                player.m_customData = CompatCustomData.ApplyToPlayer(sanitized.PlayerCustomData, player.m_customData);
+                ForsakenPower.ApplyRecord(player, sanitized, "Server first-save enforcement");
+                FoodSync.ApplyRecord(player, sanitized, "Server first-save enforcement");
+                ProgressionSync.Apply(sanitized.Progress, player, sanitized.Name);
+
+                if (ValConfig.PreventExternalCustomDataChanges.Value) {
+                    player.m_customData = CompatCustomData.ApplyToPlayer(sanitized.PlayerCustomData, player.m_customData);
+                }
             }
 
             // After the removals and the skill clamp, so the kit is never measured against them, and before the
@@ -713,8 +723,9 @@ namespace ValheimEnforcer.modules.character {
             // what the character keeps - on both sides. Packing copies it (PackedItem.CopyCustomData), so
             // clearing only the live items left the record claiming custom data they no longer had, and the
             // very first delta comparison saw every item as changed. Before the loadout reaches the player, as
-            // it always was; the loadout's own record entries carry no custom data.
-            if (ValConfig.ValidateItemCustomData.Value) {
+            // it always was; the loadout's own record entries carry no custom data. Not with enforcement off,
+            // when an item arriving enchanted is kept enchanted like everything else it arrived with.
+            if (CharacterEnforcement.Enabled && ValConfig.ValidateItemCustomData.Value) {
                 foreach (ItemDrop.ItemData item in player.GetInventory().GetAllItems()) {
                     item.m_customData?.Clear();
                 }
@@ -781,6 +792,10 @@ namespace ValheimEnforcer.modules.character {
         /// </summary>
         internal static void ReconcilePlayerToCharacter(Player player, DataObjects.Character character, bool recordConfiscation, string reasonPrefix) {
             if (player == null || character == null) { return; }
+            // The one place an item leaves a live player's inventory, so the master switch is checked here as well
+            // as by each caller. Without it a new character's record, which keeps every item it arrived with,
+            // would still lose the ones it cannot describe to ConfiscateUnidentifiableItems.
+            if (!CharacterEnforcement.Enabled) { return; }
 
             Dictionary<ItemDrop.ItemData, ItemValidatorResult> ValidatorResults = ValidateItems(player.m_inventory.GetAllItems(), character);
             foreach (KeyValuePair<ItemDrop.ItemData, ItemValidatorResult> eval in ValidatorResults) {
@@ -879,13 +894,20 @@ namespace ValheimEnforcer.modules.character {
         /// progression sections not being tracked (Capture merges into it), and any pending admin skill restore,
         /// which only ever raises and still lands. The stored map is never asked for; this client's own is sent
         /// up instead.
+        ///
+        /// Also the whole join while EnableCharacterEnforcement is off, when there is nothing to validate against
+        /// for the opposite reason: the record is current, but nothing is to be enforced with it.
         /// </summary>
         internal static void CatchUpFromLivePlayer(Player player) {
             DataObjects.Character savableChar = PlayerCharacter;
             if (player == null || savableChar == null) { return; }
             LogoutInProgress = false;
 
-            Logger.LogInfo($"The server is catching up {savableChar.Name}: adopting this character exactly as it is here instead of validating it against the server's stale copy.");
+            if (CharacterEnforcement.Enabled) {
+                Logger.LogInfo($"The server is catching up {savableChar.Name}: adopting this character exactly as it is here instead of validating it against the server's stale copy.");
+            } else {
+                Logger.LogInfo($"Character enforcement is off: adopting {savableChar.Name} exactly as it is here, without validating it.");
+            }
             SkillReductions.ApplyPendingOnJoin(player, savableChar);
 
             // Mid-session save, so it records the session as still active and potentially soon-to-be-stale.
@@ -901,7 +923,15 @@ namespace ValheimEnforcer.modules.character {
             if (ValConfig.PreventExternalCustomDataChanges.Value) {
                 savableChar.PlayerCustomData = CompatCustomData.SnapshotForTracking(player.m_customData);
             }
-            // Saved at a logout from before the gap; putting them back would be as stale as everything else.
+            // Under CatchupOverwriteOnJoin these were saved at a logout from before the gap, and putting them back
+            // would be as stale as everything else. With enforcement merely switched off the record has been kept
+            // current all along, so they are put back as on any join. Read as stale whenever it is not certain -
+            // including a config sync that has not landed yet, when both settings still read their defaults.
+            bool storedIsCurrent = !CharacterEnforcement.Enabled
+                                   && (ValConfig.CatchupOverwriteOnJoin == null || !ValConfig.CatchupOverwriteOnJoin.Value);
+            if (storedIsCurrent) {
+                ApplySavedStatusEffects(player, savableChar);
+            }
             savableChar.ActiveCharacterEffects = new Dictionary<string, PackedStatusEffect>();
 
             PlayerCharacter = savableChar;
@@ -911,6 +941,22 @@ namespace ValheimEnforcer.modules.character {
             // A no-op until the minimap has loaded, in which case the next save sends it. Either way the
             // server's stale map is replaced rather than adopted.
             MapSync.SendToServer(force: true);
+        }
+
+        // The status effects a character logged out with go back on (SavePlayerStatusEffectsOnLogout), and the
+        // record forgets them: from here on they are live effects, and the next logout saves them afresh.
+        private static void ApplySavedStatusEffects(Player player, DataObjects.Character savableChar) {
+            if (!ValConfig.SavePlayerStatusEffectsOnLogout.Value) { return; }
+            if (player == null || savableChar?.ActiveCharacterEffects == null || savableChar.ActiveCharacterEffects.Count == 0) { return; }
+            SEMan pseman = player.GetSEMan();
+            foreach (KeyValuePair<string, PackedStatusEffect> kvp in savableChar.ActiveCharacterEffects) {
+                Logger.LogDebug($"Applying status effect: {kvp.Key}");
+                StatusEffect se = kvp.Value.ToStatusEffect();
+                if (se == null) { continue; }
+                pseman.AddStatusEffect(se);
+            }
+            savableChar.ActiveCharacterEffects.Clear();
+            Logger.LogDebug("Validated saved status effects.");
         }
 
         // Drop the tracked item list the moment the player dies. This is deliberately a clear rather than a
