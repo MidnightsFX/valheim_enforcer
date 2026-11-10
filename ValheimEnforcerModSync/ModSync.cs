@@ -1,5 +1,4 @@
 using BepInEx;
-using HarmonyLib;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -8,27 +7,27 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
-using ValheimEnforcer.common;
+using ValheimEnforcer.API;
 using ValheimEnforcer.modules.mods;
 
-namespace ValheimEnforcer.modules.modsync {
+namespace ValheimEnforcerModSync {
 
     /// <summary>
-    /// Client side: lets a server that refused this player for their mods fix them, with the player's say-so.
+    /// Lets a server that refused this player for their mods fix them, with the player's say-so.
     ///
-    /// Nothing here runs unless both sides asked for it. The server has to send OffersModDownloads, which only
-    /// its admin's OfferModDownloads setting does; the player has to have AllowServerModInstalls on in their
-    /// own, unsynced, config. Without the server's offer there is nothing to show; without the player's setting
-    /// the window explains what would change and how to allow it, and installs nothing.
+    /// Nothing here runs unless both sides asked for it. The server has to offer, which only its admin's
+    /// OfferModDownloads setting does, and ValheimEnforcer then holds the server's list and works out the plan
+    /// (<see cref="ModSyncApi"/>). The player has to have AllowServerModInstalls on in this add-on's own config.
+    /// Without the server's offer there is nothing to show; without the player's setting the window explains
+    /// what would change and how to allow it, and installs nothing.
     ///
-    /// The server never sends code. Its mod list - which every client already receives in the handshake - names
-    /// Thunderstore packages and the file hashes it will accept, and this downloads those exact versions from
-    /// thunderstore.io itself and refuses anything that does not hash to what the server recorded.
+    /// The server never sends code. Its mod list names Thunderstore packages and the file hashes it will accept,
+    /// and this downloads those exact versions from thunderstore.io itself and refuses anything that does not
+    /// hash to what the server recorded.
     ///
-    /// Flow: the handshake hands over the server's list (<see cref="NoteServerList"/>); the connection error
-    /// window gets a button (<see cref="ModSyncWindow"/>); the player reviews the plan and agrees; the packages
-    /// are downloaded, checked and staged on a worker thread (<see cref="Start"/>); then the game quits and the
-    /// native helper applies the staged changes and starts it again (<see cref="Restart"/>).
+    /// Flow: the connection error window gets a button (<see cref="ModSyncWindow"/>); the player reviews the plan
+    /// and agrees; the packages are downloaded, checked and staged on a worker thread (<see cref="Start"/>); then
+    /// the game quits and the native helper applies the staged changes and starts it again (<see cref="Restart"/>).
     /// </summary>
     internal static class ModSync {
 
@@ -37,17 +36,14 @@ namespace ValheimEnforcer.modules.modsync {
         // Old copies of replaced plugin folders are kept for the player to restore by hand, a few runs deep.
         private const int KeepBackups = 5;
 
-        // The latest server list that offered downloads, for the connection attempt in progress. Cleared when the
-        // next attempt starts, so a window from a different server can never act on this one's list.
-        private static DataObjects.Mods offer;
-        private static string rejoinAddress;
-
         private static volatile Phase phase = Phase.Idle;
         private static volatile string status = "";
         private static volatile string failure;
         private static ModSyncRestart.Ops readyOps;
+        private static string readyRejoinAddress;
         private static CancellationTokenSource cancellation;
 
+        // The same folder ValheimEnforcer 0.34 to 0.36 used, so the backups and logs those left behind carry on.
         internal static string Root { get { return Path.Combine(Path.Combine(Paths.CachePath, "ValheimEnforcer"), "modsync"); } }
         internal static string StagingRoot { get { return Path.Combine(Root, "staged"); } }
         internal static string BackupRoot { get { return Path.Combine(Root, "replaced"); } }
@@ -57,8 +53,6 @@ namespace ValheimEnforcer.modules.modsync {
         /// <summary>Where the helper says why, when it could not read the plan and so has no log path.</summary>
         private static string PlanErrorPath { get { return Path.Combine(Root, "apply.error.log"); } }
 
-        internal static bool HasOffer { get { return offer != null; } }
-        internal static string RejoinAddress { get { return rejoinAddress; } }
         internal static Phase CurrentPhase { get { return phase; } }
         internal static string Status { get { return status; } }
         internal static string Failure { get { return failure; } }
@@ -69,59 +63,24 @@ namespace ValheimEnforcer.modules.modsync {
         /// </summary>
         internal static bool CanInstallHere { get { return ModSyncHelper.Available; } }
 
-        internal static bool PlayerAllowsInstalls { get { return ValConfig.AllowServerModInstalls != null && ValConfig.AllowServerModInstalls.Value; } }
-
-        internal static void ClearOffer() {
-            offer = null;
-            rejoinAddress = null;
-        }
-
-        /// <summary>Called with every server list a client receives. Keeps it only when the server offers downloads.</summary>
-        internal static void NoteServerList(DataObjects.Mods serverMods) {
-            if (serverMods == null || !serverMods.OffersModDownloads) {
-                ClearOffer();
-                return;
-            }
-            offer = serverMods;
-            rejoinAddress = CurrentRejoinAddress();
-            Logger.LogDebug($"This server offers mod downloads; rejoin address {(rejoinAddress ?? "not available")}.");
-        }
-
-        /// <summary>
-        /// "host:port" for +connect, or null when this connection cannot be expressed that way. Only a direct
-        /// connection to a dedicated server's address can; a crossplay join code or a Steam id join cannot, and
-        /// the player is told to rejoin from the server list instead.
-        /// </summary>
-        private static string CurrentRejoinAddress() {
-            if (ZNet.m_onlineBackend != OnlineBackendType.Steamworks) { return null; }
-            if (string.IsNullOrEmpty(ZNet.m_serverHost) || ZNet.m_serverHostPort <= 0) { return null; }
-            return $"{ZNet.m_serverHost}:{ZNet.m_serverHostPort}";
-        }
-
-        /// <summary>The plan for the server that offered, against what this game has loaded. Null without an offer.</summary>
-        internal static ModSyncPlan BuildPlan() {
-            if (offer == null || ModManager.ModSettings == null) { return null; }
-            Dictionary<string, string> dllPaths = new Dictionary<string, string>();
-            foreach (KeyValuePair<string, BaseUnityPlugin> plugin in ModManager.ActiveMods) {
-                string location = plugin.Value?.Info?.Location;
-                if (!string.IsNullOrEmpty(location)) { dllPaths[plugin.Key] = location; }
-            }
-            string[] protectedIds = { global::ValheimEnforcer.ValheimEnforcer.PluginGUID, Jotunn.Main.ModGuid };
-            return ModSyncPlan.Build(ModManager.ModSettings, offer, dllPaths, Paths.PluginPath, protectedIds);
+        internal static bool PlayerAllowsInstalls {
+            get { return ValheimEnforcerModSync.AllowServerModInstalls != null && ValheimEnforcerModSync.AllowServerModInstalls.Value; }
         }
 
         /// <summary>Downloads, checks and stages every package in the plan on a worker thread.</summary>
-        internal static void Start(ModSyncPlan plan) {
+        internal static void Start(PlanInfo plan) {
             if (phase == Phase.Working || plan == null) { return; }
             cancellation = new CancellationTokenSource();
             CancellationToken token = cancellation.Token;
-            long cap = (long)ValConfig.ThunderstoreMaxArchiveMB.Value * 1024 * 1024;
+            Limits limits = Limits.FromApi();
+            // Taken now, on the main thread, with the plan it belongs to.
+            readyRejoinAddress = ModSyncApi.RejoinAddress;
             readyOps = null;
             failure = null;
             status = "Starting";
             phase = Phase.Working;
             Logger.LogInfo($"Mod sync: fetching {plan.Installs.Count} package(s) and turning off {plan.Disables.Count} plugin(s) for this server.");
-            Task.Run(() => Run(plan, cap, token));
+            Task.Run(() => Run(plan, limits, token));
         }
 
         /// <summary>Stops a fetch in progress, or drops a staged result the player backed out of.</summary>
@@ -136,7 +95,7 @@ namespace ValheimEnforcer.modules.modsync {
             phase = Phase.Idle;
         }
 
-        private static void Run(ModSyncPlan plan, long cap, CancellationToken token) {
+        private static void Run(PlanInfo plan, Limits limits, CancellationToken token) {
             try {
                 ModSyncPackage.DeleteDirectory(StagingRoot);
                 Directory.CreateDirectory(StagingRoot);
@@ -145,16 +104,16 @@ namespace ValheimEnforcer.modules.modsync {
                 int count = plan.Installs.Count;
                 for (int i = 0; i < count; i++) {
                     token.ThrowIfCancellationRequested();
-                    ModSyncPlan.PackageInstall package = plan.Installs[i];
+                    PackageInfo package = plan.Installs[i];
                     status = $"Downloading {package.Spec} ({i + 1} of {count})";
                     string url = ThunderstoreHttp.DownloadUrlFor(package.Owner, package.Name, package.Version);
-                    using (MemoryStream archive = ThunderstoreHttp.DownloadCapped(url, cap, token, out string why)) {
+                    using (MemoryStream archive = ThunderstoreHttp.DownloadCapped(url, limits.MaxArchiveBytes, token, out string why)) {
                         if (archive == null) {
                             Fail($"Could not download {package.Spec}: {why}.");
                             return;
                         }
                         status = $"Checking {package.Spec} ({i + 1} of {count})";
-                        if (!ModSyncPackage.Stage(archive, package, StagingRoot, out ModSyncPackage.Staged result, out string bad)) {
+                        if (!ModSyncPackage.Stage(archive, package, StagingRoot, limits, out ModSyncPackage.Staged result, out string bad)) {
                             Fail(bad + ".");
                             return;
                         }
@@ -194,14 +153,14 @@ namespace ValheimEnforcer.modules.modsync {
         /// The file moves for the helper. A copy of a plugin that lives inside a folder about to be replaced is
         /// not renamed separately: the whole folder is moved aside, which already takes it out of BepInEx's sight.
         /// </summary>
-        private static ModSyncRestart.Ops BuildOps(ModSyncPlan plan, List<ModSyncPackage.Staged> staged) {
+        private static ModSyncRestart.Ops BuildOps(PlanInfo plan, List<ModSyncPackage.Staged> staged) {
             ModSyncRestart.Ops ops = new ModSyncRestart.Ops { BackupDir = Path.Combine(BackupRoot, DateTime.Now.ToString("yyyyMMdd-HHmmss")) };
             List<string> targets = staged.Select(s => Path.Combine(Paths.PluginPath, s.Package.FolderName)).ToList();
             HashSet<string> renamed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             IEnumerable<string> outgoing = staged.SelectMany(s => s.Package.ReplacedDlls).Concat(plan.Disables.Select(d => d.DllPath));
             foreach (string dll in outgoing) {
-                if (targets.Any(target => ModSyncPlan.IsUnder(dll, target))) { continue; }
+                if (targets.Any(target => PathUtil.IsUnder(dll, target))) { continue; }
                 if (renamed.Add(dll)) { ops.Disables.Add(dll); }
             }
 
@@ -243,12 +202,12 @@ namespace ValheimEnforcer.modules.modsync {
             } else {
                 relaunch = ModSyncRestart.Relaunch.Explicit(self.MainModule.FileName, args, Environment.CurrentDirectory);
             }
-            string plan = ModSyncRestart.BuildPlan(self.Id, readyOps, StagingRoot, LogPath, relaunch, rejoinAddress);
+            string plan = ModSyncRestart.BuildPlan(self.Id, readyOps, StagingRoot, LogPath, relaunch, readyRejoinAddress);
             if (!ModSyncRestart.Launch(helper, PlanPath, plan, out why)) {
                 Logger.LogWarning($"Mod sync: could not start the helper that applies the changes: {why}");
                 return false;
             }
-            Logger.LogInfo($"Mod sync: closing Valheim to apply {readyOps.Folders.Count} install(s) and {readyOps.Disables.Count} rename(s); it starts again afterwards{(rejoinAddress != null ? " and rejoins " + rejoinAddress : "")}.");
+            Logger.LogInfo($"Mod sync: closing Valheim to apply {readyOps.Folders.Count} install(s) and {readyOps.Disables.Count} rename(s); it starts again afterwards{(readyRejoinAddress != null ? " and rejoins " + readyRejoinAddress : "")}.");
             Application.Quit();
             return true;
         }
@@ -285,14 +244,25 @@ namespace ValheimEnforcer.modules.modsync {
                 Logger.LogWarning($"Mod sync: could not read what the last run did: {e.Message}");
             }
         }
+    }
 
-        /// <summary>A new connection attempt starts with no offer; the next server has to make its own.</summary>
-        [HarmonyPatch(typeof(ZNet), nameof(ZNet.Awake))]
-        public static class ZNet_Awake_ClearOffer {
-            [HarmonyPrefix]
-            private static void Prefix() {
-                ClearOffer();
-            }
+    /// <summary>
+    /// The size limits for one run, read from ValheimEnforcer on the main thread before the worker starts: the
+    /// admin's archive cap and the unpacking limits the server itself uses when it hashes a package.
+    /// </summary>
+    internal sealed class Limits {
+        internal long MaxArchiveBytes;
+        internal int MaxZipEntries;
+        internal long MaxEntryBytes;
+        internal long MaxTotalUncompressedBytes;
+
+        internal static Limits FromApi() {
+            return new Limits {
+                MaxArchiveBytes = ModSyncApi.MaxArchiveBytes,
+                MaxZipEntries = ModSyncApi.MaxZipEntries,
+                MaxEntryBytes = ModSyncApi.MaxEntryBytes,
+                MaxTotalUncompressedBytes = ModSyncApi.MaxTotalUncompressedBytes,
+            };
         }
     }
 }

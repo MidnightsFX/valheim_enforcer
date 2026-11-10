@@ -5,9 +5,9 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Security.Cryptography;
-using ValheimEnforcer.modules.mods;
+using ValheimEnforcer.API;
 
-namespace ValheimEnforcer.modules.modsync {
+namespace ValheimEnforcerModSync {
 
     /// <summary>
     /// Turns one downloaded Thunderstore archive into files staged for install, after proving it is the build the
@@ -30,7 +30,7 @@ namespace ValheimEnforcer.modules.modsync {
 
         /// <summary>One package, verified and written under the staging folder.</summary>
         internal sealed class Staged {
-            internal ModSyncPlan.PackageInstall Package;
+            internal PackageInfo Package;
             /// <summary>Becomes BepInEx/plugins/Owner-Name.</summary>
             internal string PluginsDir;
             /// <summary>Copied into BepInEx/config, file by file, only where no file of that name exists yet.</summary>
@@ -95,7 +95,7 @@ namespace ValheimEnforcer.modules.modsync {
         /// Returns false with <paramref name="failure"/> in plain words when anything does not check out, in which
         /// case nothing for this package is left in the staging folder.
         /// </summary>
-        internal static bool Stage(MemoryStream archive, ModSyncPlan.PackageInstall package, string stagingRoot, out Staged staged, out string failure) {
+        internal static bool Stage(MemoryStream archive, PackageInfo package, string stagingRoot, Limits limits, out Staged staged, out string failure) {
             staged = null;
             failure = null;
             string pluginsDir = Path.Combine(stagingRoot, package.FolderName);
@@ -107,8 +107,8 @@ namespace ValheimEnforcer.modules.modsync {
 
             try {
                 using (ZipArchive zip = new ZipArchive(archive, ZipArchiveMode.Read, leaveOpen: true)) {
-                    if (zip.Entries.Count > ThunderstoreResolver.MaxZipEntries) {
-                        failure = $"{package.Spec} has {zip.Entries.Count} files, more than the {ThunderstoreResolver.MaxZipEntries} allowed";
+                    if (zip.Entries.Count > limits.MaxZipEntries) {
+                        failure = $"{package.Spec} has {zip.Entries.Count} files, more than the {limits.MaxZipEntries} allowed";
                         return false;
                     }
 
@@ -126,13 +126,13 @@ namespace ValheimEnforcer.modules.modsync {
                         }
                         if (mapping.Place != Place.Plugins || !entry.FullName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) { continue; }
 
-                        byte[] bytes = ReadCapped(entry, ref totalUncompressed);
+                        byte[] bytes = ReadCapped(entry, limits, ref totalUncompressed);
                         if (bytes == null) {
                             failure = $"{package.Spec} is larger than the safety limit once unpacked";
                             return false;
                         }
                         string hash;
-                        using (SHA256 sha = SHA256.Create()) { hash = PluginHasher.ToHex(sha.ComputeHash(bytes)); }
+                        using (SHA256 sha = SHA256.Create()) { hash = PathUtil.ToHex(sha.ComputeHash(bytes)); }
                         dlls.Add(new DllInfo { Entry = entry.FullName, Hash = hash, Plugins = ReadPlugins(bytes) });
                     }
 
@@ -148,14 +148,14 @@ namespace ValheimEnforcer.modules.modsync {
                         string target = Path.GetFullPath(Path.Combine(root, mapping.Relative));
                         // TryMap already refused anything that could climb out; this is the check that does not
                         // depend on it being right.
-                        if (!ModSyncPlan.IsUnder(target, root)) {
+                        if (!PathUtil.IsUnder(target, root)) {
                             failure = $"{package.Spec} contains a file that would be written outside its own folder";
                             DeleteDirectory(pluginsDir);
                             DeleteDirectory(configDir);
                             return false;
                         }
 
-                        byte[] bytes = ReadCapped(entry, ref totalUncompressed);
+                        byte[] bytes = ReadCapped(entry, limits, ref totalUncompressed);
                         if (bytes == null) {
                             failure = $"{package.Spec} is larger than the safety limit once unpacked";
                             DeleteDirectory(pluginsDir);
@@ -187,9 +187,9 @@ namespace ValheimEnforcer.modules.modsync {
         /// hash the server recorded, at the version the server enforces. The hash ties the download to the exact
         /// file the server checks on the next connection, so what passes here is what passes there.
         /// </summary>
-        private static bool Verify(ModSyncPlan.PackageInstall package, List<DllInfo> dlls, out string failure) {
+        private static bool Verify(PackageInfo package, List<DllInfo> dlls, out string failure) {
             failure = null;
-            foreach (KeyValuePair<string, List<string>> wanted in package.AcceptedHashes) {
+            foreach (KeyValuePair<string, IReadOnlyList<string>> wanted in package.AcceptedHashes) {
                 string id = wanted.Key;
                 HashSet<string> accepted = new HashSet<string>(wanted.Value ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
 
@@ -232,14 +232,14 @@ namespace ValheimEnforcer.modules.modsync {
         /// One entry's bytes, counted as they are read rather than trusted from the central directory - a crafted
         /// archive is free to lie about sizes. Null once the per-file or whole-archive limit is passed.
         /// </summary>
-        private static byte[] ReadCapped(ZipArchiveEntry entry, ref long totalUncompressed) {
+        private static byte[] ReadCapped(ZipArchiveEntry entry, Limits limits, ref long totalUncompressed) {
             using (Stream source = entry.Open())
             using (MemoryStream buffer = new MemoryStream()) {
                 byte[] chunk = new byte[64 * 1024];
                 int read;
                 while ((read = source.Read(chunk, 0, chunk.Length)) > 0) {
                     totalUncompressed += read;
-                    if (totalUncompressed > ThunderstoreResolver.MaxTotalUncompressedBytes || buffer.Length + read > ThunderstoreResolver.MaxEntryBytes) {
+                    if (totalUncompressed > limits.MaxTotalUncompressedBytes || buffer.Length + read > limits.MaxEntryBytes) {
                         return null;
                     }
                     buffer.Write(chunk, 0, read);

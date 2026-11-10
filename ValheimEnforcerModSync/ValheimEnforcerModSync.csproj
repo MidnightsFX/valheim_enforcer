@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <RootNamespace>ValheimEnforcerModSync</RootNamespace>
+    <AssemblyName>ValheimEnforcerModSync</AssemblyName>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+    <LangVersion>10</LangVersion>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <Optimize>false</Optimize>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+
+  <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The helper that applies staged changes after the game has exited, built from tools/modsync-helper by its
+         build.ps1. The logical names predate this project and are kept so nothing else has to change. -->
+    <EmbeddedResource Include="assets\ve-modsync-windows-x64.exe" LogicalName="ValheimEnforcer.modsync.windows-x64" />
+    <EmbeddedResource Include="assets\ve-modsync-linux-x64" LogicalName="ValheimEnforcer.modsync.linux-x64" />
+    <EmbeddedResource Include="assets\ve-modsync-macos-x64" LogicalName="ValheimEnforcer.modsync.macos-x64" />
+    <None Remove="assets\**" />
+    <None Remove="Package\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- One source for the only code that fetches a mod archive, compiled into both assemblies, so the client
+         download is held to exactly the allowlist, redirect check and byte cap the server's resolver uses. -->
+    <Compile Include="..\ValheimEnforcer\modules\mods\ThunderstoreHttp.cs" Link="Shared\ThunderstoreHttp.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.IO.Compression" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="JotunnLib" Version="2.30.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Enforcer is a dependency installed beside this, never shipped with it. Only its public API is used
+         (ValheimEnforcer.API.ModSyncApi). -->
+    <ProjectReference Include="..\ValheimEnforcer\ValheimEnforcer.csproj">
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- JotunnLib's reference list still carries assemblies that Valheim's Unity version
+         dropped. Nothing here uses them, and leaving them in warns MSB3245 every build. -->
+    <Reference Remove="UnityEngine.ProfilerModule" Condition="!Exists('$(VALHEIM_MANAGED)/UnityEngine.ProfilerModule.dll')" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <!-- Resolved in ..\Directory.Build.props, as for ValheimEnforcer. Only fill in what is still missing. -->
+    <VALHEIM_MANAGED Condition=" '$(VALHEIM_MANAGED)' == '' ">$(VALHEIM_INSTALL)/valheim_Data/Managed</VALHEIM_MANAGED>
+    <BEPINEX_PATH Condition=" '$(BEPINEX_PATH)' == '' ">$(VALHEIM_INSTALL)/BepInEx</BEPINEX_PATH>
+  </PropertyGroup>
+  <!-- BEGIN mod-tools (managed block; replaced by `mod-tools setup`) -->
+  <PropertyGroup>
+    <RepoRoot Condition=" '$(RepoRoot)' == '' ">$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)/'))</RepoRoot>
+    <!-- Override in the gitignored Environment.props when the gem's bindir
+         is not on the PATH that MSBuild sees. -->
+    <ModTools Condition=" '$(ModTools)' == '' ">mod-tools</ModTools>
+  </PropertyGroup>
+
+  <!-- Nothing is vendored into this repo, so a machine that never installed
+       the tools has no mod-tools at all. This probes for it once and warns,
+       rather than failing: not having a release tool should not stop anyone
+       compiling. Everything below is then conditioned on the result, so a
+       machine without it skips those steps instead of failing three times
+       over with "command not found" buried in Exec output. -->
+  <Target Name="ModToolsGuard" BeforeTargets="Build">
+    <Exec Command="$(ModTools) preflight --root &quot;$(RepoRoot).&quot;" ContinueOnError="true" IgnoreExitCode="true" StandardOutputImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="ModToolsExit" />
+    </Exec>
+    <PropertyGroup>
+      <ModToolsAvailable Condition=" '$(ModToolsExit)' == '0' ">true</ModToolsAvailable>
+    </PropertyGroup>
+    <Warning Condition=" '$(ModToolsAvailable)' != 'true' " Text="mod-tools is not installed on this machine, or this repo is not set up. Skipping release checks, packaging and deploy. Install it with `rake install` from a clone of the tools repo; see its SETUP.md." />
+  </Target>
+
+  <!-- After the build, not before it. `check` packages as well as checks
+       now, and packaging reads the assembly the compile just produced, so
+       a BeforeTargets hook would stage the previous one. The cost is that
+       a bad version story is reported after the compile rather than
+       instead of it; the build still fails, one step later. -->
+  <Target Name="ReleaseChecks" AfterTargets="Build" Condition=" '$(ModToolsAvailable)' == 'true' AND '$(Configuration)' == 'Release' ">
+    <Exec Command="$(ModTools) check --root &quot;$(RepoRoot).&quot;" />
+  </Target>
+
+  <!-- No Configuration condition, unlike the one above: every build lands
+       in the test profiles, Debug and Release alike. Declared last so it
+       runs after a GenerateMdb target defined earlier in this file, whose
+       .mdb it copies. Does nothing unless release.yml enables deploy. -->
+  <Target Name="ModToolsDeploy" AfterTargets="Build" Condition=" '$(ModToolsAvailable)' == 'true' ">
+    <Exec Command="$(ModTools) deploy --root &quot;$(RepoRoot).&quot; --configuration $(Configuration)" />
+  </Target>
+  <!-- END mod-tools -->
+</Project>

@@ -88,6 +88,10 @@ namespace ValheimEnforcer.modules {
                     continue;
                 } // Server only mods are basically the skip button for a mod
 
+                // The mod sync add-on is a player's own tool. A host who happens to run it must not end up
+                // requiring it of everyone who joins.
+                if (plugin.Key == API.ModSyncApi.AddonGuid) { continue; }
+
                 if (ValConfig.AutoAddModsToRequired.Value == true) {
                     Logger.LogDebug($"Automatically adding {plugin.Key} as a required mod.");
                     ModSettings.RequiredMods.Add(plugin.Key, new DataObjects.Mod() { EnforceVersion = false, Version = currentVersion, PluginID = plugin.Value.Info.Metadata.GUID, Name = plugin.Value.Info.Metadata.Name });
@@ -149,11 +153,11 @@ namespace ValheimEnforcer.modules {
             "#   hashedFrom          Bookkeeping for the above: 'local:<version>', or 'Owner-Name-Version' for a",
             "#                       resolved package. Re-resolution happens only when this stops matching.",
             "#   thunderstorePackage 'Owner-ModName' or 'Owner-ModName-Version' - the same dependency string a",
-            "#                       Thunderstore manifest uses. Lets the server offer the mod to players",
-            "#                       (OfferModDownloads), and with ResolveThunderstoreHashes (on by default) the",
-            "#                       server downloads that package and records its hashes. Filled in for you when",
-            "#                       AutoFillThunderstorePackages is on. Only thunderstore.io is ever contacted;",
-            "#                       download URLs are not supported on purpose.",
+            "#                       Thunderstore manifest uses. Lets the server offer the mod to players who",
+            "#                       have the mod sync add-on (OfferModDownloads), and with ResolveThunderstoreHashes",
+            "#                       (on by default) the server downloads that package and records its hashes.",
+            "#                       Filled in for you when AutoFillThunderstorePackages is on. Only thunderstore.io",
+            "#                       is ever contacted; download URLs are not supported on purpose.",
             "#   packageSource       Written when the server filled thunderstorePackage in itself: Manifest (the",
             "#                       installed package's manifest.json) or Thunderstore (a lookup by name). Such",
             "#                       entries are kept current when the mod updates, and dropped if the new",
@@ -717,7 +721,25 @@ namespace ValheimEnforcer.modules {
             return true;
         }
 
-        internal static bool ValidateModlist(Mods CheckingMods, Mods AuthoratativeMods, bool isAdmin, bool adminStatusKnown, out string summay, out string details, out ModMismatchDetail detail) {
+        /// <summary>
+        /// A mod on none of the authoritative lists that is accepted anyway: the mod sync add-on, when the
+        /// authoritative side offers mod downloads. A server that offers fixes has to accept the program that
+        /// applies them, or a player it just fixed would be turned away again for carrying it. A server that does
+        /// not offer treats it like any other unlisted mod, and an entry for it in Mods.yaml always wins over this.
+        ///
+        /// Like any optional mod without a pinned hash, this is a pass by plugin id: a plugin claiming the add-on's
+        /// id gets it too. Cheat detection still applies to whatever that plugin does, and an admin who wants the
+        /// file checked lists the add-on with acceptedHashes.
+        /// </summary>
+        internal static bool IsAcceptedUnlisted(string pluginId, bool authorityOffersDownloads) {
+            return authorityOffersDownloads && string.Equals(pluginId, API.ModSyncApi.AddonGuid, System.StringComparison.Ordinal);
+        }
+
+        /// <param name="authorityOffersDownloads">
+        /// Whether <paramref name="AuthoratativeMods"/> comes from a server offering mod downloads: the server's own
+        /// OfferModDownloads setting on the server, the flag in the server's list on a client.
+        /// </param>
+        internal static bool ValidateModlist(Mods CheckingMods, Mods AuthoratativeMods, bool isAdmin, bool adminStatusKnown, bool authorityOffersDownloads, out string summay, out string details, out ModMismatchDetail detail) {
             summay = "";
             details = "";
             detail = new ModMismatchDetail();
@@ -806,6 +828,7 @@ namespace ValheimEnforcer.modules {
                 // before, so it is deliberately not matched here.
 
                 if (authoritative == null) {
+                    if (IsAcceptedUnlisted(mod.Key, authorityOffersDownloads)) { continue; }
                     // No list claimed it, so it is an extra. This is purely the "unlisted" verdict now - it used
                     // to double as a null check, and sat AFTER three reads of authoritative.EnforceVersion, so an
                     // entry written with no body under it both threw here on every single connecting client and,
@@ -1257,12 +1280,12 @@ namespace ValheimEnforcer.modules {
                 // unknown so admin-only mods are surfaced as a neutral note rather than a false pass.
                 // The structured detail is server-side notification material; the client only needs the text it
                 // puts in the connection-failed panel.
-                bool modsvalid = ValidateModlist(ModSettings, serverMods, isAdmin: false, adminStatusKnown: false, out string summary, out string details, out _);
+                bool modsvalid = ValidateModlist(ModSettings, serverMods, isAdmin: false, adminStatusKnown: false, authorityOffersDownloads: serverMods.OffersModDownloads, out string summary, out string details, out _);
 
                 // Always update so a clean run clears any note left over from a previous attempt.
                 DetailsUpdater?.UpdateErrorText(summary, details);
-                // Kept only when the server offers mod downloads; the error window works out what to offer.
-                modsync.ModSync.NoteServerList(serverMods);
+                // Kept only when the server offers mod downloads, for the mod sync add-on to read.
+                modsync.ModSyncOffer.NoteServerList(serverMods);
                 if (modsvalid == false) {
                     // Client does not kick, but it does set the error message, the server ultimately does the actual validation-
                     // this client side comparison is just to provide feedback to the user
@@ -1308,7 +1331,7 @@ namespace ValheimEnforcer.modules {
                 // and under Require it is a rejection on its own.
                 if (!CheckAttestation(sender, validatingHost, clientMods, peerAddress, exemptAdmin)) { return; }
 
-                bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, adminStatusKnown: true, out string summary, out string details, out ModMismatchDetail detail);
+                bool modsvalid = ValidateModlist(clientMods, ModSettings, isadmin, adminStatusKnown: true, authorityOffersDownloads: ValConfig.OfferModDownloads.Value, out string summary, out string details, out ModMismatchDetail detail);
                 if (modsvalid || exemptAdmin) {
                     // Positive record: this host actually sent a mod list and it passed. ZNet_RPC_PeerInfo_ModRejection
                     // refuses any host that reaches PeerInfo in neither the validated nor the rejected set, which is
@@ -1526,8 +1549,6 @@ namespace ValheimEnforcer.modules {
             if (SceneManager.GetActiveScene().name.Equals("start") == false) { return; }
 
             DetailsUpdater = GUIManager.CustomGUIFront.AddComponent<JotunnDetailDisconnectExpansion>();
-            // Idle unless a server that refused us offered mod downloads.
-            GUIManager.CustomGUIFront.AddComponent<modsync.ModSyncWindow>();
         }
 
         public class JotunnDetailDisconnectExpansion : MonoBehaviour {

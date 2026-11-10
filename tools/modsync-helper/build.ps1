@@ -1,6 +1,6 @@
 # Builds the mod sync helper for Windows, Linux and macOS and copies all three into
-# ValheimEnforcer/assets/modsync, where the mod embeds them. Run it after changing anything under src/, then
-# rebuild the mod.
+# ValheimEnforcerModSync/assets, where the mod sync add-on embeds them. Run it after changing anything under src/,
+# then rebuild the add-on.
 #
 # Needs the GNU Rust toolchain, which brings its own linker - no Visual Studio required - plus the musl target for
 # the static Linux build and the macOS target:
@@ -16,7 +16,7 @@
 # treat as a failure.
 $toolchain = '+stable-x86_64-pc-windows-gnu'
 $here = $PSScriptRoot
-$assets = Join-Path $here '..\..\ValheimEnforcer\assets\modsync'
+$assets = Join-Path $here '..\..\ValheimEnforcerModSync\assets'
 
 Push-Location $here
 try {

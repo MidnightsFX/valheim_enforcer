@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text;
 using ValheimEnforcer.common;
 using ValheimEnforcer.modules.mods;
 
@@ -18,6 +17,10 @@ namespace ValheimEnforcer.modules.modsync {
     /// mods are left alone (the client cannot know whether the player is an admin), and patchers are not
     /// handled at all (a patcher runs before every plugin, so installing or removing one stays a decision for the
     /// player and their mod manager).
+    ///
+    /// Only a description: nothing here downloads or changes a file. The mod sync add-on reads it through
+    /// <see cref="API.ModSyncApi.BuildPlan"/> and does the installing. It lives here, next to the method it
+    /// mirrors, so a change to those rules reaches the add-on without a new build of it.
     ///
     /// Pure: everything it needs is passed in, so it can be exercised without the game.
     /// </summary>
@@ -71,7 +74,7 @@ namespace ValheimEnforcer.modules.modsync {
         /// <param name="server">The server's mod list, as it arrived in the handshake.</param>
         /// <param name="dllPaths">Plugin id -> the full path of the DLL it was loaded from.</param>
         /// <param name="pluginsRoot">BepInEx/plugins. Nothing outside it is ever renamed.</param>
-        /// <param name="protectedIds">Plugins never turned off, whatever the server says - this mod and Jotunn.</param>
+        /// <param name="protectedIds">Plugins never turned off, whatever the server says - this mod, Jotunn and the mod sync add-on.</param>
         internal static ModSyncPlan Build(DataObjects.Mods client, DataObjects.Mods server, IDictionary<string, string> dllPaths, string pluginsRoot, ICollection<string> protectedIds) {
             ModSyncPlan plan = new ModSyncPlan(dllPaths, pluginsRoot);
             client = DataObjects.Mods.Normalized(client);
@@ -99,6 +102,9 @@ namespace ValheimEnforcer.modules.modsync {
                     requiredOrAdmin = true;
                 } else if (TryGet(server.OptionalMods, id, out authoritative)) {
                     requiredOrAdmin = false;
+                } else if (ModManager.IsAcceptedUnlisted(id, server.OffersModDownloads)) {
+                    // The same pass ValidateModlist gives it: an offering server accepts the add-on unlisted.
+                    continue;
                 } else {
                     plan.AddDisable(id, "not allowed on this server", protectedIds);
                     continue;
@@ -208,7 +214,7 @@ namespace ValheimEnforcer.modules.modsync {
 
         private void AddDisable(string id, string reason, ICollection<string> protectedIds) {
             if (protectedIds != null && protectedIds.Contains(id)) {
-                Unfixable.Add($"{id}: ValheimEnforcer needs it, so it is not turned off");
+                Unfixable.Add($"{id}: it is needed to check or fix your mods, so it is not turned off");
                 return;
             }
             if (!dllPaths.TryGetValue(id, out string path) || !IsUnder(path, pluginsRoot)) {
@@ -254,46 +260,6 @@ namespace ValheimEnforcer.modules.modsync {
             } catch (Exception) {
                 return false;
             }
-        }
-
-        /// <summary>A path shown to the player relative to BepInEx/plugins, which is the folder they recognise.</summary>
-        internal string Shown(string path) {
-            if (IsUnder(path, pluginsRoot)) {
-                return "plugins/" + Path.GetFullPath(path).Substring(Path.GetFullPath(pluginsRoot).TrimEnd('\\', '/').Length + 1).Replace('\\', '/');
-            }
-            return Path.GetFileName(path);
-        }
-
-        /// <summary>The plan as the player reads it before agreeing to it. Unity rich text.</summary>
-        internal string Describe() {
-            StringBuilder text = new StringBuilder();
-            if (Installs.Count > 0) {
-                text.AppendLine("<color=#FFA13C>Install or update from Thunderstore:</color>");
-                foreach (PackageInstall package in Installs) {
-                    text.AppendLine($"  • {package.Owner}-{package.Name} {package.Version}");
-                    foreach (string reason in package.Reasons) { text.AppendLine($"      {reason}"); }
-                    foreach (string replaced in package.ReplacedDlls) { text.AppendLine($"      replaces {Shown(replaced)}"); }
-                }
-                text.AppendLine();
-            }
-            if (Disables.Count > 0) {
-                text.AppendLine("<color=#FFA13C>Turn off (renamed to .old, not deleted):</color>");
-                foreach (PluginDisable disable in Disables) {
-                    text.AppendLine($"  • {disable.PluginID} - {Shown(disable.DllPath)}, {disable.Reason}");
-                }
-                text.AppendLine();
-            }
-            if (Unfixable.Count > 0) {
-                text.AppendLine("<color=#FFA13C>Not fixed automatically:</color>");
-                foreach (string line in Unfixable) { text.AppendLine($"  • {line}"); }
-                text.AppendLine();
-            }
-            if (Notes.Count > 0) {
-                text.AppendLine("<color=#FFA13C>Left alone:</color>");
-                foreach (string line in Notes) { text.AppendLine($"  • {line}"); }
-                text.AppendLine();
-            }
-            return text.ToString();
         }
     }
 }

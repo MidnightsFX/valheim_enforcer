@@ -5,15 +5,14 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using UnityEngine;
-using ValheimEnforcer.modules.mods;
 
-namespace ValheimEnforcer.modules.modsync {
+namespace ValheimEnforcerModSync {
 
     /// <summary>
-    /// The native helper that applies staged mod changes after the game has exited, carried inside this DLL.
+    /// The native helper that applies staged mod changes after the game has exited, carried inside this add-on's DLL.
     ///
     /// Source and build are in tools/modsync-helper (Rust, no dependencies). It is embedded rather than shipped
-    /// as a loose file so the package layout is unchanged and the helper always matches the mod that wrote its
+    /// as a loose file so the package is a single DLL and the helper always matches the add-on that wrote its
     /// plan. Three builds: Windows x64, which also serves Proton (Valheim reports itself as Windows there and runs
     /// the helper under Wine), a static Linux x64 one, and macOS x64. Doorstop only exists for x86_64 on a Mac, so
     /// a Mac running BepInEx runs Valheim as x86_64 - under Rosetta on Apple Silicon - and an x86_64 helper runs
@@ -63,7 +62,7 @@ namespace ValheimEnforcer.modules.modsync {
                 byte[] bytes;
                 using (Stream stream = typeof(ModSyncHelper).Assembly.GetManifestResourceStream(resource)) {
                     if (stream == null) {
-                        failure = "the helper is missing from this build of the mod";
+                        failure = "the helper is missing from this build of the add-on";
                         return null;
                     }
                     using (MemoryStream copy = new MemoryStream()) {
@@ -73,7 +72,7 @@ namespace ValheimEnforcer.modules.modsync {
                 }
 
                 string hash;
-                using (SHA256 sha = SHA256.Create()) { hash = PluginHasher.ToHex(sha.ComputeHash(bytes)).Substring(0, 12); }
+                using (SHA256 sha = SHA256.Create()) { hash = PathUtil.ToHex(sha.ComputeHash(bytes)).Substring(0, 12); }
                 Directory.CreateDirectory(dir);
                 bool unix = IsLinux || IsMac;
                 string path = Path.Combine(dir, "ve-modsync-" + hash + (unix ? "" : ".exe"));

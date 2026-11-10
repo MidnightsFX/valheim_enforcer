@@ -1,0 +1,11 @@
+{
+  "name": "ValheimEnforcerModSync",
+  "description": "Lets a ValheimEnforcer server that turned you away for your mods fix them for you, with your say-so.",
+  "version_number": "1.0.0",
+  "website_url": "https://github.com/MidnightsFX/valheim_enforcer",
+  "dependencies": [
+    "denikson-BepInExPack_Valheim-5.4.2360",
+    "ValheimModding-Jotunn-2.30.2",
+    "MidnightMods-ValheimEnforcer-0.37.0"
+  ]
+}

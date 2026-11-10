@@ -29,7 +29,7 @@ namespace ValheimEnforcer
     {
         public const string PluginGUID = "MidnightsFX.ValheimEnforcer";
         public const string PluginName = "ValheimEnforcer";
-        public const string PluginVersion = "0.36.0";
+        public const string PluginVersion = "0.37.0";
 
         internal static ManualLogSource Log;
         internal ValConfig cfg;
@@ -52,8 +52,6 @@ namespace ValheimEnforcer
             // The character store's worker is a background thread and dies with the process; land anything it
             // still holds. Normally there is nothing - ZNet.Shutdown already waited for it.
             Application.quitting += CharacterStore.OnApplicationQuitting;
-            // A mod sync from the last session applied its changes after the game had exited; say what happened.
-            if (ValConfig.AllowServerModInstalls.Value) { modules.modsync.ModSync.ReportLastRun(); }
             EmbeddedResourceBundle = AssetUtils.LoadAssetBundleFromResources("ValheimEnforcer.assets.vebundle", typeof(ValheimEnforcer).Assembly);
             // Just needs to run AFTER all mods are loaded
             // For client

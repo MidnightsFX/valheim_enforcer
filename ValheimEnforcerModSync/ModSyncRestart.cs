@@ -6,7 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Text;
 
-namespace ValheimEnforcer.modules.modsync {
+namespace ValheimEnforcerModSync {
 
     /// <summary>
     /// Hands staged mod changes to the native helper (<see cref="ModSyncHelper"/>) to apply after Valheim exits.

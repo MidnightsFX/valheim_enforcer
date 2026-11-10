@@ -1,10 +1,12 @@
 using Jotunn.Managers;
 using System;
+using System.Linq;
 using System.Reflection;
 using UnityEngine;
 using UnityEngine.UI;
+using ValheimEnforcer.API;
 
-namespace ValheimEnforcer.modules.modsync {
+namespace ValheimEnforcerModSync {
 
     /// <summary>
     /// The mod sync's UI, built out of Jotunn's own connection error window so it looks like the rest of it.
@@ -14,18 +16,17 @@ namespace ValheimEnforcer.modules.modsync {
     /// and "Install and restart". The copy rather than a panel of our own: it is already styled, sized and
     /// scrollable, and the layout of the original is known (Jotunn's CompatibilityWindow prefab).
     ///
-    /// Lives on GUIManager.CustomGUIFront in the main menu only, next to the details updater, and does nothing
-    /// at all in a frame where no server has offered.
+    /// Lives on GUIManager.CustomGUIFront in the main menu only, next to ValheimEnforcer's details updater, and
+    /// does nothing at all in a frame where no server has offered.
     /// </summary>
     internal class ModSyncWindow : MonoBehaviour {
 
         private const string JotunnWindowName = "CompatibilityWindow(Clone)";
         private const string FixButtonName = "VE Fix Mods Button";
-        private const string ConfigFileName = "MidnightsFX.ValheimEnforcer.cfg";
 
         // The Jotunn window the button was added to, so each window gets exactly one.
         private GameObject handledWindow;
-        private ModSyncPlan plan;
+        private PlanInfo plan;
 
         private GameObject dialog;
         private Text body;
@@ -39,14 +40,14 @@ namespace ValheimEnforcer.modules.modsync {
         private float restartAt = -1f;
 
         public void Update() {
-            if (!ModSync.HasOffer && dialog == null) { return; }
+            if (!ModSyncApi.HasOffer && dialog == null) { return; }
             if (GUIManager.CustomGUIFront == null) { return; }
 
-            if (ModSync.HasOffer) {
+            if (ModSyncApi.HasOffer) {
                 Transform window = GUIManager.CustomGUIFront.transform.Find(JotunnWindowName);
                 if (window != null && window.gameObject != handledWindow) {
                     handledWindow = window.gameObject;
-                    plan = ModSync.BuildPlan();
+                    plan = ModSyncApi.BuildPlan();
                     if (plan != null && plan.HasWork) {
                         AddFixButton(window);
                     } else if (plan != null && plan.Unfixable.Count > 0) {
@@ -135,16 +136,16 @@ namespace ValheimEnforcer.modules.modsync {
         private string Compose() {
             string text = "<color=#FFA13C>This server can fix your mods</color>\n"
                 + "Every package comes from thunderstore.io, at the exact version this server pinned, and is checked against the file hashes the server recorded before anything is installed.\n\n"
-                + plan.Describe();
+                + PlanText.Describe(plan);
 
             if (!ModSync.CanInstallHere) {
                 return text + "Installing mods for you is not available on this system. Use the list above to fix them by hand.";
             }
             if (!ModSync.PlayerAllowsInstalls) {
-                return text + $"To let a server install mods for you, set AllowServerModInstalls = true under [Client config] in BepInEx/config/{ConfigFileName}, then restart Valheim and join again. Until then, use the list above to fix them by hand.";
+                return text + $"To let a server install mods for you, set AllowServerModInstalls = true under [Client config] in BepInEx/config/{ValheimEnforcerModSync.ConfigFileName}, then restart Valheim and join again. Until then, use the list above to fix them by hand.";
             }
-            string rejoin = ModSync.RejoinAddress != null
-                ? $" and rejoins {ModSync.RejoinAddress}"
+            string rejoin = ModSyncApi.RejoinAddress != null
+                ? $" and rejoins {ModSyncApi.RejoinAddress}"
                 : ". Join the server again from the server list";
             return text + $"When you continue, the packages are downloaded and checked first. Then Valheim closes, the changes are applied, and it starts again{rejoin}. Anything replaced is moved to BepInEx/cache/ValheimEnforcer/modsync/replaced.";
         }

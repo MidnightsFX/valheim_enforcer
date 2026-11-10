@@ -6,7 +6,7 @@ Both sides need ValheimEnforcer installed, but only the **server's** copy decide
 
 - [Mod List](#mod-list) — the four lists, the file format, what is kept up to date for you
 - [Mod File Verification](#mod-file-verification) — SHA256 checks that catch a recompiled mod
-- [Mod Downloads](#mod-downloads) — letting a refused player fix their mods from Thunderstore
+- [Mod Downloads](#mod-downloads) — letting a refused player fix their mods from Thunderstore, with the mod sync add-on
 - [Patchers](#patchers) — the DLLs that load before any plugin
 - [Attestation](#attestation) — proving a mod report was generated for this connection
 - [Admin Bypass](#admin-bypass) — testing a mod against the live server
@@ -129,7 +129,7 @@ All of these are server-side and synced to admins, so an admin can change them i
 | `HashEnforcement` | Mods | `WhenKnown` | File verification mode — see [Mod File Verification](#mod-file-verification) |
 | `RecordHashesForLoadedMods` | Mods | `true` | Records the hash of every plugin this machine loads. Needs `UpdateLoadedModsOnStartup` to reach disk |
 | `ResolveThunderstoreHashes` | Mods | `true` | Downloads and hashes mods pinned with a `thunderstorePackage`, once per pinned version. Turn it off, with `AutoFillThunderstorePackages`, if the server should make no outbound requests |
-| `OfferModDownloads` | Mods | `true` | Lets a refused player install the mods this server has pinned — see [Mod Downloads](#mod-downloads) |
+| `OfferModDownloads` | Mods | `true` | Lets a refused player who has the mod sync add-on install the mods this server has pinned, and accepts players who carry the add-on — see [Mod Downloads](#mod-downloads) |
 | `AutoFillThunderstorePackages` | Mods | `true` | Fills in `thunderstorePackage` for mods that have none — see [Mod Downloads](#mod-downloads) |
 | `ConfigPollIntervalSeconds` | Advanced | `30` | How often the file is checked for edits |
 | `HashComputeTimeoutSeconds` | Advanced | `30` | Safety valve for a stalled disk during startup hashing, not a tuning knob |
@@ -196,18 +196,24 @@ requiredMods:
 
 ## Mod Downloads
 
-On on both sides by default. A player refused for their mods can have them fixed from the connection error window instead of working through the list by hand.
+A player refused for their mods can have them fixed from the connection error window instead of working through the list by hand. ValheimEnforcer works out what the server needs; the installing is done by a separate add-on, **ValheimEnforcerModSync**, which the player installs themselves. ValheimEnforcer on its own never downloads or installs anything for a player, and a player without the add-on sees the usual list of what to change.
 
 It takes two switches, one each side, and neither is enough alone:
 
 | Setting | Where | Default | Effect |
 | --- | --- | --- | --- |
-| `OfferModDownloads` | Server, `Mods` | `true` | The server tells connecting clients they may install from its mod list |
-| `AllowServerModInstalls` | Player, `Client config` | `true` | The player agrees to let a server that offers do so. Local, never synced: it is the player's consent, not the server's |
+| `OfferModDownloads` | Server, `Mods` in `MidnightsFX.ValheimEnforcer.cfg` | `true` | The server tells connecting clients they may install from its mod list, and accepts players who carry the add-on |
+| `AllowServerModInstalls` | Player, `Client config` in `MidnightsFX.ValheimEnforcer.ModSync.cfg` | `true` | The player agrees to let a server that offers do so. Local, never synced: it is the player's consent, not the server's. Before 0.37.0 this was in ValheimEnforcer's own config |
+
+### Getting the add-on
+
+Download `ValheimEnforcerModSync-<version>.zip` from the [GitHub releases](https://github.com/MidnightsFX/valheim_enforcer/releases) (the ones tagged `ValheimEnforcerModSync-v…`). In Gale or r2modman, import the zip as a local mod into the profile you play with; by hand, copy the zip's `plugins` folder contents into `BepInEx/plugins/ValheimEnforcerModSync`. It needs ValheimEnforcer 0.37.0 or later, and keeps working across ValheimEnforcer updates until the interface the two share changes, when it logs that it needs updating and stays off.
+
+**A server that offers fixes accepts the add-on.** With `OfferModDownloads` on, a player carrying ValheimEnforcerModSync (`MidnightsFX.ValheimEnforcer.ModSync`) is not refused for it, even though it is on none of the server's lists. A server with `OfferModDownloads` off refuses it like any other unlisted mod, and says so. An entry for it in `Mods.yaml` always decides instead: list it in `optionalMods` with `acceptedHashes` to check its file, for instance. A host who runs the add-on never has it added to `requiredMods`.
 
 **The server never sends code.** Its mod list already goes to every connecting client, and for a pinned mod that list names a Thunderstore package and the file hashes the server accepts. The client downloads that exact version from `thunderstore.io` itself, checks that the plugin inside hashes to what the server recorded, and refuses the whole batch if anything does not match. So a server can only ever get a player the exact published build it checks for.
 
-When a server with `OfferModDownloads` on refuses a player, the error window gets a **Fix mods** button. It opens the plan:
+When a server with `OfferModDownloads` on refuses a player who has the add-on, the error window gets a **Fix mods** button. It opens the plan:
 
 - **Install or update** — a required mod the player is missing, or a mod whose version or file the server refuses. The player's old copy is turned off and the pinned version installed to `BepInEx/plugins/Owner-ModName`, where r2modman and Gale put it.
 - **Turn off** — a mod on none of the server's lists. It is renamed to `.old`, never deleted.
@@ -225,9 +231,9 @@ Filled-in entries are marked `packageSource: Manifest` or `packageSource: Thunde
 
 ### Things worth knowing about mod downloads
 
-- **Windows, Linux (including Proton) and macOS.** The changes are applied by a helper program that ships inside the mod — a Windows build, which Proton runs under Wine, a static Linux build and a macOS build. It waits for the game to exit, moves the files and starts the game again; it has no network access and does nothing the plan does not name. Source and build script are in `tools/modsync-helper`.
+- **Windows, Linux (including Proton) and macOS.** The changes are applied by a helper program that ships inside the add-on — a Windows build, which Proton runs under Wine, a static Linux build and a macOS build. It waits for the game to exit, moves the files and starts the game again; it has no network access and does nothing the plan does not name. Source and build script are in `tools/modsync-helper`.
 - **The Mac build is Intel (x86_64) on purpose.** BepInEx's loader only exists for x86_64 on a Mac, so modded Valheim runs as x86_64 there — under Rosetta on Apple Silicon — and the helper runs wherever the mod does. It needs macOS 10.13 or later.
-- **The game comes back the way it was started.** On Windows the same command line, so Gale's and r2modman's launch arguments come back with it. On Linux the helper reads the game's own command line, environment and working directory before it exits, because there BepInEx is loaded through environment variables a launch script set. On macOS the mod hands the helper the command line and environment, so the relaunched game gets the same loader settings.
+- **The game comes back the way it was started.** On Windows the same command line, so Gale's and r2modman's launch arguments come back with it. On Linux the helper reads the game's own command line, environment and working directory before it exits, because there BepInEx is loaded through environment variables a launch script set. On macOS the add-on hands the helper the command line and environment, so the relaunched game gets the same loader settings.
 - **Patchers and BepInEx core files are never installed.** A package containing them is refused and the player is told to use their mod manager.
 - **A mod's dependencies are not followed.** Only what is on the server's lists is installed, so a mod needing a library the server does not list will fail to load after the restart. List the library too.
 - **Mod managers are not told.** Gale and r2modman do not know about files written behind their back. A replaced mod folder still shows its old version in the manager, and a profile sync may undo the change.

@@ -1,3 +1,11 @@
+**0.37.0**
+---
+```
+- Thunderstore rules now forbid a mod installing, updating or changing other mods
+    - Enforcer no longer downloads or installs mods for players
+    - A seperate github published plugin can be used by players, servers can still offer fixes to players who have the separate mod sync add-on.
+```
+
 **0.36.0**
 ---
 ```
