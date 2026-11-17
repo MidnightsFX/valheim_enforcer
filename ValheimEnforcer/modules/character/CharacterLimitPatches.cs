@@ -55,7 +55,7 @@ namespace ValheimEnforcer.modules.character {
                               + "(path separators, '..', a colon, or control characters). Rename the character and reconnect.";
                 rpc.Invoke(RPC_NAME, reason);
                 rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorKicked);
-                rpc.GetSocket()?.Flush();
+                network.SocketFlush.IfSupported(rpc.GetSocket());
                 return false; // skip vanilla peer-info handling, exactly as vanilla's own rejections do
             }
         }
@@ -82,11 +82,10 @@ namespace ValheimEnforcer.modules.character {
                 Logger.LogWarning($"Refusing '{playerName}' from {hostId}: account character limit reached.");
                 NotifyRejection(playerName, hostId, reason);
 
-                // Reason first so it is ahead of the error in the send queue, then flush before anything tears
-                // the connection down - same reason FinalSaveRpc flushes.
+                // Reason first so it is ahead of the error in the send queue.
                 rpc.Invoke(RPC_NAME, reason);
                 rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorKicked);
-                rpc.GetSocket()?.Flush();
+                network.SocketFlush.IfSupported(rpc.GetSocket());
                 return false; // skip vanilla peer-info handling, exactly as vanilla's own rejections do
             }
         }

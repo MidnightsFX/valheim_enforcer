@@ -102,6 +102,7 @@ namespace ValheimEnforcer.modules {
             if (ValConfig.RemoveUnloadedModsFromRequired.Value) {
                 RemoveUnloadedRequiredMods();
             }
+            ClientOnlyPlugins.Apply(ModSettings);
 
             // Write out updates to the loaded mods, if enabled
             if (ValConfig.UpdateLoadedModsOnStartup.Value) {
@@ -1427,8 +1428,7 @@ namespace ValheimEnforcer.modules {
             string hostId = sender.GetSocket()?.GetHostName();
             if (!string.IsNullOrEmpty(hostId)) { RejectedHosts.Add(hostId); }
             sender.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorVersion);
-            // Push the error out before anything tears the connection down - same reason FinalSaveRpc flushes.
-            sender.GetSocket()?.Flush();
+            network.SocketFlush.IfSupported(sender.GetSocket());
         }
 
         /// <summary>

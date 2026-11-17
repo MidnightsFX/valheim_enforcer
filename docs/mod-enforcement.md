@@ -96,12 +96,13 @@ The client runs the same comparison against the server's list and shows the resu
 | The file is rewritten with all of the above | `UpdateLoadedModsOnStartup` *(on)* |
 | The previous file is copied to `Mods.yaml.bak` before each rewrite | always |
 | Edits are picked up without a restart | `ConfigPollIntervalSeconds` *(30)* |
+| Installed client-only mods the server skipped and you have not listed are added to `optionalMods` — see [Recipes](#recipes). With it off, the server logs a warning naming them instead | `AutoAddClientOnlyModsToOptional` *(on)* |
 
 Updating a mod on the server therefore needs no edit here at all — the version follows it, in whichever list you put it in.
 
 ### What you write yourself
 
-- Membership of `optionalMods`, `adminOnlyMods` and `serverOnlyMods`. Nothing is ever added to these automatically; move an entry out of `requiredMods` by hand.
+- Membership of `optionalMods`, `adminOnlyMods` and `serverOnlyMods`. Nothing is added to these automatically, apart from client-only mods when `AutoAddClientOnlyModsToOptional` is on; move an entry out of `requiredMods` by hand.
 - `enforceVersion: true`. Auto-added mods are always written with it off, so a client that is a patch version behind is not locked out of a server that never asked for exact versions.
 - `keepWhenUnloaded: true`, on any `requiredMods` entry for a mod the server does not run itself.
 - `hashEnforcement`, any `Manual` hash, and a `thunderstorePackage` for a mod the server cannot find one for itself.
@@ -124,6 +125,7 @@ All of these are server-side and synced to admins, so an admin can change them i
 | Setting | Section | Default | Effect |
 | --- | --- | --- | --- |
 | `AutoAddModsToRequired` | Mods | `true` | Adds any loaded plugin that is on no list to `requiredMods`. Turn it off to curate the file by hand — mods you have not listed are then rejected rather than adopted |
+| `AutoAddClientOnlyModsToOptional` | Mods | `true` | Adds mods installed on the server that only run in the game client to `optionalMods`, without a version, so any version is allowed and the file is not checked until you give the entry a version or a `thunderstorePackage`. A mod already on any list is left where it is |
 | `RemoveUnloadedModsFromRequired` | Mods | `true` | Removes `requiredMods` entries for mods the server does not have loaded, so a mod you uninstall from the server stops being demanded of clients. Only `requiredMods` is touched. Put `keepWhenUnloaded: true` on any entry you require but do not run yourself, rather than turning this off for everything |
 | `UpdateLoadedModsOnStartup` | Mods | `true` | Writes version corrections, auto-added mods, removed mods and recorded hashes back to the file. With it off, all of that still applies for the session but nothing is saved |
 | `HashEnforcement` | Mods | `WhenKnown` | File verification mode — see [Mod File Verification](#mod-file-verification) |
@@ -142,6 +144,8 @@ All of these are server-side and synced to admins, so an admin can change them i
 **Lock the pack to exact versions.** Set `enforceVersion: true` on every entry you care about. There is no global switch — it is per mod on purpose, so one mod that is fussy about its version does not force the whole list to be.
 
 **Let players use a client-side mod.** Move its entry from `requiredMods` to `optionalMods`, or add it there if the server does not run it. They can then connect with or without it.
+
+Some client-side mods are marked to run only in the game client, so a dedicated server skips them even when they are installed there; the BepInEx log says `Skipping [...] because of process filters (valheim.exe)`. The server never sees such a mod, so it never lands in `requiredMods`. Instead, at startup the server adds every one of these it has installed that is on none of the lists to `optionalMods`. With `AutoAddClientOnlyModsToOptional` off it only warns about them, and players who run one are refused until you list it.
 
 **Give admins a tool nobody else may run.** Put it in `adminOnlyMods`. Admins who do not want it can leave it uninstalled. If the server runs the mod too, it will already be in `requiredMods`; you can leave that entry, since `adminOnlyMods` wins, or delete it to keep the file tidy. Admin status is read from the server's admin list at connect time, so no client can claim it.
 

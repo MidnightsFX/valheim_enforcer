@@ -1,3 +1,10 @@
+**0.38.0**
+---
+```
+- Fixes an error in the server log whenever a crossplay player is refused
+- Client-only mods installed on the server are now allowed automatically
+```
+
 **0.37.0**
 ---
 ```
