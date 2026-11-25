@@ -247,7 +247,7 @@ Exemptions are deliberately independent of admin rights — an exempt account do
 - **The save holds the slot, not the player.** Delete someone's save while they still have that character locally and it counts as new again next time they join.
 - If the server cannot read its character folder at all, joins are **allowed** and a warning is logged. A disk problem should not lock out your playerbase.
 - On a player-hosted (listen) server the host never goes through the connect handshake, so the host's own account is not checked. Dedicated servers check everyone.
-- Enforcement is tied to the game's network version. If Valheim ships a new one, the rule stops applying until the mod is rebuilt against it — the check goes quiet rather than guessing at a changed wire format.
+- Enforcement is tied to the game's network version. If Valheim ships a new one, the rule stops applying until the mod is rebuilt against it rather than guessing at a changed wire format, and the server log warns once when that happens.
 
 
 ## Starter Loadouts

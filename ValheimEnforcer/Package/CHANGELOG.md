@@ -1,3 +1,12 @@
+**0.38.1**
+---
+```
+- Updated to valheim 1.0.30
+    - account character limit fixed
+    - unsafe character name check work again
+    - Importing characters now reads profiles again
+```
+
 **0.38.0**
 ---
 ```

@@ -137,6 +137,11 @@ Not yet implemented, but planned:
 
 Got a bug to report or just want to chat about the mod? Drop by the [Discord](https://discord.gg/Dmr9PQTy9m) or [GitHub](https://github.com/MidnightsFX/valheim_enforcer).
 
+<!--
+AI_Assisted_Creation: This assembly was partially or fully created with the assistance of generative AI (Claude Code, using Anthropic's Claude models).
+AI_Model_Vendor: Anthropic
+-->
+
 ---
 
 If you enjoy my mods donations are appreciated. My mods will never be paid and donations are not required.

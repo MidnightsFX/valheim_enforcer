@@ -68,9 +68,12 @@ namespace ValheimEnforcer.modules.migration {
         // rather than guessed at: a added field shifts every subsequent read, and importing a desynced parse
         // would write nonsense into a player's character save.
         private const int ProfileVersionMin = 27;  // Version.IsPlayerVersionCompatible lower bound
-        private const int ProfileVersionMax = 46;     // Version.c_PlayerVersion (Player.DeepNorth)
-        private const int PlayerDataVersionMax = 33;  // Version.c_PlayerDataVersion (PlayerData.ChunkedNorth)
-        private const int ItemDataVersionMax = 109;   // Version.c_ItemDataVersion (Item.ChunksNCheats)
+        // The three newest versions change nothing this reader walks: Player.CheatCleanSlate only flags older
+        // profiles for a backup, PlayerData.PostLaunch appends fields after the custom data, and Item.NewCheats
+        // turns the existing cheated byte into a flag byte.
+        private const int ProfileVersionMax = 47;     // Version.c_PlayerVersion (Player.CheatCleanSlate)
+        private const int PlayerDataVersionMax = 34;  // Version.c_PlayerDataVersion (PlayerData.PostLaunch)
+        private const int ItemDataVersionMax = 110;   // Version.c_ItemDataVersion (Item.NewCheats)
         private const int SkillsVersionMax = 2;
 
         // Individual layout milestones the readers below branch on, by their Version.cs names. Valheim shipped
@@ -285,9 +288,10 @@ namespace ValheimEnforcer.modules.migration {
                     string key = pkg.ReadString();
                     profile.CustomData[key] = pkg.ReadString();
                 }
-                // stamina / max eitr / eitr follow, then the build UI blob on ChunkedNorth and AbandonedDN.
-                // None of it is modelled by the character store, and nothing is read after this, so the block
-                // is left unwalked rather than skipped field by field.
+                // stamina / max eitr / eitr follow, then the build UI blob on ChunkedNorth and AbandonedDN, then
+                // the drop counters and upgrade seeds from PostLaunch. None of it is modelled by the character
+                // store, and nothing is read after this, so the block is left unwalked rather than skipped field
+                // by field.
             }
         }
 

@@ -102,9 +102,9 @@ namespace ValheimEnforcer.modules.character {
         /// The network version check is the guard against a future Valheim changing this package's layout under
         /// us. Version.c_networkVersion is a const, so it is baked in at compile time rather than read from the
         /// game at runtime - that is deliberate and is the whole point: if the wire format changes the number
-        /// changes with it, our copy no longer matches, and the rule quietly stops enforcing until the mod is
-        /// rebuilt against the new game. Reading the game's live value would defeat this and hand our old
-        /// parsing code a new layout.
+        /// changes with it, our copy no longer matches, and the rule stops enforcing until the mod is rebuilt
+        /// against the new game. Reading the game's live value would defeat this and hand our old parsing code
+        /// a new layout; the live value is only read to say so in the log.
         /// </summary>
         private static bool TryPeekPlayerName(ZPackage pkg, out string playerName) {
             playerName = null;
@@ -118,7 +118,9 @@ namespace ValheimEnforcer.modules.character {
                     || version < Version.FirstVersionWithNetworkVersion) {
                     return false;
                 }
-                if (pkg.ReadUInt() != Version.c_networkVersion) {
+                uint peerNetworkVersion = pkg.ReadUInt();
+                if (peerNetworkVersion != Version.c_networkVersion) {
+                    WarnOnceIfBuiltForAnotherGame(peerNetworkVersion);
                     return false;                                   // let vanilla report the version mismatch
                 }
                 pkg.ReadVector3();                                  // reference position
@@ -131,6 +133,29 @@ namespace ValheimEnforcer.modules.character {
             } finally {
                 pkg.SetPos(position);
             }
+        }
+
+        private static bool WarnedBuiltForAnotherGame;
+
+        /// <summary>
+        /// A peer whose network version differs from the game's is a genuinely mismatched client that vanilla
+        /// refuses straight after, so only a game whose version differs from this build's is worth a warning.
+        /// The game's value comes from its own metadata, since <c>Version.c_networkVersion</c> in this assembly
+        /// is the compiled-in copy; if it cannot be read the peer's version stands in for it.
+        /// </summary>
+        private static void WarnOnceIfBuiltForAnotherGame(uint peerNetworkVersion) {
+            if (WarnedBuiltForAnotherGame) { return; }
+            uint gameNetworkVersion = peerNetworkVersion;
+            try {
+                object raw = typeof(Version).GetField(nameof(Version.c_networkVersion))?.GetRawConstantValue();
+                if (raw is uint value) { gameNetworkVersion = value; }
+            } catch (Exception) { }
+            if (gameNetworkVersion == Version.c_networkVersion) { return; }
+
+            WarnedBuiltForAnotherGame = true;
+            Logger.LogWarning($"This build of ValheimEnforcer was made for network version {Version.c_networkVersion}, but the game "
+                            + $"uses {gameNetworkVersion}. The account character limit and the character name check are OFF "
+                            + "until the mod is rebuilt for this version of Valheim.");
         }
 
         /// <summary>
